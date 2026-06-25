@@ -230,6 +230,11 @@ int afn_clash_air_fb = 90;
 // fumble % = chance of a brief slip, fumble len = how long that slip lasts.
 // Defaults = the high-skill profile.
 int afn_clash_ai_jit = 1, afn_clash_fumble_pct = 1, afn_clash_fumble_len = 6;
+// Punish: at random moments the masher breaks into a fast pressing BURST that
+// hammers your balance — punish % = chance per press to start one, punish len =
+// how many fast presses it lasts. 0 % = off. (Beam Clash node tunables.)
+int afn_clash_punish_pct = 0, afn_clash_punish_len = 4;
+static int s_clashPunishLeft = 0;   // fast-press presses remaining in the current burst
 void afn_clash_suppress_beams(void);     // fwd (defined below) — node SuppressBeams / ClashBegin
 void afn_clash_begin(void);              // fwd — node ClashBegin
 void afn_clash_ai_step(void);            // fwd — node ClashAiStep
@@ -2683,6 +2688,7 @@ void afn_clash_suppress_beams(void) {
 void afn_clash_begin(void) {
     afn_clash_balance = 0.5f;
     s_clashAiTap = afn_clash_ai_min;             // AI's first mash press
+    s_clashPunishLeft = 0;
     s_clashPressed = 0; s_clashPressTimer = 0;
     s_pbBeamFull = s_ebBeamFull = 0; s_clashAirT = 0; afn_clash_ready = 0;
     afn_clash_suppress_beams();
@@ -2696,8 +2702,14 @@ void afn_clash_ai_step(void) {
     if (++s_clashPressTimer >= 8) { s_clashPressTimer = 0; s_clashPressed = !s_clashPressed; }
     if (--s_clashAiTap <= 0) {
         afn_clash_balance -= afn_clash_ai_push_m * 0.001f;
-        s_clashAiTap = afn_clash_ai_min + (int)(ai_rand01() * afn_clash_ai_jit);
-        if (ai_chance(afn_clash_fumble_pct * 0.01f)) s_clashAiTap += afn_clash_fumble_len;
+        if (s_clashPunishLeft > 0) {                 // mid punish burst: hammer fast
+            s_clashPunishLeft--;
+            s_clashAiTap = 3;
+        } else {
+            s_clashAiTap = afn_clash_ai_min + (int)(ai_rand01() * afn_clash_ai_jit);
+            if (ai_chance(afn_clash_fumble_pct * 0.01f)) s_clashAiTap += afn_clash_fumble_len;
+            else if (ai_chance(afn_clash_punish_pct * 0.01f)) s_clashPunishLeft = afn_clash_punish_len;  // random punish burst
+        }
     }
     if (afn_clash_balance < 0.0f) afn_clash_balance = 0.0f;
     if (afn_clash_balance > 1.0f) afn_clash_balance = 1.0f;

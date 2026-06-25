@@ -1257,7 +1257,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Hud Visible",  0xFF885533, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
     { "Stop Music",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Loop Hud Anim",   0xFF3355AA, 1, 1, 1, 0, {"Element"}, {}, {} },
-    { "Beam Clash",      0xFFAA4422, 1, 1, 10, 0, {"Full Charge %", "Player Push", "AI Push", "AI Interval", "Meet Radius", "Clash Dmg %", "Air Fallback", "AI Jitter", "AI Fumble %", "AI Fumble Len"}, {}, {} },
+    { "Beam Clash",      0xFFAA4422, 1, 1, 12, 0, {"Full Charge %", "Player Push", "AI Push", "AI Interval", "Meet Radius", "Clash Dmg %", "Air Fallback", "AI Jitter", "AI Fumble %", "AI Fumble Len", "AI Punish %", "AI Punish Len"}, {}, {} },
     { "Is Clash Ready",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Suppress Beams",  0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
     { "Clash Begin",     0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
@@ -1595,7 +1595,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
     case VsNodeType::IsClashWon: desc = "Gate: passes when the clash balance is pushed fully to the enemy (>= 1.0). Use to resolve a win: hide the clash HUD, stop the struggle/mash SFX, play win_clash, and Set HP(enemy, 0)."; break;
     case VsNodeType::IsClashLost: desc = "Gate: passes when the clash balance is pushed fully into the player's zone (<= 0.0). Use to resolve a loss: hide the clash HUD, stop the SFX, play win_clash, and Set Health(0)."; break;
-    case VsNodeType::BeamClash: desc = "Enables the beam-clash mechanic and sets its feel tunables (drive from On Update). When both sides' FULL-charge beams meet, the runtime raises the 2D mash struggle; Cross taps push the balance toward the enemy (Player Push/1000 each) while the AI drains it (AI Push/1000 every ~AI Interval frames). Full Charge % sets the charge threshold, Meet Radius the collision distance. Air Fallback (default 90) = frames before a clash fires even if the beams never MEET (so it doesn't fizzle); set 0 to require a real meet within Meet Radius (stops far-apart clashes). AI Jitter (0 = dead-steady cadence, higher = more random/human), AI Fumble % (chance the masher briefly slips), AI Fumble Len (how long a slip lasts) — together these set the masher's SKILL: low jitter + low fumble = a relentless high-skill CPU; raise them for a sloppier, more beatable one (defaults 1/1/6 = high skill). Clash Dmg % (default 150) is how much of the WINNER's full attack the loser takes on resolve — 1.5x by default, so a clash can't one-shot a full-HP fighter (applied by Clash Hit Enemy / Clash Hit Player). Balance to 1 = you win (enemy takes the hit), to 0 = you lose; a resolve that drops HP to 0 still flows into the KO/death cinematic + results menu. Delete the node to disable clashing. Defaults: 85/60/50/6/18/150."; break;
+    case VsNodeType::BeamClash: desc = "Enables the beam-clash mechanic and sets its feel tunables (drive from On Update). When both sides' FULL-charge beams meet, the runtime raises the 2D mash struggle; Cross taps push the balance toward the enemy (Player Push/1000 each) while the AI drains it (AI Push/1000 every ~AI Interval frames). Full Charge % sets the charge threshold, Meet Radius the collision distance. Air Fallback (default 90) = frames before a clash fires even if the beams never MEET (so it doesn't fizzle); set 0 to require a real meet within Meet Radius (stops far-apart clashes). AI Jitter (0 = dead-steady cadence, higher = more random/human), AI Fumble % (chance the masher briefly slips), AI Fumble Len (how long a slip lasts) — together these set the masher's SKILL: low jitter + low fumble = a relentless high-skill CPU; raise them for a sloppier, more beatable one (defaults 1/1/6 = high skill). AI Punish % is the chance per press the masher instead breaks into a sudden BURST of AI Punish Len fast presses (every 3 frames) — a random punish that hammers your balance and forces you to mash back hard (0 = off). Clash Dmg % (default 150) is how much of the WINNER's full attack the loser takes on resolve — 1.5x by default, so a clash can't one-shot a full-HP fighter (applied by Clash Hit Enemy / Clash Hit Player). Balance to 1 = you win (enemy takes the hit), to 0 = you lose; a resolve that drops HP to 0 still flows into the KO/death cinematic + results menu. Delete the node to disable clashing. Defaults: 85/60/50/6/18/150."; break;
     case VsNodeType::ClashHitEnemy: desc = "Clash win: deals Clash Dmg % (Beam Clash node, default 150 = 1.5x) of the player's full Focus Blast damage to the wired Object — instead of an instant KO, so a clash can't one-shot a full-HP enemy. If it brings HP to 0, the normal Is HP Zero -> KO cinematic + results menu fires."; break;
     case VsNodeType::ClashHitPlayer: desc = "Clash loss: deals Clash Dmg % (default 150 = 1.5x) of the enemy's full charge damage to the player. If health reaches 0, the Is Health Zero -> death cinematic + results menu fires."; break;
     case VsNodeType::StopMusic: desc = "Stops ONLY the persistent music track (battle music), leaving one-shot SFX ringing. Differs from Stop Sound (kills SFX, keeps music) and Stop All (kills both). Use on a win/lose so a clash 'win_clash' SFX survives under the victory fanfare."; break;
@@ -24815,14 +24815,17 @@ void FrameTick(float dt)
                         "    afn_clash_meet_r = <Meet Radius>; afn_clash_dmg_pct = <Clash Dmg %>;\n"
                         "    afn_clash_air_fb = <Air Fallback>;   // frames before a no-meet clash; 0 = only real meets\n"
                         "    afn_clash_ai_jit = <AI Jitter>; afn_clash_fumble_pct = <AI Fumble %>; afn_clash_fumble_len = <AI Fumble Len>; // masher skill\n"
+                        "    afn_clash_punish_pct = <AI Punish %>; afn_clash_punish_len = <AI Punish Len>; // random fast-press burst\n"
                         "    // --- Runtime (psv main.c clash_tick) ---\n"
                         "    // Gated by afn_clash_enabled. When the player's AND enemy's FULL-charge\n"
                         "    // beams (>= Full Charge % of max) are both airborne and meet (within\n"
                         "    // Meet Radius), it suppresses both, raises the 2D struggle (clash + mash\n"
                         "    // HUD), and runs the mash: your Cross taps add Player Push/1000 to the\n"
-                        "    // balance, the AI drains AI Push/1000 every ~AI Interval frames. Balance\n"
-                        "    // to 1.0 -> enemy KO; to 0.0 -> afn_health=0. Both resolve into the\n"
-                        "    // node results menu (Is HP Zero / Is Health Zero).");
+                        "    // balance, the AI drains AI Push/1000 every ~AI Interval frames. Each\n"
+                        "    // press: AI Fumble % -> a long pause (AI Fumble Len), OR AI Punish %\n"
+                        "    // -> a burst of AI Punish Len fast presses (every 3 frames) that hammers\n"
+                        "    // your balance at random moments. Balance to 1.0 -> enemy KO; to 0.0 ->\n"
+                        "    // afn_health=0. Both resolve into the node results menu (Is HP Zero / Is Health Zero).");
                     break;
                 }
                 case VsNodeType::StopMusic: {
