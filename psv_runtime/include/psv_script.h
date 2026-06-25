@@ -3,6 +3,7 @@
 #define AFN_HAS_SCRIPT 1
 static int afn_rise_20 = -2;
 static int afn_rise_42 = -2;
+static int afn_rise_74 = -2;
 static int afn_rise_248 = -2;
 static int afn_rise_303 = -2;
 static int afn_rise_347 = -2;
@@ -290,7 +291,7 @@ static void afn_bp0_update(void) {
     }
     afn_clash_enabled = 1;
     afn_clash_full_pct = 85; afn_clash_push_m = 60; afn_clash_ai_push_m = 50;
-    afn_clash_ai_min = 6; afn_clash_meet_r = 18;
+    afn_clash_ai_min = 6; afn_clash_meet_r = 18; afn_clash_dmg_pct = 150; afn_clash_air_fb = 0;
     if (afn_clash_ready) {
     if (afn_rise_409 >= afn_frame_count - 1) { afn_rise_409 = afn_frame_count; }
     else { afn_rise_409 = afn_frame_count;
@@ -353,7 +354,7 @@ static void afn_bp0_update(void) {
     afn_stop_sfx_sample(11);
     afn_stop_sfx_sample(14);
     afn_play_sfx(13, 0, 0);
-    if (3 >= 0) afn_hp[3] = (0);
+    if ((3) >= 0) { afn_hp[3] -= (afn_fb_dmg_max * afn_clash_dmg_pct) / 100; if (afn_hp[3] < 0) afn_hp[3] = 0; }
     }
     }
     if (afn_hud_visible[12]) {
@@ -367,8 +368,7 @@ static void afn_bp0_update(void) {
     afn_stop_sfx_sample(11);
     afn_stop_sfx_sample(14);
     afn_play_sfx(13, 0, 0);
-    afn_health = (0);
-    if (afn_health < 0) afn_health = 0; if (afn_health > afn_health_max) afn_health = afn_health_max;
+    afn_health -= (ENEMY_CHG_DMG * afn_clash_dmg_pct) / 100; if (afn_health < 0) afn_health = 0;
     }
     }
     afn_cam_orbit_timer++;   // advance the node-driven orbit
@@ -480,6 +480,10 @@ static void afn_bp0_key_held(void) {
     }
     }
     }
+    if (key_is_down(KEY_X)) {
+        afn_key_mag = 256;
+    afn_player_blocking = 1; afn_block_energy = 20;
+    }
 }
 static void afn_bp0_key_pressed(void) {
     if (key_hit(KEY_START)) {
@@ -496,7 +500,7 @@ static void afn_bp0_key_pressed(void) {
         afn_key_mag = 256;
     if (!afn_fb_charging) {
 #ifdef AFN_HAS_PLAYER_RIG
-    if (afn_dodge_cd <= 0 && afn_energy >= 5) {
+    if (afn_dodge_cd <= 0 && afn_energy >= 15) {
         afn_dodge_speed = 50;
         afn_dodge_frames = 20;
         afn_dodge_clip_l = 25;
@@ -508,13 +512,13 @@ static void afn_bp0_key_pressed(void) {
         afn_dodge_falloff = 12;
         afn_dodge_cd = 35;
         afn_dodge_trigger = 1;
-        afn_energy -= 5; if (afn_energy < 0) afn_energy = 0; // dodge cost
+        afn_energy -= 15; if (afn_energy < 0) afn_energy = 0; // dodge cost
     }
 #endif
     }
     if (afn_fb_charging) {
 #ifdef AFN_HAS_PLAYER_RIG
-    if (afn_dodge_cd <= 0 && afn_energy >= 5) {
+    if (afn_dodge_cd <= 0 && afn_energy >= 15) {
         afn_dodge_speed = 50;
         afn_dodge_frames = 20;
         afn_dodge_clip_l = 7;
@@ -526,7 +530,7 @@ static void afn_bp0_key_pressed(void) {
         afn_dodge_falloff = 12;
         afn_dodge_cd = 35;
         afn_dodge_trigger = 1;
-        afn_energy -= 5; if (afn_energy < 0) afn_energy = 0; // dodge cost
+        afn_energy -= 15; if (afn_energy < 0) afn_energy = 0; // dodge cost
     }
 #endif
     }
@@ -629,7 +633,8 @@ static void afn_bp0_key_released(void) {
 #ifdef AFN_HAS_PLAYER_RIG
     afn_fb_fire_req = 1;
     afn_fb_dmg_max  = 30;
-    afn_fb_speed    = 6;
+    afn_fb_speed    = 25 / 10.0f;
+    afn_fb_hit_r    = 4; afn_fb_homing = 12 / 100.0f; afn_fb_circle = 0;
 #ifdef AFN_HAS_CAM_LOCK
     afn_fb_tgt      = afn_cam_lock_target;
 #else
@@ -647,6 +652,10 @@ static void afn_bp0_key_released(void) {
     }
     }
     }
+    }
+    if (key_released(KEY_X)) {
+        afn_key_mag = 256;
+    afn_player_blocking = 0;
     }
 }
 static void afn_bp0_collision(void) {
@@ -677,8 +686,10 @@ static void afn_bp1_update(void) {
     afn_ai_enabled = 1;
     afn_ai_detect_r = 60; afn_ai_lose_r = 95; afn_ai_pref_r = 22;
     afn_ai_atkcd = 80; afn_ai_chargeprob = 40; afn_ai_dodgeprob = 70; afn_ai_movespd_m = 800;
+    afn_ai_dodge_trig = 24; afn_ai_block_prob = 30; afn_block_pct = 20;
+    afn_ai_chg_speed_t = 20; afn_ai_tap_speed_t = 25;
     afn_ai_sense();
-    if (afn_ai_dodge_ready) {
+    if (afn_ai_blast_incoming()) {
     if (afn_rise_42 >= afn_frame_count - 1) { afn_rise_42 = afn_frame_count; }
     else { afn_rise_42 = afn_frame_count;
     afn_ai_dodge_begin();
@@ -725,6 +736,19 @@ static void afn_bp1_update(void) {
     }
     if (afn_ai_lose_ready) {
     afn_ai_state = 0;
+    }
+    if (afn_ai_blast_block()) {
+    if (afn_rise_74 >= afn_frame_count - 1) { afn_rise_74 = afn_frame_count; }
+    else { afn_rise_74 = afn_frame_count;
+    afn_ai_block_begin();
+    afn_ai_state = 7;
+    }
+    }
+    if (afn_ai_state == 7) {
+    afn_ai_block_step();
+    if (afn_ai_block_done) {
+    afn_ai_state = 2;
+    }
     }
 }
 static void afn_bp1_key_held(void) {

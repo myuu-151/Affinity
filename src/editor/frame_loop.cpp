@@ -885,6 +885,13 @@ enum class VsNodeType : int {
     StepEnemyBeam,   // action: advance the enemy's in-flight projectile (flight + hit)
     StepFocusBlast,  // action: advance the player's in-flight Focus Blast (flight + hit)
     ShowHPBar,       // action: raise the floating HP bar for an object this frame
+    IsBlastIncoming, // gate: a player Focus Blast is within the enemy's dodge range (+chance)
+    ClashHitEnemy,   // action: clash win -> deal Clash Dmg % of the player's full attack to an object
+    ClashHitPlayer,  // action: clash loss -> deal Clash Dmg % of the enemy's full attack to the player
+    SetBlock,        // action: set the player's blocking flag (1 while guarding -> incoming dmg reduced)
+    ShouldAiBlock,   // gate: a blast is incoming and the AI rolls to BLOCK (vs dodge)
+    AiBlockBegin,    // action: enemy raises its guard (block clip) for a window
+    AiBlockStep,     // action: hold the enemy block stance; flags done at the end
     COUNT
 };
 
@@ -1222,7 +1229,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Not Landing",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Charge Shot",     0xFF3355AA, 1, 1, 3, 0, {"Max Charge (int)","Min Scale% (int)","Max Scale% (int)"}, {}, {} },
     { "Is Charging",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
-    { "Fire Charge Shot",0xFF3355AA, 1, 1, 2, 0, {"Damage (int)","Speed (int)"}, {}, {} },
+    { "Fire Charge Shot",0xFF3355AA, 1, 1, 5, 0, {"Damage (int)","Speed (int)","Hit Radius","Homing %","Circle Home"}, {}, {} },
     { "Is Firing",       0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is False",        0xFF885533, 1, 1, 1, 0, {"Condition"}, {}, {} },
     { "Switch on Int",   0xFF885533, 1, 5, 1, 0, {"Value"}, {}, {"= 0","= 1","= 2","= 3","Default"} },
@@ -1250,7 +1257,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Hud Visible",  0xFF885533, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
     { "Stop Music",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Loop Hud Anim",   0xFF3355AA, 1, 1, 1, 0, {"Element"}, {}, {} },
-    { "Beam Clash",      0xFFAA4422, 1, 1, 5, 0, {"Full Charge %", "Player Push", "AI Push", "AI Interval", "Meet Radius"}, {}, {} },
+    { "Beam Clash",      0xFFAA4422, 1, 1, 7, 0, {"Full Charge %", "Player Push", "AI Push", "AI Interval", "Meet Radius", "Clash Dmg %", "Air Fallback"}, {}, {} },
     { "Is Clash Ready",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Suppress Beams",  0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
     { "Clash Begin",     0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
@@ -1273,12 +1280,19 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "AI Charge Step",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Fire Beam",    0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Fire Recover", 0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
-    { "Enemy AI",        0xFF55AA66, 1, 1, 7, 0, {"Detect Range", "Lose Range", "Pref Dist", "Atk Cooldown", "Charge %", "Dodge %", "Move Speed"}, {}, {} },
+    { "Enemy AI",        0xFF55AA66, 1, 1, 12, 0, {"Detect Range", "Lose Range", "Pref Dist", "Atk Cooldown", "Charge %", "Dodge %", "Move Speed", "Dodge Range", "Block %", "Block Dmg %", "Charge Speed", "Tap Speed"}, {}, {} },
     { "Orbit Cam Step",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Stop Orbit Cam",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Step Enemy Beam", 0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
     { "Step Focus Blast",0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
     { "Show HP Bar",     0xFF3355AA, 1, 1, 2, 0, {"Object", "Max HP"}, {}, {} },
+    { "Is Blast Incoming",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Clash Hit Enemy", 0xFFAA4422, 1, 1, 1, 0, {"Object"}, {}, {} },
+    { "Clash Hit Player",0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Block",       0xFF55AA66, 1, 1, 2, 0, {"On (0/1)", "Energy Cost"}, {}, {} },
+    { "Should AI Block", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Block Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Block Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1550,7 +1564,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
     case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
     case VsNodeType::IsNotCharging: desc = "Gate (PSV): passes exec only while NO Charge Shot is charging — the inverse of Is Charging. Pair them off one On Key Pressed to fork an action: Is Not Charging -> normal move/dodge, Is Charging -> the charge-variant. Keeps the two mutually exclusive (e.g. so a charge-dodge and a normal dodge don't fight over the same cooldown)."; break;
-    case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
+    case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile speed in TENTHS of px/frame (25 = 2.5, default 60 = 6.0); Hit Radius = connect slop (smaller = must be closer); Homing %% = how hard it curves toward the target while the target is AHEAD (12 default; a dodge still clears it because of Circle Home); Circle Home (0/1) = with 0 (default) it stops homing + flies straight once the target is behind, so it never turns around to chase a dodge. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
     case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
     case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
     case VsNodeType::IsClashReady: desc = "Gate: passes exec while the runtime senses a clash is ready (both sides' full-charge beams airborne and meeting). Pair with On Rise to fire the start sequence once: On Update -> Is Clash Ready -> On Rise -> Clash Begin + Show HUD + Play Sound + Freeze Player."; break;
@@ -1558,10 +1572,11 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::ClashBegin: desc = "Starts a clash: centres the balance (0.5), resets the AI press timer + button flash, and suppresses the beams. Fire ONCE on the On Rise of Is Clash Ready."; break;
     case VsNodeType::ClashPush: desc = "The player's Cross tap pushes the clash balance toward the enemy by Player Push/1000 (the Beam Clash tunable). Wire from On Key Pressed(Cross) -> Is Hud Visible(clash) so it only counts during the struggle."; break;
     case VsNodeType::ClashAiStep: desc = "One struggle step: the mid-skilled-human AI mashes back (drains the balance on a jittered interval with occasional fumbles), clamps the balance to [0,1], keeps the mash SFX looping + pitched by the balance, and cycles the Cross button flash. Drive every frame while the clash HUD is visible."; break;
-    case VsNodeType::IsAiState: desc = "Gate: passes while the enemy AI state == State (0 Roam, 1 Chase, 2 Strafe, 3 Charge, 4 Fire, 5 Dodge, 6 Dead). Wire an Int into State. Dispatch each state's action node under it."; break;
+    case VsNodeType::IsAiState: desc = "Gate: passes while the enemy AI state == State (0 Roam, 1 Chase, 2 Strafe, 3 Charge, 4 Fire, 5 Dodge, 6 Dead, 7 Block). Wire an Int into State. Dispatch each state's action node under it."; break;
     case VsNodeType::IsPlayerWithin: desc = "Gate: passes while the distance from the enemy to the player is <= Range (world px). AI Sense computes the distance each frame. Use for detection (Range = Detect) and chase-reached (Range = Pref+30)."; break;
     case VsNodeType::IsPlayerBeyond: desc = "Gate: passes while the distance to the player is > Range (world px). Pair with the lose-timer / Is AI Flag(lose_ready) for de-aggro."; break;
-    case VsNodeType::IsAiFlag: desc = "Gate: passes while an enemy-AI per-frame flag is set. Flag: 0 lose_ready, 1 dodge_ready, 2 can_fire, 3 charge_done, 4 dodge_done, 5 fire_done, 6 reached. AI Sense and the step nodes set these. Wire an Int into Flag."; break;
+    case VsNodeType::IsAiFlag: desc = "Gate: passes while an enemy-AI per-frame flag is set. Flag: 0 lose_ready, 1 dodge_ready, 2 can_fire, 3 charge_done, 4 dodge_done, 5 fire_done, 6 reached, 7 block_done. AI Sense and the step nodes set these. Wire an Int into Flag."; break;
+    case VsNodeType::IsBlastIncoming: desc = "Gate: passes when a player Focus Blast (homing or forward) is within the enemy's Dodge Range and the Dodge % chance rolls true (and it isn't already dodging / on cooldown). The dodge decision, now in the graph. Wire: AI Sense -> Is Blast Incoming -> On Rise -> AI Dodge Begin + Set AI State(Dodge)."; break;
     case VsNodeType::SetAiState: desc = "Sets the enemy AI state (0 Roam..6 Dead), which decides what Is AI State dispatches. The transition actions of the state machine."; break;
     case VsNodeType::AiSense: desc = "Per-frame enemy sense: caches the enemy slot, handles death (-> Dead, KO cinematic via the BP), computes distance to the player, faces the player, ticks cooldowns, and sets the gate flags (lose/dodge/can-fire). Run it FIRST each frame: On Update -> AI Sense -> the state dispatch. Frozen during a beam clash."; break;
     case VsNodeType::AiRoam: desc = "ROAM action: picks walk/idle clip while the navmesh drives the wander motion. Run under Is AI State(Roam)."; break;
@@ -1573,10 +1588,16 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AiChargeStep: desc = "Holds the charge pose and grows the orb at the muzzle bone; sets 'charge_done' when the wind-up elapses. Run under Is AI State(Charge); on charge_done -> AI Fire Beam + Set AI State(Fire)."; break;
     case VsNodeType::AiFireBeam: desc = "Launches the enemy projectile from the muzzle toward the player (sets damage/speed/homing and the full-beam flag for clashes), and starts the recovery + attack cooldown."; break;
     case VsNodeType::AiFireRecover: desc = "Holds the launch clip and sets 'fire_done' when the recovery timer elapses. Run under Is AI State(Fire); on fire_done -> Set AI State(Strafe)."; break;
-    case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800."; break;
+    case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000), Dodge Range (px from an incoming blast — homing OR forward — at which it reacts), Block % (chance to block instead of dodge an incoming blast), Block Dmg % (damage taken while blocking — 20 = take 20%; applies to BOTH the enemy and your block), Charge Speed + Tap Speed (the enemy's projectile launch speeds in TENTHS of px/frame, like your Fire Charge Shot — 20 = 2.0 full charge, 25 = 2.5 tap). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800/24/30/20/20/25."; break;
+    case VsNodeType::SetBlock: desc = "Sets the player's blocking flag (On 0/1). While 1, an incoming enemy hit is reduced to Block Dmg % (default 20) and the player spends Energy Cost energy per BLOCKED HIT (not per press — block freely, only pay when a hit actually lands). Wire On Key Held(Block) -> Set Block(1, cost) and On Key Released -> Set Block(0), next to your block clip."; break;
+    case VsNodeType::ShouldAiBlock: desc = "Gate: passes when a player blast is incoming (within Dodge Range) and the Block % chance rolls true — and the AI isn't already dodging/blocking. The AI dodges OR blocks. Wire: AI Sense -> Should AI Block -> On Rise -> AI Block Begin + Set AI State(Block)."; break;
+    case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
+    case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
     case VsNodeType::IsClashWon: desc = "Gate: passes when the clash balance is pushed fully to the enemy (>= 1.0). Use to resolve a win: hide the clash HUD, stop the struggle/mash SFX, play win_clash, and Set HP(enemy, 0)."; break;
     case VsNodeType::IsClashLost: desc = "Gate: passes when the clash balance is pushed fully into the player's zone (<= 0.0). Use to resolve a loss: hide the clash HUD, stop the SFX, play win_clash, and Set Health(0)."; break;
-    case VsNodeType::BeamClash: desc = "Enables the beam-clash mechanic and sets its feel tunables (drive from On Update). When both sides' FULL-charge beams meet, the runtime raises the 2D mash struggle; Cross taps push the balance toward the enemy (Player Push/1000 each) while the AI drains it (AI Push/1000 every ~AI Interval frames). Full Charge % sets the charge threshold, Meet Radius the collision distance. Balance to 1 = enemy KO, to 0 = player death — both flow into the node results menu. Delete the node to disable clashing. Defaults: 85/60/50/6/18."; break;
+    case VsNodeType::BeamClash: desc = "Enables the beam-clash mechanic and sets its feel tunables (drive from On Update). When both sides' FULL-charge beams meet, the runtime raises the 2D mash struggle; Cross taps push the balance toward the enemy (Player Push/1000 each) while the AI drains it (AI Push/1000 every ~AI Interval frames). Full Charge % sets the charge threshold, Meet Radius the collision distance. Air Fallback (default 90) = frames before a clash fires even if the beams never MEET (so it doesn't fizzle); set 0 to require a real meet within Meet Radius (stops far-apart clashes). Clash Dmg % (default 150) is how much of the WINNER's full attack the loser takes on resolve — 1.5x by default, so a clash can't one-shot a full-HP fighter (applied by Clash Hit Enemy / Clash Hit Player). Balance to 1 = you win (enemy takes the hit), to 0 = you lose; a resolve that drops HP to 0 still flows into the KO/death cinematic + results menu. Delete the node to disable clashing. Defaults: 85/60/50/6/18/150."; break;
+    case VsNodeType::ClashHitEnemy: desc = "Clash win: deals Clash Dmg % (Beam Clash node, default 150 = 1.5x) of the player's full Focus Blast damage to the wired Object — instead of an instant KO, so a clash can't one-shot a full-HP enemy. If it brings HP to 0, the normal Is HP Zero -> KO cinematic + results menu fires."; break;
+    case VsNodeType::ClashHitPlayer: desc = "Clash loss: deals Clash Dmg % (default 150 = 1.5x) of the enemy's full charge damage to the player. If health reaches 0, the Is Health Zero -> death cinematic + results menu fires."; break;
     case VsNodeType::StopMusic: desc = "Stops ONLY the persistent music track (battle music), leaving one-shot SFX ringing. Differs from Stop Sound (kills SFX, keeps music) and Stop All (kills both). Use on a win/lose so a clash 'win_clash' SFX survives under the victory fanfare."; break;
     case VsNodeType::LoopHudAnim: desc = "Keeps a HUD element's anim layers active and looping — re-arms them and rewinds once they pass their length, so a layer that wasn't authored with Loop still blinks continuously. Drive it every frame: On Update -> Is Hud Visible(menu) -> Loop Hud Anim(cursor element)."; break;
     case VsNodeType::IsHudVisible: desc = "Gate: passes exec only while the given HUD element slot is visible (afn_hud_visible[slot]). Use it to scope a menu's cursor-nav/confirm chain to the frames the menu is actually on screen — e.g. On Update -> Is Hud Visible(menu) -> On Key Pressed(Cross) -> Change Scene."; break;
@@ -23258,7 +23279,7 @@ void FrameTick(float dt)
                 case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
                 case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
     case VsNodeType::IsNotCharging: desc = "Gate (PSV): passes exec only while NO Charge Shot is charging — the inverse of Is Charging. Pair them off one On Key Pressed to fork an action: Is Not Charging -> normal move/dodge, Is Charging -> the charge-variant. Keeps the two mutually exclusive (e.g. so a charge-dodge and a normal dodge don't fight over the same cooldown)."; break;
-                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air) behind Is Firing so the launch pose holds."; break;
+                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile speed in TENTHS of px/frame (25 = 2.5, default 60 = 6.0); Hit Radius = connect slop (smaller = must be closer); Homing %% = how hard it curves toward the target while the target is AHEAD (12 default; a dodge still clears it because of Circle Home); Circle Home (0/1) = with 0 (default) it stops homing + flies straight once the target is behind, so it never turns around to chase a dodge. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air) behind Is Firing so the launch pose holds."; break;
                 case VsNodeType::IsFiring:      desc = "Gate (PSV): passes exec for a short window (~0.5s / 30 frames) right after a Charge Shot is fired — the mirror of Is Charging for the launch side. Without it the launch anim only flashes for one frame because Fire Charge Shot runs once on release. Wire On Update -> Is Firing -> Is On Ground -> Play(atk_spc_lnc), and behind Is Airborne use atk_spc_lnc_air, so the launch pose holds while the blast leaves."; break;
                 case VsNodeType::IsFalse:       desc = "Gate: passes exec only when the Condition data input is ZERO — the inverse of Is True ('if not'). Wire a boolean expression into Condition: Compare, And/Or/Not, Get HP, Get Flag, Is Key Down, Get Player X/Y/Z, etc. Example: Get Flag(3) -> Is False -> (runs while flag 3 is clear)."; break;
                 case VsNodeType::SwitchInt:     desc = "Routes exec to one of five outputs by an integer Value: '= 0'..'= 3' fire when Value equals that case, 'Default' fires for anything else. Great for state machines: Get Variable/Get State -> Switch on Int -> per-state branches. Feed Value from any data expression (Get*, Compare, math)."; break;
@@ -24640,6 +24661,54 @@ void FrameTick(float dt)
                         "    // 5 fire_done 6 reached. AI Sense / the step nodes set these each frame.");
                     break;
                 }
+                case VsNodeType::SetBlock: {
+                    editorCode = "// Set the player's blocking flag (1 while guarding -> incoming dmg reduced)";
+                    setActionFunc(infoNode, "_set_block",
+                        "    afn_player_blocking = <On (0/1)>; afn_block_energy = <Energy Cost>;\n"
+                        "    // --- Runtime (psv main.c, enemy beam hit) ---\n"
+                        "    // While 1, an incoming enemy hit is reduced to Block Dmg %% (default 20)\n"
+                        "    // AND the player spends Energy Cost energy per BLOCKED HIT (not per press).\n"
+                        "    // Wire On Key Held(Block) -> Set Block(1, cost) and On Key Released ->\n"
+                        "    // Set Block(0) next to your block clip.");
+                    break;
+                }
+                case VsNodeType::ShouldAiBlock: {
+                    editorCode = "// Gate: a blast is incoming and the AI rolls to BLOCK (vs dodge)";
+                    setActionFunc(infoNode, "_should_ai_block",
+                        "    if (afn_ai_blast_block()) { /* downstream */ }\n"
+                        "    // --- Runtime ---\n"
+                        "    // Like Is Blast Incoming but rolls Block %% instead of Dodge %% (and only\n"
+                        "    // when not already dodging/blocking). Pair with On Rise -> AI Block Begin\n"
+                        "    // + Set AI State(Block). The AI dodges OR blocks an incoming blast.");
+                    break;
+                }
+                case VsNodeType::AiBlockBegin: {
+                    editorCode = "// Enemy raises its guard (block clip) for a short window";
+                    setActionFunc(infoNode, "_ai_block_begin",
+                        "    afn_ai_block_begin();\n"
+                        "    // Block clip 19 + afn_ai_blocking = 1 for ~24 frames. While blocking, your\n"
+                        "    // blast deals only Block Dmg %% to the enemy.");
+                    break;
+                }
+                case VsNodeType::AiBlockStep: {
+                    editorCode = "// Hold the enemy block stance; flags done at the end";
+                    setActionFunc(infoNode, "_ai_block_step",
+                        "    afn_ai_block_step();\n"
+                        "    // Holds the guard + clip, counts the window down, sets afn_ai_block_done.\n"
+                        "    // Run under Is AI State(Block); on block_done -> Set AI State(Strafe).");
+                    break;
+                }
+                case VsNodeType::IsBlastIncoming: {
+                    editorCode = "// Gate: a player Focus Blast is within the enemy's Dodge Range (+ chance)";
+                    setActionFunc(infoNode, "_is_blast_incoming",
+                        "    if (afn_ai_blast_incoming()) { /* downstream */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // 1 when any in-flight player blast (homing OR forward) is within Dodge\n"
+                        "    // Range of the enemy AND the Dodge %% chance rolls true AND it isn't\n"
+                        "    // already dodging / on cooldown. Rolled per frame -> pair with On Rise:\n"
+                        "    // AI Sense -> Is Blast Incoming -> On Rise -> AI Dodge Begin + Set AI State(Dodge).");
+                    break;
+                }
                 case VsNodeType::SetAiState: {
                     editorCode = "// Set the enemy AI state (drives which state dispatches)";
                     setActionFunc(infoNode, "_set_ai_state", "    afn_ai_state = <State>;\n");
@@ -24708,9 +24777,33 @@ void FrameTick(float dt)
                         "    afn_ai_detect_r = <Detect Range>; afn_ai_lose_r = <Lose Range>; afn_ai_pref_r = <Pref Dist>;\n"
                         "    afn_ai_atkcd = <Atk Cooldown>; afn_ai_chargeprob = <Charge %>; afn_ai_dodgeprob = <Dodge %>;\n"
                         "    afn_ai_movespd_m = <Move Speed>;   // x1000 (800 = 0.8 px/frame)\n"
+                        "    afn_ai_dodge_trig = <Dodge Range>; // px from an incoming blast to dodge (24)\n"
+                        "    afn_ai_block_prob = <Block %>; afn_block_pct = <Block Dmg %>; // 30 / 20\n"
+                        "    afn_ai_chg_speed_t = <Charge Speed>; afn_ai_tap_speed_t = <Tap Speed>; // tenths px/f (20/25)\n"
                         "    // --- Runtime (psv main.c) ---\n"
                         "    // The state machine lives in the AI helper nodes; this just enables it +\n"
                         "    // feeds the knobs the runtime sense/move/charge primitives read.");
+                    break;
+                }
+                case VsNodeType::ClashHitEnemy: {
+                    editorCode = "// Clash win: deal Clash Dmg % of your full attack to the enemy (no instant KO)";
+                    setActionFunc(infoNode, "_clash_hit_enemy",
+                        "    afn_hp[<Object>] -= (afn_fb_dmg_max * afn_clash_dmg_pct) / 100;\n"
+                        "    if (afn_hp[<Object>] < 0) afn_hp[<Object>] = 0;\n"
+                        "    // --- Runtime ---\n"
+                        "    // Clash Dmg %% (Beam Clash node, default 150 = 1.5x) of the player's full\n"
+                        "    // Focus Blast damage. Wire the enemy Object. If this brings HP to 0 the\n"
+                        "    // normal Is HP Zero -> KO cinematic + results menu still fires.");
+                    break;
+                }
+                case VsNodeType::ClashHitPlayer: {
+                    editorCode = "// Clash loss: deal Clash Dmg % of the enemy's full attack to you (no instant death)";
+                    setActionFunc(infoNode, "_clash_hit_player",
+                        "    afn_health -= (ENEMY_CHG_DMG * afn_clash_dmg_pct) / 100;\n"
+                        "    if (afn_health < 0) afn_health = 0;\n"
+                        "    // --- Runtime ---\n"
+                        "    // Clash Dmg %% (default 150 = 1.5x) of the enemy's full charge damage. If\n"
+                        "    // it reaches 0 the Is Health Zero -> death cinematic + results menu fires.");
                     break;
                 }
                 case VsNodeType::BeamClash: {
@@ -24719,7 +24812,8 @@ void FrameTick(float dt)
                         "    afn_clash_enabled = 1;\n"
                         "    afn_clash_full_pct = <Full Charge %>; afn_clash_push_m = <Player Push>;\n"
                         "    afn_clash_ai_push_m = <AI Push>; afn_clash_ai_min = <AI Interval>;\n"
-                        "    afn_clash_meet_r = <Meet Radius>;\n"
+                        "    afn_clash_meet_r = <Meet Radius>; afn_clash_dmg_pct = <Clash Dmg %>;\n"
+                        "    afn_clash_air_fb = <Air Fallback>;   // frames before a no-meet clash; 0 = only real meets\n"
                         "    // --- Runtime (psv main.c clash_tick) ---\n"
                         "    // Gated by afn_clash_enabled. When the player's AND enemy's FULL-charge\n"
                         "    // beams (>= Full Charge % of max) are both airborne and meet (within\n"
@@ -25106,19 +25200,23 @@ void FrameTick(float dt)
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
                         "    afn_fb_fire_req = 1;                  // request launch this frame\n"
                         "    afn_fb_dmg_max  = %s;                 // damage at FULL charge (scales with level)\n"
-                        "    afn_fb_speed    = %s;                 // projectile world px/frame\n"
+                        "    afn_fb_speed    = %s / 10.0f;         // Speed in tenths px/frame (25 = 2.5)\n"
+                        "    afn_fb_hit_r    = %s;                 // Hit Radius slop (smaller = must be closer)\n"
+                        "    afn_fb_homing   = %s / 100.0f;        // Homing %% (4 = gentle, dodgeable; 100 = perfect)\n"
+                        "    afn_fb_circle   = %s;                 // Circle Home: 0 = fly off once passed, 1 = orbit\n"
                         "    afn_fb_tgt      = afn_cam_lock_target; // homing target (-1 = fire straight forward)\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c focus-blast block) ---\n"
-                        "    // Drive from On Key Released. If a charge is held (level > 0) and no\n"
-                        "    // shot is in flight: snapshot the ball -> projectile at its charged\n"
-                        "    // size, capture target + facing, dmg = dmg_max * (level/max) (min 1),\n"
-                        "    // then clear charge. Each frame the projectile homes toward the\n"
-                        "    // target's live position (forward if none); on reaching it,\n"
-                        "    // afn_hp[target] -= dmg and the ball despawns. On launch it also\n"
-                        "    // sets afn_fb_fire_timer = 30 to open the Is Firing window.",
+                        "    // Drive from On Key Released. Snapshot the ball -> projectile, capture\n"
+                        "    // target + facing, dmg = dmg_max * (level/max). Each frame it EASES its\n"
+                        "    // direction toward the target by Homing %% while the target is AHEAD\n"
+                        "    // (with Circle Home off it stops homing + flies straight once passed, so\n"
+                        "    // a dodge isn't chased down). Hits within Speed + Hit Radius of the box centre.",
                         fmtInt(infoNode.id, 0, "30"),
-                        fmtInt(infoNode.id, 1, "6"));
+                        fmtInt(infoNode.id, 1, "60"),
+                        fmtInt(infoNode.id, 2, "4"),
+                        fmtInt(infoNode.id, 3, "12"),
+                        fmtInt(infoNode.id, 4, "0"));
                     setActionFunc(infoNode, "_fire_charge_shot", fcBuf);
                     break;
                 }

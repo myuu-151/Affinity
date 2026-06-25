@@ -574,12 +574,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // charged ball into a homing projectile aimed at the lock target.
                 auto* dmgD = findDataIn(a->id, 0);
                 auto* spD  = findDataIn(a->id, 1);
+                auto* hrD  = findDataIn(a->id, 2);
+                auto* hmD  = findDataIn(a->id, 3);
+                auto* ciD  = findDataIn(a->id, 4);
                 int dmg = dmgD ? resolveInt(dmgD) : 30;
-                int sp  = spD  ? resolveInt(spD)  : 6;
+                int sp  = spD  ? resolveInt(spD)  : 60;   // tenths of px/frame (60 = 6.0)
+                int hr  = hrD  ? resolveInt(hrD)  : 4;    // hit slop (world px)
+                int hm  = hmD  ? resolveInt(hmD)  : 12;   // homing % (12 = 0.12 ease/frame; 100 = perfect)
+                int ci  = ciD  ? resolveInt(ciD)  : 0;    // circle home (1 = orbit; 0 = fly off once passed)
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
                 f << "    afn_fb_fire_req = 1;\n";
                 f << "    afn_fb_dmg_max  = " << dmg << ";\n";
-                f << "    afn_fb_speed    = " << sp << ";\n";
+                f << "    afn_fb_speed    = " << sp << " / 10.0f;\n";
+                f << "    afn_fb_hit_r    = " << hr << "; afn_fb_homing = " << hm << " / 100.0f; afn_fb_circle = " << (ci ? 1 : 0) << ";\n";
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 f << "    afn_fb_tgt      = afn_cam_lock_target;\n";
                 f << "#else\n";
@@ -1046,6 +1053,20 @@ void EmitNodeScriptBodies(std::ostream& f,
             case AfnScriptNodeType::SuppressBeams:
                 f << "    afn_clash_suppress_beams();\n";
                 break;
+            case AfnScriptNodeType::ClashHitEnemy: {
+                // Clash win: deal Clash Dmg % of the PLAYER's full attack (afn_fb_dmg_max)
+                // to the object — instead of an instant KO. Object = Object or self.
+                auto* tv = findDataIn(a->id, 0);
+                std::string o = (tv && tv->type == AfnScriptNodeType::AttachedSprite)
+                                ? "afn_bp_cur_spr_idx" : std::to_string(tv ? resolveInt(tv) : -1);
+                f << "    if ((" << o << ") >= 0) { afn_hp[" << o << "] -= (afn_fb_dmg_max * afn_clash_dmg_pct) / 100;"
+                  << " if (afn_hp[" << o << "] < 0) afn_hp[" << o << "] = 0; }\n";
+                break;
+            }
+            case AfnScriptNodeType::ClashHitPlayer:
+                // Clash loss: deal Clash Dmg % of the ENEMY's full attack (ENEMY_CHG_DMG) to the player.
+                f << "    afn_health -= (ENEMY_CHG_DMG * afn_clash_dmg_pct) / 100; if (afn_health < 0) afn_health = 0;\n";
+                break;
             case AfnScriptNodeType::SetAiState: {
                 auto* sd = findDataIn(a->id, 0); int st = sd ? resolveInt(sd) : 0;
                 f << "    afn_ai_state = " << st << ";\n";
@@ -1061,6 +1082,17 @@ void EmitNodeScriptBodies(std::ostream& f,
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
             case AfnScriptNodeType::AiFireBeam:    f << "    afn_ai_fire_beam();\n"; break;
             case AfnScriptNodeType::AiFireRecover: f << "    afn_ai_fire_recover();\n"; break;
+            case AfnScriptNodeType::AiBlockBegin:  f << "    afn_ai_block_begin();\n"; break;
+            case AfnScriptNodeType::AiBlockStep:   f << "    afn_ai_block_step();\n"; break;
+            case AfnScriptNodeType::SetBlock: {
+                auto* d = findDataIn(a->id, 0); int on = d ? resolveInt(d) : 0;
+                auto* cd = findDataIn(a->id, 1); int cost = cd ? resolveInt(cd) : 0;
+                if (on)
+                    f << "    afn_player_blocking = 1; afn_block_energy = " << cost << ";\n";   // Energy Cost = energy spent per BLOCKED hit
+                else
+                    f << "    afn_player_blocking = 0;\n";
+                break;
+            }
             case AfnScriptNodeType::OrbitCamStep:
                 f << "    afn_cam_orbit_timer++;   // advance the node-driven orbit\n";
                 break;
@@ -1088,12 +1120,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // Enable the enemy AI + feed tunables. Defaults match the #defines.
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
                 auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
-                auto* d6=findDataIn(a->id,6);
+                auto* d6=findDataIn(a->id,6); auto* d7=findDataIn(a->id,7);
+                auto* d8=findDataIn(a->id,8); auto* d9=findDataIn(a->id,9);
+                auto* d10=findDataIn(a->id,10); auto* d11=findDataIn(a->id,11);
                 f << "    afn_ai_enabled = 1;\n";
                 f << "    afn_ai_detect_r = " << (d0?resolveInt(d0):60) << "; afn_ai_lose_r = " << (d1?resolveInt(d1):95)
                   << "; afn_ai_pref_r = " << (d2?resolveInt(d2):22) << ";\n";
                 f << "    afn_ai_atkcd = " << (d3?resolveInt(d3):80) << "; afn_ai_chargeprob = " << (d4?resolveInt(d4):40)
                   << "; afn_ai_dodgeprob = " << (d5?resolveInt(d5):70) << "; afn_ai_movespd_m = " << (d6?resolveInt(d6):800) << ";\n";
+                f << "    afn_ai_dodge_trig = " << (d7?resolveInt(d7):24)
+                  << "; afn_ai_block_prob = " << (d8?resolveInt(d8):30)
+                  << "; afn_block_pct = " << (d9?resolveInt(d9):20) << ";\n";
+                f << "    afn_ai_chg_speed_t = " << (d10?resolveInt(d10):20)
+                  << "; afn_ai_tap_speed_t = " << (d11?resolveInt(d11):25) << ";\n";
                 break;
             }
             case AfnScriptNodeType::ClashBegin:
@@ -1120,6 +1159,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
+            case AfnScriptNodeType::DamageHP: {
+                // afn_hp[obj] -= Amount (clamped >= 0). Object = an Object or Attached Sprite (self).
+                auto* tv = findDataIn(a->id, 0);
+                auto* av = findDataIn(a->id, 1);
+                std::string amt = av ? emitIntExpr(av) : "1";
+                if (tv && tv->type == AfnScriptNodeType::AttachedSprite)
+                    f << "    if (afn_bp_cur_spr_idx >= 0) { afn_hp[afn_bp_cur_spr_idx] -= (" << amt << "); if (afn_hp[afn_bp_cur_spr_idx] < 0) afn_hp[afn_bp_cur_spr_idx] = 0; }\n";
+                else {
+                    int o = tv ? resolveInt(tv) : -1;
+                    f << "    if (" << o << " >= 0) { afn_hp[" << o << "] -= (" << amt << "); if (afn_hp[" << o << "] < 0) afn_hp[" << o << "] = 0; }\n";
+                }
+                break;
+            }
             case AfnScriptNodeType::BeamClash: {
                 // Enable the beam-clash mechanic and feed its tunables. The mechanic
                 // (detect both full beams meeting -> 2D struggle -> mash vs AI ->
@@ -1128,16 +1180,20 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // are x1000, Full Charge is a %, so the int data pins carry fractions.
                 auto* d0 = findDataIn(a->id, 0); auto* d1 = findDataIn(a->id, 1);
                 auto* d2 = findDataIn(a->id, 2); auto* d3 = findDataIn(a->id, 3);
-                auto* d4 = findDataIn(a->id, 4);
+                auto* d4 = findDataIn(a->id, 4); auto* d5 = findDataIn(a->id, 5);
+                auto* d6 = findDataIn(a->id, 6);
                 int fullPct = d0 ? resolveInt(d0) : 85;
                 int pPush   = d1 ? resolveInt(d1) : 60;
                 int aiPush  = d2 ? resolveInt(d2) : 50;
                 int aiMin   = d3 ? resolveInt(d3) : 6;
                 int meetR   = d4 ? resolveInt(d4) : 18;
+                int dmgPct  = d5 ? resolveInt(d5) : 150;
+                int airFb   = d6 ? resolveInt(d6) : 90;
                 f << "    afn_clash_enabled = 1;\n";
                 f << "    afn_clash_full_pct = " << fullPct << "; afn_clash_push_m = " << pPush
                   << "; afn_clash_ai_push_m = " << aiPush << ";\n";
-                f << "    afn_clash_ai_min = " << aiMin << "; afn_clash_meet_r = " << meetR << ";\n";
+                f << "    afn_clash_ai_min = " << aiMin << "; afn_clash_meet_r = " << meetR
+                  << "; afn_clash_dmg_pct = " << dmgPct << "; afn_clash_air_fb = " << airFb << ";\n";
                 break;
             }
             case AfnScriptNodeType::StopMusic:
@@ -1500,11 +1556,23 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
+            if (a->type == AfnScriptNodeType::IsBlastIncoming) {
+                f << "    if (afn_ai_blast_incoming()) {\n";   // player blast in dodge range (+chance)
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::ShouldAiBlock) {
+                f << "    if (afn_ai_blast_block()) {\n";   // blast in range + block-chance roll
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
             if (a->type == AfnScriptNodeType::IsAiFlag) {
                 // Flag selector (wired Int): 0=lose_ready 1=dodge_ready 2=can_fire
                 // 3=charge_done 4=dodge_done 5=fire_done 6=reached.
-                static const char* flagN[7] = { "lose_ready","dodge_ready","can_fire","charge_done","dodge_done","fire_done","reached" };
-                auto* fd = findDataIn(a->id, 0); int fi = fd ? resolveInt(fd) : 0; if (fi < 0 || fi > 6) fi = 0;
+                static const char* flagN[8] = { "lose_ready","dodge_ready","can_fire","charge_done","dodge_done","fire_done","reached","block_done" };
+                auto* fd = findDataIn(a->id, 0); int fi = fd ? resolveInt(fd) : 0; if (fi < 0 || fi > 7) fi = 0;
                 f << "    if (afn_ai_" << flagN[fi] << ") {\n";
                 walkExec(a->id, 0);
                 f << "    }\n";

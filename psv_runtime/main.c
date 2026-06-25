@@ -118,7 +118,7 @@ extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8
 #define ENEMY_BAR_HEIGHT      18.0f     // world units above the NPC origin
 #define ENEMY_BAR_W           64.0f     // HUD pixels (960x544 space)
 #define ENEMY_BAR_H           7.0f
-enum { AI_ROAM = 0, AI_CHASE, AI_STRAFE, AI_CHARGE, AI_FIRE, AI_DODGE, AI_DEAD };
+enum { AI_ROAM = 0, AI_CHASE, AI_STRAFE, AI_CHARGE, AI_FIRE, AI_DODGE, AI_DEAD, AI_BLOCK };
 static int   s_aiTimer = 0, s_aiLoseT = 0, s_aiInited = 0;
 static int   s_aiStrafeDir = 1, s_aiStrafeLeg = 0, s_aiAtkCD = 0, s_aiDodgeCD = 0, s_aiChargeShot = 0;
 static int   s_efbActive = 0, s_efbCharging = 0, s_efbDmg = 0, s_efbLife = 0;   // enemy projectile
@@ -139,6 +139,18 @@ int afn_ai_charge_done = 0, afn_ai_dodge_done = 0, afn_ai_fire_done = 0, afn_ai_
 // Tunables (Enemy AI node, defaults match the original #defines).
 int afn_ai_detect_r = 60, afn_ai_lose_r = 95, afn_ai_pref_r = 22, afn_ai_atkcd = 80;
 int afn_ai_chargeprob = 40, afn_ai_dodgeprob = 70, afn_ai_movespd_m = 800;
+int afn_ai_dodge_trig = 24;   // dodge reaction range to an incoming blast (world px)
+// Block: while blocking, an incoming hit is reduced to afn_block_pct % (20 = take
+// 20%, block 80%) — for the player (afn_player_blocking, set by your Block node) and
+// the enemy (afn_ai_blocking, set while in the AI_BLOCK state). afn_ai_block_prob is
+// the AI's chance to block (vs dodge) an incoming blast.
+int afn_player_blocking = 0, afn_ai_blocking = 0, afn_block_pct = 20;
+int afn_ai_block_prob = 30, afn_ai_block_done = 0;
+int afn_block_energy = 20;   // energy the player spends per blocked hit (Set Block node's Energy Cost pin)
+// Enemy projectile launch speeds, in tenths of px/frame (Enemy AI node tunables;
+// 20 = 2.0 full charge, 25 = 2.5 tap — like the player's Fire Charge Shot Speed).
+int afn_ai_chg_speed_t = 20, afn_ai_tap_speed_t = 25;
+static int s_eBlockFrames = 0;   // enemy block-stance countdown
 // Player death cinematic (die clip + camera orbit on a loss) is now NODE-DRIVEN
 // (ch_controller BP: Is Health Zero -> On Rise -> Hold Skel Clip + Orbit Cam On
 // Obj). The old s_pkoActive/s_pkoTimer/s_pkoAngle0 statics were removed.
@@ -204,6 +216,14 @@ int afn_clash_enabled = 0, afn_clash_ready = 0;
 float afn_clash_balance = 0.5f;          // 0 = pushed into your zone (loss), 1 = enemy (win)
 int afn_clash_full_pct = 85, afn_clash_push_m = 60, afn_clash_ai_push_m = 50;
 int afn_clash_ai_min = 6, afn_clash_meet_r = 18;
+// Clash resolve damage: the winner deals this % of their FULL attack to the loser
+// (150 = 1.5x), instead of an instant KO — so a clash can't one-shot a full-HP
+// fighter. Applied by the Clash Hit Enemy / Clash Hit Player nodes.
+int afn_clash_dmg_pct = 150;
+// Air fallback: clash anyway after BOTH beams have been airborne this many frames,
+// even if they never meet (so it doesn't fizzle). 0 = OFF — only a real meet (within
+// Meet Radius) triggers a clash. Tunable on the Beam Clash node.
+int afn_clash_air_fb = 90;
 void afn_clash_suppress_beams(void);     // fwd (defined below) — node SuppressBeams / ClashBegin
 void afn_clash_begin(void);              // fwd — node ClashBegin
 void afn_clash_ai_step(void);            // fwd — node ClashAiStep
@@ -1415,7 +1435,10 @@ float afn_fb_min_scale  = 0.05f, afn_fb_max_scale = 0.70f;  // ball size range (
 int   afn_fb_parent     = -1;         // editor sprite idx the ball is attached to (player = self)
 int   afn_fb_inst       = -1;         // resolved billboard instance idx of the ball (cached)
 int   afn_fb_dmg_max    = 30;         // damage at full charge (scales down with level)
-float afn_fb_speed      = 6.0f;       // projectile world px/frame
+float afn_fb_speed      = 6.0f;       // projectile world px/frame (overwritten at fire by Fire Charge Shot's Speed pin)
+int   afn_fb_hit_r      = 4;          // hit slop (world px) added to speed — smaller = must be closer to connect
+float afn_fb_homing     = 0.12f;      // flight-direction ease toward the target/frame; bends in hard while the target is ahead, but Circle Home off means a dodge still clears it
+int   afn_fb_circle     = 0;          // 0 = stop homing once the target is BEHIND (fly straight off, never circle back); 1 = keep homing (orbits the target)
 int   afn_fb_tgt        = -1;         // captured homing target (editor idx, -1 = forward)
 // Live projectile state.
 int   afn_fb_active     = 0;          // 1 = a shot is in flight
@@ -1548,7 +1571,14 @@ void afn_enemy_beam_step(void) {
     }
     s_efbX += s_efbDirX * s_efbSpeed; s_efbZ += s_efbDirZ * s_efbSpeed; s_efbY += (ty - s_efbY) * 0.15f;
     float hx = s_efbX - px, hz = s_efbZ - pz;
-    if (hx*hx + hz*hz <= ENEMY_HIT_R*ENEMY_HIT_R) { afn_health -= s_efbDmg; if (afn_health < 0) afn_health = 0; s_efbActive = 0; }
+    if (hx*hx + hz*hz <= ENEMY_HIT_R*ENEMY_HIT_R) {
+        int dmg = s_efbDmg;
+        if (afn_player_blocking) {                       // blocking a hit: reduce dmg + spend energy
+            dmg = (s_efbDmg * afn_block_pct) / 100;
+            afn_energy -= afn_block_energy; if (afn_energy < 0) afn_energy = 0;
+        }
+        afn_health -= dmg; if (afn_health < 0) afn_health = 0; s_efbActive = 0;
+    }
     else if (--s_efbLife <= 0) s_efbActive = 0;
 }
 
@@ -1572,14 +1602,32 @@ void afn_focus_blast_step(void) {
     float dx = tx - afn_fb_x, dy = ty - afn_fb_y, dz = tz - afn_fb_z;
     float dl = sqrtf(dx*dx + dy*dy + dz*dz);
     float sp = afn_fb_speed;
-    if (homing && dl <= sp + 8.0f) {
+    if (homing && dl <= sp + (float)afn_fb_hit_r) {
         if (afn_fb_tgt >= 0 && afn_fb_tgt < NUM_SPRITES) {
-            afn_hp[afn_fb_tgt] -= afn_fb_cur_dmg;
+            int dmg = afn_ai_blocking ? (afn_fb_cur_dmg * afn_block_pct) / 100 : afn_fb_cur_dmg;   // enemy Block reduces it
+            afn_hp[afn_fb_tgt] -= dmg;
             if (afn_hp[afn_fb_tgt] < 0) afn_hp[afn_fb_tgt] = 0;
         }
         afn_fb_active = 0;          // contact: deal damage + despawn
     } else if (dl > 0.001f) {
-        afn_fb_x += dx/dl*sp; afn_fb_y += dy/dl*sp; afn_fb_z += dz/dl*sp;
+        if (homing) {
+            // Ease the flight direction toward the target by afn_fb_homing, then move
+            // along it (gentle = a sidestep clears it). But unless Circle Home is on,
+            // STOP homing once the target is behind the flight direction (dot < 0) — so
+            // an overshot blast flies straight off instead of turning around to orbit.
+            float ux = dx/dl, uz = dz/dl;
+            float dot = afn_fb_dirx*ux + afn_fb_dirz*uz;
+            if (afn_fb_circle || dot > 0.0f) {
+                afn_fb_dirx += (ux - afn_fb_dirx) * afn_fb_homing;
+                afn_fb_dirz += (uz - afn_fb_dirz) * afn_fb_homing;
+                float nl = sqrtf(afn_fb_dirx*afn_fb_dirx + afn_fb_dirz*afn_fb_dirz);
+                if (nl > 1e-3f) { afn_fb_dirx /= nl; afn_fb_dirz /= nl; }
+                afn_fb_y += dy/dl*sp;      // track the target's height only while homing
+            }
+            afn_fb_x += afn_fb_dirx*sp; afn_fb_z += afn_fb_dirz*sp;   // always move along the direction
+        } else {
+            afn_fb_x += dx/dl*sp; afn_fb_y += dy/dl*sp; afn_fb_z += dz/dl*sp;   // forward (unchanged)
+        }
     }
     if (--afn_fb_life <= 0) afn_fb_active = 0;   // lifetime safety / forward-shot range
     afn_fb_charging = 0;
@@ -1606,6 +1654,8 @@ void afn_ai_sense(void) {
     if (s_aiAtkCD > 0) s_aiAtkCD--;
     if (s_aiDodgeCD > 0) s_aiDodgeCD--;
     if (afn_ai_state != AI_CHARGE) s_efbCharging = 0;   // never leave a charge orb hanging
+
+    if (afn_ai_state != AI_BLOCK) afn_ai_blocking = 0;   // only the BLOCK state keeps the guard up
 
     // Death: at 0 HP go DEAD (the enemy BP's Hold Skel Clip + Orbit Cam runs the
     // KO cinematic; the die-clip hold is s_npcClipHold). Cancel a charging orb but
@@ -1634,14 +1684,8 @@ void afn_ai_sense(void) {
         s_npcYaw[i] += diff * ENEMY_YAW_EASE;
     }
 
-    // Dodge-ready: the player's Focus Blast is homing this NPC and getting close
-    // (chance rolled here each frame, matching the original's per-frame roll).
-    afn_ai_dodge_ready = 0;
-    if (s_eDodgeFrames == 0 && s_aiDodgeCD == 0 && afn_fb_active && afn_fb_tgt == eidx) {
-        float fdx = s_npcX[i] - afn_fb_x, fdz = s_npcZ[i] - afn_fb_z;
-        if (fdx*fdx + fdz*fdz <= ENEMY_DODGE_TRIGGER_D*ENEMY_DODGE_TRIGGER_D && ai_chance(afn_ai_dodgeprob * 0.01f))
-            afn_ai_dodge_ready = 1;
-    }
+    // (Dodge-ready is now a node: the Is Blast Incoming gate calls
+    // afn_ai_blast_incoming() — see below. AI Sense no longer rolls it.)
     afn_ai_can_fire = (s_aiAtkCD == 0 && !s_efbActive && !s_efbCharging) ? 1 : 0;
 }
 
@@ -1682,7 +1726,50 @@ void afn_ai_strafe(void) {
     if (ml > 1e-3f) { float sp = afn_ai_movespd_m * 0.001f; s_npcX[i] += wdx/ml*sp; s_npcZ[i] += wdz/ml*sp; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
 }
 
-// DODGE begin: set up the side-roll (called once on the dodge-ready edge).
+// Node primitive (Is Blast Incoming gate): 1 when ANY of the player's in-flight
+// Focus Blasts (homing OR forward) is within Dodge Range of the enemy and the dodge
+// chance rolls true — and the enemy isn't already dodging / on cooldown. The chance
+// is rolled here each frame (the gate is evaluated per frame), so pair it with On
+// Rise to fire the dodge once.
+int afn_ai_blast_incoming(void) {
+    int i = afn_ai_slot; if (i < 0) return 0;
+    if (s_eDodgeFrames != 0 || s_eBlockFrames != 0 || s_aiDodgeCD != 0 || !afn_fb_active) return 0;
+    float fdx = s_npcX[i] - afn_fb_x, fdz = s_npcZ[i] - afn_fb_z;
+    float dtr = (float)afn_ai_dodge_trig;
+    if (fdx*fdx + fdz*fdz > dtr*dtr) return 0;
+    return ai_chance(afn_ai_dodgeprob * 0.01f) ? 1 : 0;
+}
+
+// Node primitive (Should Ai Block gate): like Is Blast Incoming but rolls the BLOCK
+// chance — so the AI sometimes raises its guard instead of rolling away. Only when a
+// blast is in dodge range and it isn't already dodging/blocking.
+int afn_ai_blast_block(void) {
+    int i = afn_ai_slot; if (i < 0) return 0;
+    if (s_eDodgeFrames != 0 || s_eBlockFrames != 0 || afn_ai_state == AI_BLOCK || !afn_fb_active) return 0;
+    float fdx = s_npcX[i] - afn_fb_x, fdz = s_npcZ[i] - afn_fb_z;
+    float dtr = (float)afn_ai_dodge_trig;
+    if (fdx*fdx + fdz*fdz > dtr*dtr) return 0;
+    return ai_chance(afn_ai_block_prob * 0.01f) ? 1 : 0;
+}
+
+// BLOCK begin: raise the guard (Block clip 19, shared rig) for a short window.
+void afn_ai_block_begin(void) {
+    int i = afn_ai_slot; if (i < 0) return;
+    s_eBlockFrames = 24; afn_ai_blocking = 1; afn_ai_block_done = 0;
+    s_npcClip[i] = 19;
+}
+
+// BLOCK step: hold the guard + clip; set afn_ai_block_done when the window ends.
+void afn_ai_block_step(void) {
+    int i = afn_ai_slot; if (i < 0) return;
+    afn_ai_blocking = 1; s_npcClip[i] = 19;
+    afn_ai_block_done = (--s_eBlockFrames <= 0) ? 1 : 0;
+}
+
+// DODGE begin: set up the side-roll (called once on the dodge-ready edge). Mirrors
+// the PLAYER's dodge: same committed side burst, same dodge clips (Dodge node's
+// afn_dodge_clip_l/r, fallback to the rig's DodgeL/R 24/25) — but L/R swapped, since
+// the enemy faces the player so its screen-left/right is mirrored.
 void afn_ai_dodge_begin(void) {
     int i = afn_ai_slot; if (i < 0) return;
     float px = (float)player_x, pz = (float)player_z;
@@ -1690,20 +1777,32 @@ void afn_ai_dodge_begin(void) {
     float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : 1.0f, fx = dx/pl, fz = dz/pl, rx = fz, rz = -fx;
     int side = ai_chance(0.5f) ? 1 : -1;
     s_eDodgeDX = rx * side; s_eDodgeDZ = rz * side;
-    s_eDodgeClip = side > 0 ? 25 : 24;
+    int clipL = afn_dodge_clip_l > 0 ? afn_dodge_clip_l : 24;   // DodgeL
+    int clipR = afn_dodge_clip_r > 0 ? afn_dodge_clip_r : 25;   // DodgeR
+    s_eDodgeClip = side > 0 ? clipL : clipR;                    // swapped vs the player
     s_eDodgeFrames = s_eDodgeTotal = ENEMY_DODGE_FRAMES; s_aiDodgeCD = ENEMY_DODGE_CD; afn_ai_dodge_done = 0;
 }
 
-// DODGE step: integrate the roll; set afn_ai_dodge_done when finished.
+// DODGE step: integrate the roll; set afn_ai_dodge_done when finished. Mirrors the
+// player's roll — speed from the Dodge node (afn_dodge_speed, default 70 — the old
+// enemy 9 barely moved), quadratic ease-IN over afn_dodge_ramp and ease-OUT over
+// afn_dodge_falloff, with the same sub-stepped wall collision so the fast roll can't
+// tunnel through a wall.
 void afn_ai_dodge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
     if (s_eDodgeFrames > 0) {
-        int el = s_eDodgeTotal - s_eDodgeFrames; float env = 1.0f;
-        if (el < ENEMY_DODGE_RAMP) { float t = (float)el / ENEMY_DODGE_RAMP; env = t*t; }
-        else if (s_eDodgeFrames < ENEMY_DODGE_RAMP) { float t = (float)s_eDodgeFrames / ENEMY_DODGE_RAMP; env = t*t; }
-        float sp = ENEMY_DODGE_SPEED * 0.08f * env;
-        s_npcX[i] += s_eDodgeDX * sp; s_npcZ[i] += s_eDodgeDZ * sp;
-        collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]);
+        int total = s_eDodgeTotal, frames = s_eDodgeFrames;
+        int ramp = afn_dodge_ramp  > 0 ? afn_dodge_ramp  : 6;
+        int fall = afn_dodge_falloff > 0 ? afn_dodge_falloff : 6;
+        if (ramp > total) ramp = total; if (fall > total) fall = total;
+        float env = 1.0f;
+        if (ramp > 0) { float t = (float)(total - frames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; if (t*t < env) env = t*t; }
+        if (fall > 0) { float u = (float)frames / (float)fall; if (u > 1.0f) u = 1.0f; if (u*u < env) env = u*u; }
+        int spd = afn_dodge_speed > 0 ? afn_dodge_speed : 70;
+        float sp = spd * 0.08f * env;
+        float ix = s_eDodgeDX * sp, iz = s_eDodgeDZ * sp;
+        int sub = (int)(sp / 3.0f) + 1;
+        for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
         s_npcClip[i] = s_eDodgeClip;
         afn_ai_dodge_done = (--s_eDodgeFrames == 0) ? 1 : 0;
     } else afn_ai_dodge_done = 1;
@@ -1736,8 +1835,8 @@ void afn_ai_fire_beam(void) {
     float ddx = px - mx, ddz = pz - mz, dl = sqrtf(ddx*ddx + ddz*ddz); if (dl < 1e-3f) dl = 1.0f;
     s_efbDirX = ddx/dl; s_efbDirZ = ddz/dl;
     s_efbX = mx + s_efbDirX*8.0f; s_efbZ = mz + s_efbDirZ*8.0f; s_efbY = my;
-    if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = ENEMY_CHG_SPEED; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; s_ebBeamFull = 1; }
-    else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = ENEMY_TAP_SPEED; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; s_ebBeamFull = 0; }
+    if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = afn_ai_chg_speed_t / 10.0f; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; s_ebBeamFull = 1; }
+    else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = afn_ai_tap_speed_t / 10.0f; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; s_ebBeamFull = 0; }
     s_efbActive = 1; s_efbCharging = 0; s_efbLife = ENEMY_SHOT_LIFE;
     s_aiAtkCD = afn_ai_atkcd; s_aiTimer = ENEMY_FIRE_RECOVER;
 }
@@ -2564,7 +2663,7 @@ static void clash_sense(void) {
     float dx = afn_fb_x - s_efbX, dy = afn_fb_y - s_efbY, dz = afn_fb_z - s_efbZ;
     float meetR = (float)afn_clash_meet_r;
     int meet = (dx*dx + dy*dy + dz*dz) <= (meetR * meetR);
-    afn_clash_ready = (meet || s_clashAirT >= AFN_CLASH_AIR_FALLBACK) ? 1 : 0;
+    afn_clash_ready = (meet || (afn_clash_air_fb > 0 && s_clashAirT >= afn_clash_air_fb)) ? 1 : 0;
 }
 
 // Node primitive: suppress BOTH projectiles (Suppress Beams / Clash Begin).

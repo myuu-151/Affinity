@@ -541,6 +541,13 @@ enum class AfnScriptNodeType : int {
     StepEnemyBeam,   // action: advance the enemy's in-flight projectile (flight + hit)
     StepFocusBlast,  // action: advance the player's in-flight Focus Blast (flight + hit)
     ShowHPBar,       // action: raise the floating HP bar for an object this frame
+    IsBlastIncoming, // gate: a player Focus Blast is within the enemy's dodge range (+chance)
+    ClashHitEnemy,   // action: clash win -> deal Clash Dmg % of the player's full attack to an object
+    ClashHitPlayer,  // action: clash loss -> deal Clash Dmg % of the enemy's full attack to the player
+    SetBlock,        // action: set the player's blocking flag (1 while guarding -> incoming dmg reduced)
+    ShouldAiBlock,   // gate: a blast is incoming and the AI rolls to BLOCK (vs dodge)
+    AiBlockBegin,    // action: enemy raises its guard (block clip) for a window
+    AiBlockStep,     // action: hold the enemy block stance; flags done at the end
     COUNT
 };
 
