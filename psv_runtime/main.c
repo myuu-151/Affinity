@@ -204,6 +204,19 @@ static int s_eBlockFrames = 0;   // enemy block-stance countdown
 static int   s_clashAirT = 0, s_clashAiTap = 0;           // air-fallback timer + AI press countdown
 static int   s_clashPressed = 0, s_clashPressTimer = 0;   // mash-press flash (button_pressed vs _unpressed)
 static int   s_pbBeamFull = 0, s_ebBeamFull = 0;          // 1 while each side's IN-FLIGHT beam is a full charge
+// Multi-blast pool: each FIRED Focus Blast becomes its own in-flight projectile so
+// several can be on the field at once (a miss no longer locks out the next cast).
+// Charging still uses the single orb (afn_fb_x/y/z/scale at the hands); on launch the
+// charge state is copied into a free pool slot and the orb returns to idle, free to
+// charge again immediately. afn_fb_active mirrors "any slot active" for the legacy
+// sensors (AI dodge/block, clash, gates).
+#define AFN_FB_POOL 6
+typedef struct {
+    int   active;
+    float x, y, z, dirx, dirz, scale;
+    int   life, dmg, tgt, full;
+} AfnFbShot;
+static AfnFbShot s_fbPool[AFN_FB_POOL] = {{0}};
 // Beam clash — FULLY NODE-ORCHESTRATED now (ch_controller BP). The runtime keeps
 // only the heavy primitives: the 2D struggle render (clash_render_2d), the beam
 // geometry -> afn_clash_ready flag (clash_sense), and the RNG masher / pitch /
@@ -306,6 +319,7 @@ static void rig_init(void) {
     }
     // HARDCODED: reset enemy combat AI on (re)init so a scene restart re-seeds HP/state.
     s_aiInited = 0; s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0; afn_ai_state = AI_ROAM; afn_ai_slot = -1;
+    for (int k = 0; k < AFN_FB_POOL; k++) s_fbPool[k].active = 0;   // clear any in-flight player blasts
     for (int r = 0; r < AFN_RIG_COUNT; r++) {
         const AfnRig* R = &afn_rigs[r];
         for (int g = 0; g < AFN_RIG_MAX_MATS; g++) {
@@ -720,9 +734,10 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         int eidx = afn_spr_editor_idx[i];
 #ifdef AFN_HAS_PLAYER_RIG
         if (i == afn_fb_inst) {
-            // Focus Blast owns this instance's visibility: drawn only while a
-            // shot is charging or in flight (otherwise its hidden-effect flag).
-            if (!afn_fb_charging && !afn_fb_active) continue;
+            // Focus Blast owns this instance's visibility: the single orb is the
+            // CHARGE ball only (drawn while charging). In-flight shots are the pool,
+            // drawn separately below, so several can coexist.
+            if (!afn_fb_charging) continue;
         } else
 #endif
         if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
@@ -758,7 +773,7 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         // Focus Blast: the charge/projectile machine fully drives this instance's
         // world transform (the player isn't an NPC, so the re-anchor above never
         // tracks it) — place + scale the orb at the charge spot or flight pos.
-        if (i == afn_fb_inst && (afn_fb_charging || afn_fb_active)) {
+        if (i == afn_fb_inst && afn_fb_charging) {
             sz = afn_spr_basesize[i] * afn_fb_scale * 0.25f; hw = sz * 0.5f;
             // Center the orb ON the spawn/bone point (the spherical quad below
             // centers at py + sz/2), so charging grows it symmetrically instead
@@ -868,6 +883,35 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         glBindTexture(GL_TEXTURE_2D, s_sprTex[cf]);
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     }
+#if defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+    // In-flight Focus Blast pool: draw each active projectile as a camera-facing
+    // (spherical) orb reusing the player's focus_gfx sub-sprite texture, so multiple
+    // blasts can be on the field at once independent of the single charge-orb instance.
+    if (afn_fb_inst >= 0) {
+        int oi = afn_fb_inst;
+        int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
+        int of = afn_spr_fstart[oi]; if (of < 0) of = 0; if (of > NF-1) of = NF-1;
+        float base = afn_spr_basesize[oi];
+        float Rwx = view[0], Rwy = view[4], Rwz = view[8];
+        float Uwx = view[1], Uwy = view[5], Uwz = view[9];
+        for (int k = 0; k < AFN_FB_POOL; k++) {
+            if (!s_fbPool[k].active) continue;
+            float sz = base * s_fbPool[k].scale * 0.25f, hh = sz * 0.5f, hw = sz * 0.5f;
+            float px = s_fbPool[k].x, cyq = s_fbPool[k].y, pz = s_fbPool[k].z;
+            AfnVertex q[4] = {
+                { 0,0, 0xFFFFFFFFu, px - Rwx*hw + Uwx*hh, cyq - Rwy*hw + Uwy*hh, pz - Rwz*hw + Uwz*hh },
+                { 1,0, 0xFFFFFFFFu, px + Rwx*hw + Uwx*hh, cyq + Rwy*hw + Uwy*hh, pz + Rwz*hw + Uwz*hh },
+                { 1,1, 0xFFFFFFFFu, px + Rwx*hw - Uwx*hh, cyq + Rwy*hw - Uwy*hh, pz + Rwz*hw - Uwz*hh },
+                { 0,1, 0xFFFFFFFFu, px - Rwx*hw - Uwx*hh, cyq - Rwy*hw - Uwy*hh, pz - Rwz*hw - Uwz*hh },
+            };
+            glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &q->u);
+            glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &q->color);
+            glVertexPointer (3, GL_FLOAT,         sizeof(AfnVertex), &q->x);
+            glBindTexture(GL_TEXTURE_2D, s_sprTex[of]);
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        }
+    }
+#endif
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
@@ -1453,7 +1497,7 @@ int   afn_fb_circle     = 0;          // 0 = stop homing once the target is BEHI
 int   afn_fb_tgt        = -1;         // captured homing target (editor idx, -1 = forward)
 // Live projectile state.
 int   afn_fb_active     = 0;          // 1 = a shot is in flight
-float afn_fb_x, afn_fb_y, afn_fb_z;   // ball world position (charge spot, then flight)
+float afn_fb_x, afn_fb_y, afn_fb_z;   // CHARGE orb world position (flight is the pool)
 float afn_fb_scale      = 0.05f;      // current render scale of the ball
 float afn_fb_dirx = 0, afn_fb_dirz = 1;   // forward direction (no-lock fallback)
 int   afn_fb_cur_dmg    = 0;          // damage this shot will deal (locked at fire)
@@ -1598,50 +1642,58 @@ void afn_enemy_beam_step(void) {
 // contact, expire on lifetime. Charging/release stays in the main loop (already
 // node-gated by Charge Shot / Fire Charge Shot). Driven once per frame by a node.
 void afn_focus_blast_step(void) {
-    if (!afn_fb_active) return;
-    float tx = 0, ty = 0, tz = 0; int homing = 0;
-    if (afn_fb_tgt >= 0) {
-        for (int n = 0; n < AFN_NPC_COUNT; n++)
-            if ((int)afn_npc_inst[n][7] == afn_fb_tgt) {
-                tx = s_npcX[n] + afn_npc_col[n][3];
-                ty = s_npcY[n] + afn_npc_col[n][4];
-                tz = s_npcZ[n] + afn_npc_col[n][5];
-                homing = 1; break;
-            }
-    }
-    if (!homing) { tx = afn_fb_x + afn_fb_dirx*100.0f; tz = afn_fb_z + afn_fb_dirz*100.0f; ty = afn_fb_y; }
-    float dx = tx - afn_fb_x, dy = ty - afn_fb_y, dz = tz - afn_fb_z;
-    float dl = sqrtf(dx*dx + dy*dy + dz*dz);
+    int anyActive = 0, anyFull = 0;
     float sp = afn_fb_speed;
-    if (homing && dl <= sp + (float)afn_fb_hit_r) {
-        if (afn_fb_tgt >= 0 && afn_fb_tgt < NUM_SPRITES) {
-            int dmg = afn_ai_blocking ? (afn_fb_cur_dmg * afn_block_pct) / 100 : afn_fb_cur_dmg;   // enemy Block reduces it
-            afn_hp[afn_fb_tgt] -= dmg;
-            if (afn_hp[afn_fb_tgt] < 0) afn_hp[afn_fb_tgt] = 0;
+    for (int k = 0; k < AFN_FB_POOL; k++) {
+        AfnFbShot* s = &s_fbPool[k];
+        if (!s->active) continue;
+        float tx = 0, ty = 0, tz = 0; int homing = 0;
+        if (s->tgt >= 0) {
+            for (int n = 0; n < AFN_NPC_COUNT; n++)
+                if ((int)afn_npc_inst[n][7] == s->tgt) {
+                    tx = s_npcX[n] + afn_npc_col[n][3];
+                    ty = s_npcY[n] + afn_npc_col[n][4];
+                    tz = s_npcZ[n] + afn_npc_col[n][5];
+                    homing = 1; break;
+                }
         }
-        afn_fb_active = 0;          // contact: deal damage + despawn
-    } else if (dl > 0.001f) {
-        if (homing) {
-            // Ease the flight direction toward the target by afn_fb_homing, then move
-            // along it (gentle = a sidestep clears it). But unless Circle Home is on,
-            // STOP homing once the target is behind the flight direction (dot < 0) — so
-            // an overshot blast flies straight off instead of turning around to orbit.
-            float ux = dx/dl, uz = dz/dl;
-            float dot = afn_fb_dirx*ux + afn_fb_dirz*uz;
-            if (afn_fb_circle || dot > 0.0f) {
-                afn_fb_dirx += (ux - afn_fb_dirx) * afn_fb_homing;
-                afn_fb_dirz += (uz - afn_fb_dirz) * afn_fb_homing;
-                float nl = sqrtf(afn_fb_dirx*afn_fb_dirx + afn_fb_dirz*afn_fb_dirz);
-                if (nl > 1e-3f) { afn_fb_dirx /= nl; afn_fb_dirz /= nl; }
-                afn_fb_y += dy/dl*sp;      // track the target's height only while homing
+        if (!homing) { tx = s->x + s->dirx*100.0f; tz = s->z + s->dirz*100.0f; ty = s->y; }
+        float dx = tx - s->x, dy = ty - s->y, dz = tz - s->z;
+        float dl = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (homing && dl <= sp + (float)afn_fb_hit_r) {
+            if (s->tgt >= 0 && s->tgt < NUM_SPRITES) {
+                int dmg = afn_ai_blocking ? (s->dmg * afn_block_pct) / 100 : s->dmg;   // enemy Block reduces it
+                afn_hp[s->tgt] -= dmg;
+                if (afn_hp[s->tgt] < 0) afn_hp[s->tgt] = 0;
             }
-            afn_fb_x += afn_fb_dirx*sp; afn_fb_z += afn_fb_dirz*sp;   // always move along the direction
-        } else {
-            afn_fb_x += dx/dl*sp; afn_fb_y += dy/dl*sp; afn_fb_z += dz/dl*sp;   // forward (unchanged)
+            s->active = 0;          // contact: deal damage + despawn
+            continue;
+        } else if (dl > 0.001f) {
+            if (homing) {
+                // Ease the flight direction toward the target by afn_fb_homing, then move
+                // along it (gentle = a sidestep clears it). But unless Circle Home is on,
+                // STOP homing once the target is behind the flight direction (dot < 0) — so
+                // an overshot blast flies straight off instead of turning around to orbit.
+                float ux = dx/dl, uz = dz/dl;
+                float dot = s->dirx*ux + s->dirz*uz;
+                if (afn_fb_circle || dot > 0.0f) {
+                    s->dirx += (ux - s->dirx) * afn_fb_homing;
+                    s->dirz += (uz - s->dirz) * afn_fb_homing;
+                    float nl = sqrtf(s->dirx*s->dirx + s->dirz*s->dirz);
+                    if (nl > 1e-3f) { s->dirx /= nl; s->dirz /= nl; }
+                    s->y += dy/dl*sp;      // track the target's height only while homing
+                }
+                s->x += s->dirx*sp; s->z += s->dirz*sp;   // always move along the direction
+            } else {
+                s->x += dx/dl*sp; s->y += dy/dl*sp; s->z += dz/dl*sp;   // forward (unchanged)
+            }
         }
+        if (--s->life <= 0) { s->active = 0; continue; }   // lifetime / forward-shot range
+        anyActive = 1;
+        if (s->full) anyFull = 1;
     }
-    if (--afn_fb_life <= 0) afn_fb_active = 0;   // lifetime safety / forward-shot range
-    afn_fb_charging = 0;
+    afn_fb_active = anyActive;     // legacy mirror: any blast in flight
+    if (!anyFull) s_pbBeamFull = 0;
 }
 
 // HARDCODED: enemy combat AI state machine. Drives NPC slot i only if it's the enemy.
@@ -1742,12 +1794,23 @@ void afn_ai_strafe(void) {
 // chance rolls true — and the enemy isn't already dodging / on cooldown. The chance
 // is rolled here each frame (the gate is evaluated per frame), so pair it with On
 // Rise to fire the dodge once.
+// Nearest active pooled blast to (ex,ez); returns squared distance (or -1 if none).
+static float afn_fb_nearest_sq(float ex, float ez) {
+    float best = -1.0f;
+    for (int k = 0; k < AFN_FB_POOL; k++) {
+        if (!s_fbPool[k].active) continue;
+        float dx = ex - s_fbPool[k].x, dz = ez - s_fbPool[k].z;
+        float d2 = dx*dx + dz*dz;
+        if (best < 0.0f || d2 < best) best = d2;
+    }
+    return best;
+}
 int afn_ai_blast_incoming(void) {
     int i = afn_ai_slot; if (i < 0) return 0;
     if (s_eDodgeFrames != 0 || s_eBlockFrames != 0 || s_aiDodgeCD != 0 || !afn_fb_active) return 0;
-    float fdx = s_npcX[i] - afn_fb_x, fdz = s_npcZ[i] - afn_fb_z;
+    float d2 = afn_fb_nearest_sq(s_npcX[i], s_npcZ[i]);
     float dtr = (float)afn_ai_dodge_trig;
-    if (fdx*fdx + fdz*fdz > dtr*dtr) return 0;
+    if (d2 < 0.0f || d2 > dtr*dtr) return 0;
     return ai_chance(afn_ai_dodgeprob * 0.01f) ? 1 : 0;
 }
 
@@ -1757,9 +1820,9 @@ int afn_ai_blast_incoming(void) {
 int afn_ai_blast_block(void) {
     int i = afn_ai_slot; if (i < 0) return 0;
     if (s_eDodgeFrames != 0 || s_eBlockFrames != 0 || afn_ai_state == AI_BLOCK || !afn_fb_active) return 0;
-    float fdx = s_npcX[i] - afn_fb_x, fdz = s_npcZ[i] - afn_fb_z;
+    float d2 = afn_fb_nearest_sq(s_npcX[i], s_npcZ[i]);
     float dtr = (float)afn_ai_dodge_trig;
-    if (fdx*fdx + fdz*fdz > dtr*dtr) return 0;
+    if (d2 < 0.0f || d2 > dtr*dtr) return 0;
     return ai_chance(afn_ai_block_prob * 0.01f) ? 1 : 0;
 }
 
@@ -2668,10 +2731,20 @@ static void clash_sense(void) {
     // The "full beam in flight" flags only hold while each beam is actually active.
     if (!afn_fb_active) s_pbBeamFull = 0;
     if (!s_efbActive)   s_ebBeamFull = 0;
-    int bothUp = (afn_fb_active && s_pbBeamFull && s_efbActive && s_ebBeamFull && afn_ai_state != AI_DEAD && afn_scene_phase == 0);
+    // Pick the player's full-charge pooled beam closest to the enemy beam (the clash
+    // candidate). s_pbBeamFull stays set only while such a beam exists.
+    float pbx = 0, pby = 0, pbz = 0, bestD = -1.0f; int havePb = 0;
+    for (int k = 0; k < AFN_FB_POOL; k++) {
+        if (!s_fbPool[k].active || !s_fbPool[k].full) continue;
+        float ddx = s_fbPool[k].x - s_efbX, ddz = s_fbPool[k].z - s_efbZ;
+        float d2 = ddx*ddx + ddz*ddz;
+        if (bestD < 0.0f || d2 < bestD) { bestD = d2; pbx = s_fbPool[k].x; pby = s_fbPool[k].y; pbz = s_fbPool[k].z; havePb = 1; }
+    }
+    if (!havePb) s_pbBeamFull = 0;
+    int bothUp = (havePb && s_pbBeamFull && s_efbActive && s_ebBeamFull && afn_ai_state != AI_DEAD && afn_scene_phase == 0);
     if (!bothUp) { s_clashAirT = 0; afn_clash_ready = 0; return; }
     s_clashAirT++;
-    float dx = afn_fb_x - s_efbX, dy = afn_fb_y - s_efbY, dz = afn_fb_z - s_efbZ;
+    float dx = pbx - s_efbX, dy = pby - s_efbY, dz = pbz - s_efbZ;
     float meetR = (float)afn_clash_meet_r;
     int meet = (dx*dx + dy*dy + dz*dz) <= (meetR * meetR);
     afn_clash_ready = (meet || (afn_clash_air_fb > 0 && s_clashAirT >= afn_clash_air_fb)) ? 1 : 0;
@@ -2679,6 +2752,7 @@ static void clash_sense(void) {
 
 // Node primitive: suppress BOTH projectiles (Suppress Beams / Clash Begin).
 void afn_clash_suppress_beams(void) {
+    for (int k = 0; k < AFN_FB_POOL; k++) s_fbPool[k].active = 0;   // despawn all in-flight blasts
     afn_fb_active = 0; afn_fb_charging = 0; afn_fb_level = 0.0f; afn_fb_fire_timer = 0;
     s_efbActive = 0; s_efbCharging = 0;
 }
@@ -3241,8 +3315,19 @@ int main(void)
 #ifdef AFN_PLAYER_SPRITE_IDX
             if (want < 0) want = AFN_PLAYER_SPRITE_IDX;
 #endif
-            for (int i = 0; i < AFN_SPR_INST_COUNT; i++)
-                if (afn_spr_parent[i] >= 0 && (want < 0 || afn_spr_parent[i] == want)) { afn_fb_inst = i; break; }
+            // Two-pass: prefer the exact parent sprite, but the player carries
+            // exactly one attached effect sub-sprite (focus_gfx). If `want` came
+            // back as a wrong/stale index (sub-sprite index spaces can diverge),
+            // fall back to ANY attached sub-sprite instead of leaving the orb
+            // unresolved — an unresolved inst means the shot fires + deals damage
+            // + plays its SFX but the ball is never drawn ("beam won't summon").
+            int fbAny = -1;
+            for (int i = 0; i < AFN_SPR_INST_COUNT; i++) {
+                if (afn_spr_parent[i] < 0) continue;
+                if (fbAny < 0) fbAny = i;
+                if (want < 0 || afn_spr_parent[i] == want) { afn_fb_inst = i; break; }
+            }
+            if (afn_fb_inst < 0) afn_fb_inst = fbAny;   // exact match failed -> any attached sub-sprite
         }
 #endif
         {
@@ -3285,22 +3370,35 @@ int main(void)
                 fbAttachZ = fbBaseZ + fbOx*fbRz + fbOz*fbFz;
             }
             if (afn_fb_fire_timer > 0) afn_fb_fire_timer--;   // Is Firing window counts down each frame
-            // Focus Blast FLIGHT is node-driven (Step Focus Blast). Charge / release /
-            // idle run here only while no shot is in flight (was the leading
-            // `if (afn_fb_active)` guard).
-            if (!afn_fb_active) {
+            // Charge / release / idle. Charging is now INDEPENDENT of in-flight shots:
+            // each release spawns its own pooled projectile (Step Focus Blast advances
+            // them all), so a miss never locks out the next cast and several blasts can
+            // share the field.
+            {
                 if (afn_fb_fire_req && afn_fb_level > 0.0f) {
-                    // Release with a held charge: launch the ball as a projectile.
+                    // Release with a held charge: spawn a pooled projectile from the
+                    // charge state, then free the orb to charge again immediately.
                     float frac = (afn_fb_max > 0) ? afn_fb_level / (float)afn_fb_max : 1.0f;
-                    s_pbBeamFull = (frac >= afn_clash_full_pct * 0.01f) ? 1 : 0;   // Beam Clash node: this in-flight beam is a full charge
-                    afn_fb_active  = 1;
-                    afn_fb_dirx    = fbFx; afn_fb_dirz = fbFz;
-                    afn_fb_cur_dmg = (int)(afn_fb_dmg_max * frac); if (afn_fb_cur_dmg < 1) afn_fb_cur_dmg = 1;
-                    afn_fb_life    = (afn_fb_tgt >= 0) ? 240 : 90;   // homing gets longer to chase
-                    afn_fb_fire_timer = 30;                          // Is Firing window: hold the launch anim ~0.5s
-                    afn_fb_charging = 0; afn_fb_level = 0.0f;        // keep afn_fb_x/y/z + scale from the charge
+                    int slot = -1;
+                    for (int k = 0; k < AFN_FB_POOL; k++) if (!s_fbPool[k].active) { slot = k; break; }
+                    if (slot < 0) {   // pool full: recycle the slot with the least life left
+                        slot = 0; for (int k = 1; k < AFN_FB_POOL; k++) if (s_fbPool[k].life < s_fbPool[slot].life) slot = k;
+                    }
+                    AfnFbShot* s = &s_fbPool[slot];
+                    s->active = 1;
+                    s->x = afn_fb_x; s->y = afn_fb_y; s->z = afn_fb_z;   // launch from the charge orb spot
+                    s->dirx = fbFx;  s->dirz = fbFz;
+                    s->scale = afn_fb_scale;
+                    s->dmg = (int)(afn_fb_dmg_max * frac); if (s->dmg < 1) s->dmg = 1;
+                    s->life = (afn_fb_tgt >= 0) ? 240 : 90;             // homing gets longer to chase
+                    s->tgt = afn_fb_tgt;
+                    s->full = (frac >= afn_clash_full_pct * 0.01f) ? 1 : 0;
+                    if (s->full) s_pbBeamFull = 1;   // a full-charge beam is now in flight (clash sense)
+                    afn_fb_active = 1;
+                    afn_fb_fire_timer = 30;                             // Is Firing window: hold the launch anim ~0.5s
+                    afn_fb_charging = 0; afn_fb_level = 0.0f;
                 } else if (afn_fb_charge_req) {
-                    // Charging: grow + carry the ball at chest height in front of the player.
+                    // Charging: grow + carry the orb at chest height in front of the player.
                     afn_fb_charging = 1;
                     afn_fb_level += 1.0f; if (afn_fb_level > afn_fb_max) afn_fb_level = (float)afn_fb_max;
                     float frac = (afn_fb_max > 0) ? afn_fb_level / (float)afn_fb_max : 1.0f;

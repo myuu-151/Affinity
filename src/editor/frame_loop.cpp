@@ -892,6 +892,7 @@ enum class VsNodeType : int {
     ShouldAiBlock,   // gate: a blast is incoming and the AI rolls to BLOCK (vs dodge)
     AiBlockBegin,    // action: enemy raises its guard (block clip) for a window
     AiBlockStep,     // action: hold the enemy block stance; flags done at the end
+    CanFireBlast,    // gate: passes only when NO Focus Blast is in flight (so re-fire SFX/charge is suppressed)
     COUNT
 };
 
@@ -1293,6 +1294,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Should AI Block", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "AI Block Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Block Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "Can Fire Blast",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1591,6 +1593,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000), Dodge Range (px from an incoming blast — homing OR forward — at which it reacts), Block % (chance to block instead of dodge an incoming blast), Block Dmg % (damage taken while blocking — 20 = take 20%; applies to BOTH the enemy and your block), Charge Speed + Tap Speed (the enemy's projectile launch speeds in TENTHS of px/frame, like your Fire Charge Shot — 20 = 2.0 full charge, 25 = 2.5 tap). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800/24/30/20/20/25."; break;
     case VsNodeType::SetBlock: desc = "Sets the player's blocking flag (On 0/1). While 1, an incoming enemy hit is reduced to Block Dmg % (default 20) and the player spends Energy Cost energy per BLOCKED HIT (not per press — block freely, only pay when a hit actually lands). Wire On Key Held(Block) -> Set Block(1, cost) and On Key Released -> Set Block(0), next to your block clip."; break;
     case VsNodeType::ShouldAiBlock: desc = "Gate: passes when a player blast is incoming (within Dodge Range) and the Block % chance rolls true — and the AI isn't already dodging/blocking. The AI dodges OR blocks. Wire: AI Sense -> Should AI Block -> On Rise -> AI Block Begin + Set AI State(Block)."; break;
+    case VsNodeType::CanFireBlast: desc = "Gate: passes its exec ONLY while no Focus Blast is in flight (afn_fb_active == 0). The blast machine is single-shot — once a shot is on the field you can't charge or fire a new one — but the fire/charge SFX node would still play on the button press. Wire your Focus Blast charge/fire sound (and the charge start, if you want) behind this gate so it stays silent while a shot is already out: On Key Pressed(fire) -> Can Fire Blast -> Play Sound."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
     case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
     case VsNodeType::IsClashWon: desc = "Gate: passes when the clash balance is pushed fully to the enemy (>= 1.0). Use to resolve a win: hide the clash HUD, stop the struggle/mash SFX, play win_clash, and Set HP(enemy, 0)."; break;
@@ -24698,6 +24701,18 @@ void FrameTick(float dt)
                         "    // Run under Is AI State(Block); on block_done -> Set AI State(Strafe).");
                     break;
                 }
+                case VsNodeType::CanFireBlast: {
+                    editorCode = "// Gate: pass only while NO Focus Blast is in flight (suppress re-fire SFX)";
+                    setActionFunc(infoNode, "_can_fire_blast",
+                        "    if (!afn_fb_active) { /* downstream: charge/fire SFX */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_fb_active = 1 from launch until the shot hits / expires. The blast\n"
+                        "    // machine is single-shot: while active the charge + fire blocks are skipped\n"
+                        "    // (if(!afn_fb_active)), so a 2nd press can't summon a beam — but a Play Sound\n"
+                        "    // node on the press would still fire. Gate that SFX here so it stays silent\n"
+                        "    // while a shot is already on the field: On Key Pressed(fire) -> Can Fire Blast -> Play Sound.");
+                    break;
+                }
                 case VsNodeType::IsBlastIncoming: {
                     editorCode = "// Gate: a player Focus Blast is within the enemy's Dodge Range (+ chance)";
                     setActionFunc(infoNode, "_is_blast_incoming",
@@ -24924,13 +24939,14 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::StepFocusBlast: {
-                    editorCode = "// Advance the player's in-flight Focus Blast (flight + hit)";
+                    editorCode = "// Advance the player's in-flight Focus Blasts (pool: flight + hit)";
                     setActionFunc(infoNode, "_step_focus_blast",
                         "    afn_focus_blast_step();\n"
                         "    // --- Runtime (psv main.c) ---\n"
-                        "    // Homes the launched orb toward the captured target, deals afn_fb_cur_dmg\n"
-                        "    // to afn_hp[target] + despawns on contact, expires on lifetime. Drive every\n"
-                        "    // frame. Charge/release = the Charge Shot / Fire Charge Shot nodes.");
+                        "    // Advances EVERY pooled in-flight blast (AFN_FB_POOL=6): each homes toward\n"
+                        "    // its captured target, deals its own dmg to afn_hp[target] + despawns on\n"
+                        "    // contact, expires on lifetime. Several can coexist. Drive every frame.\n"
+                        "    // Charge/release = the Charge Shot / Fire Charge Shot nodes.");
                     break;
                 }
                 case VsNodeType::ShowHPBar: {
@@ -25163,11 +25179,13 @@ void FrameTick(float dt)
                         "    afn_fb_max_scale  = %s / 100.0f;        // full-charge size\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c focus-blast block) ---\n"
-                        "    // Drive from On Key Held. Each frame charge_req is set and no shot is\n"
-                        "    // in flight: afn_fb_charging = 1; afn_fb_level += 1 (clamped to max);\n"
-                        "    // the player's hidden effect sub-sprite is shown at chest height and\n"
-                        "    // scaled lerp(min,max, level/max). Releasing the key stops asserting\n"
-                        "    // charge_req, so the runtime clears charging (Fire Charge Shot launches).",
+                        "    // Drive from On Key Held. Charging is INDEPENDENT of in-flight shots:\n"
+                        "    // each release spawns its own pooled projectile, so a miss never locks\n"
+                        "    // out the next cast and several blasts can share the field. Each frame\n"
+                        "    // charge_req is set: afn_fb_charging = 1; afn_fb_level += 1 (clamped to\n"
+                        "    // max); the player's hidden effect sub-sprite (the single charge orb) is\n"
+                        "    // shown at chest height and scaled lerp(min,max, level/max). Releasing\n"
+                        "    // the key stops asserting charge_req, so charging clears (Fire Charge Shot launches).",
                         fmtInt(infoNode.id, 0, "180"),
                         fmtInt(infoNode.id, 1, "5"),
                         fmtInt(infoNode.id, 2, "70"));
@@ -25211,11 +25229,12 @@ void FrameTick(float dt)
                         "    afn_fb_tgt      = afn_cam_lock_target; // homing target (-1 = fire straight forward)\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c focus-blast block) ---\n"
-                        "    // Drive from On Key Released. Snapshot the ball -> projectile, capture\n"
-                        "    // target + facing, dmg = dmg_max * (level/max). Each frame it EASES its\n"
-                        "    // direction toward the target by Homing %% while the target is AHEAD\n"
-                        "    // (with Circle Home off it stops homing + flies straight once passed, so\n"
-                        "    // a dodge isn't chased down). Hits within Speed + Hit Radius of the box centre.",
+                        "    // Drive from On Key Released. Spawns a POOLED projectile (AFN_FB_POOL=6)\n"
+                        "    // from the charge orb's spot + facing, dmg = dmg_max * (level/max) — so\n"
+                        "    // several blasts can be on the field at once and the orb is free to charge\n"
+                        "    // again immediately. Step Focus Blast advances every pooled shot: each\n"
+                        "    // EASES toward the target by Homing %% while it's AHEAD (Circle Home off =\n"
+                        "    // flies straight once passed, so a dodge isn't chased). Hits within Speed + Hit Radius.",
                         fmtInt(infoNode.id, 0, "30"),
                         fmtInt(infoNode.id, 1, "60"),
                         fmtInt(infoNode.id, 2, "4"),

@@ -548,6 +548,7 @@ enum class AfnScriptNodeType : int {
     ShouldAiBlock,   // gate: a blast is incoming and the AI rolls to BLOCK (vs dodge)
     AiBlockBegin,    // action: enemy raises its guard (block clip) for a window
     AiBlockStep,     // action: hold the enemy block stance; flags done at the end
+    CanFireBlast,    // gate: passes only when NO Focus Blast is in flight (so re-fire SFX/charge is suppressed)
     COUNT
 };
 

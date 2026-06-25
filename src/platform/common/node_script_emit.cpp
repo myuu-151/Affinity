@@ -1578,6 +1578,17 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
+            if (a->type == AfnScriptNodeType::CanFireBlast) {
+                // Gate: pass exec only while NO Focus Blast is in flight. The blast
+                // machine is single-shot (you can't charge/fire a new one until the
+                // current shot resolves), but the fire/charge SFX node would still
+                // play on the press. Put that SFX (and the charge start) behind this
+                // gate so nothing fires while a shot is already on the field.
+                f << "    if (!afn_fb_active) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
             if (a->type == AfnScriptNodeType::IsAiFlag) {
                 // Flag selector (wired Int): 0=lose_ready 1=dodge_ready 2=can_fire
                 // 3=charge_done 4=dodge_done 5=fire_done 6=reached.
