@@ -1181,7 +1181,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* d0 = findDataIn(a->id, 0); auto* d1 = findDataIn(a->id, 1);
                 auto* d2 = findDataIn(a->id, 2); auto* d3 = findDataIn(a->id, 3);
                 auto* d4 = findDataIn(a->id, 4); auto* d5 = findDataIn(a->id, 5);
-                auto* d6 = findDataIn(a->id, 6);
+                auto* d6 = findDataIn(a->id, 6); auto* d7 = findDataIn(a->id, 7);
+                auto* d8 = findDataIn(a->id, 8); auto* d9 = findDataIn(a->id, 9);
                 int fullPct = d0 ? resolveInt(d0) : 85;
                 int pPush   = d1 ? resolveInt(d1) : 60;
                 int aiPush  = d2 ? resolveInt(d2) : 50;
@@ -1189,11 +1190,16 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int meetR   = d4 ? resolveInt(d4) : 18;
                 int dmgPct  = d5 ? resolveInt(d5) : 150;
                 int airFb   = d6 ? resolveInt(d6) : 90;
+                int aiJit   = d7 ? resolveInt(d7) : 1;
+                int fumPct  = d8 ? resolveInt(d8) : 1;
+                int fumLen  = d9 ? resolveInt(d9) : 6;
                 f << "    afn_clash_enabled = 1;\n";
                 f << "    afn_clash_full_pct = " << fullPct << "; afn_clash_push_m = " << pPush
                   << "; afn_clash_ai_push_m = " << aiPush << ";\n";
                 f << "    afn_clash_ai_min = " << aiMin << "; afn_clash_meet_r = " << meetR
                   << "; afn_clash_dmg_pct = " << dmgPct << "; afn_clash_air_fb = " << airFb << ";\n";
+                f << "    afn_clash_ai_jit = " << aiJit << "; afn_clash_fumble_pct = " << fumPct
+                  << "; afn_clash_fumble_len = " << fumLen << ";\n";
                 break;
             }
             case AfnScriptNodeType::StopMusic:

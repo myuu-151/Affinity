@@ -190,14 +190,15 @@ static int s_eBlockFrames = 0;   // enemy block-stance countdown
 #define AFN_CLASH_WINDOW       12   // both full-charge releases must land within this many frames
 #define AFN_CLASH_FULL_FRAC  0.85f  // "fully charged" = >= this fraction of max charge
 #define AFN_CLASH_PUSH       0.060f // balance gained per player Cross tap
-// AI masher tuned to a mid-skilled human: it "presses" on a varying interval (not
-// a constant drain), ~5-10 presses/sec with the occasional fumble pause. Beatable
-// by out-mashing it, but it'll grind you down if you slack.
-#define AFN_CLASH_AI_TAP     0.050f // balance removed per AI press (vs the player's 0.060 tap)
-#define AFN_CLASH_AI_MIN        6   // min frames between AI presses
-#define AFN_CLASH_AI_JIT        7   // + 0..6 random frames -> avg ~6.7 presses/sec
-#define AFN_CLASH_AI_FUMBLE  0.08f  // chance a press is followed by a human "fumble" pause
-#define AFN_CLASH_AI_FUMBLE_LEN 16  // extra frames for a fumble pause
+// AI masher tuned to a HIGH-skill CPU that's trying to WIN: relentless, near-perfect
+// cadence (~15 presses/sec) with almost no fumbles — it'll push you to your zone if
+// you're not mashing flat-out. (Push/interval are Beam Clash node tunables: AI Push /
+// AI Interval, set aggressive in the project.)
+#define AFN_CLASH_AI_TAP     0.050f // balance removed per AI press (default; AI Push pin overrides)
+#define AFN_CLASH_AI_MIN        6   // default; AI Interval pin overrides
+#define AFN_CLASH_AI_JIT        1   // +0..0 -> dead-steady cadence
+#define AFN_CLASH_AI_FUMBLE  0.01f  // ~1% chance of a brief slip (almost never)
+#define AFN_CLASH_AI_FUMBLE_LEN 6   // short fumble pause
 #define AFN_CLASH_MEET_R       18.0f// beams "meet" when their centers are within this (world units) — must be nearly touching
 #define AFN_CLASH_AIR_FALLBACK   90 // ...or clash anyway after both beams have been airborne this long (~1.5s)
 static int   s_clashAirT = 0, s_clashAiTap = 0;           // air-fallback timer + AI press countdown
@@ -224,6 +225,11 @@ int afn_clash_dmg_pct = 150;
 // even if they never meet (so it doesn't fizzle). 0 = OFF — only a real meet (within
 // Meet Radius) triggers a clash. Tunable on the Beam Clash node.
 int afn_clash_air_fb = 90;
+// AI masher consistency (Beam Clash node tunables) — what sets the skill level:
+// jitter = extra 0..N random frames on each press interval (0 = dead steady),
+// fumble % = chance of a brief slip, fumble len = how long that slip lasts.
+// Defaults = the high-skill profile.
+int afn_clash_ai_jit = 1, afn_clash_fumble_pct = 1, afn_clash_fumble_len = 6;
 void afn_clash_suppress_beams(void);     // fwd (defined below) — node SuppressBeams / ClashBegin
 void afn_clash_begin(void);              // fwd — node ClashBegin
 void afn_clash_ai_step(void);            // fwd — node ClashAiStep
@@ -2690,8 +2696,8 @@ void afn_clash_ai_step(void) {
     if (++s_clashPressTimer >= 8) { s_clashPressTimer = 0; s_clashPressed = !s_clashPressed; }
     if (--s_clashAiTap <= 0) {
         afn_clash_balance -= afn_clash_ai_push_m * 0.001f;
-        s_clashAiTap = afn_clash_ai_min + (int)(ai_rand01() * AFN_CLASH_AI_JIT);
-        if (ai_chance(AFN_CLASH_AI_FUMBLE)) s_clashAiTap += AFN_CLASH_AI_FUMBLE_LEN;
+        s_clashAiTap = afn_clash_ai_min + (int)(ai_rand01() * afn_clash_ai_jit);
+        if (ai_chance(afn_clash_fumble_pct * 0.01f)) s_clashAiTap += afn_clash_fumble_len;
     }
     if (afn_clash_balance < 0.0f) afn_clash_balance = 0.0f;
     if (afn_clash_balance > 1.0f) afn_clash_balance = 1.0f;

@@ -290,8 +290,8 @@ static void afn_bp0_update(void) {
 #endif
     }
     afn_clash_enabled = 1;
-    afn_clash_full_pct = 85; afn_clash_push_m = 60; afn_clash_ai_push_m = 50;
-    afn_clash_ai_min = 6; afn_clash_meet_r = 18; afn_clash_dmg_pct = 150; afn_clash_air_fb = 0;
+    afn_clash_full_pct = 85; afn_clash_push_m = 60; afn_clash_ai_push_m = 70;
+    afn_clash_ai_min = 5; afn_clash_meet_r = 18; afn_clash_dmg_pct = 150; afn_clash_air_fb = 0;
     if (afn_clash_ready) {
     if (afn_rise_409 >= afn_frame_count - 1) { afn_rise_409 = afn_frame_count; }
     else { afn_rise_409 = afn_frame_count;
@@ -634,7 +634,7 @@ static void afn_bp0_key_released(void) {
     afn_fb_fire_req = 1;
     afn_fb_dmg_max  = 30;
     afn_fb_speed    = 25 / 10.0f;
-    afn_fb_hit_r    = 4; afn_fb_homing = 12 / 100.0f; afn_fb_circle = 0;
+    afn_fb_hit_r    = 4; afn_fb_homing = 3 / 100.0f; afn_fb_circle = 0;
 #ifdef AFN_HAS_CAM_LOCK
     afn_fb_tgt      = afn_cam_lock_target;
 #else
