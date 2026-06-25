@@ -384,6 +384,9 @@ struct CameraSlot
     float height   = 14.0f;       // camera height, editor units
     float orbitPitch = 0.0f;      // orbit pitch in degrees (0 = auto from height/dist);
                                   // PSV, identical authoring to CameraStartObject.orbitPitch
+    float lookYaw = 0.0f;         // horizontal AIM rotation in degrees — pans the camera's
+                                  // look direction left/right (subject off-center), independent
+                                  // of the orbit Yaw (which moves the eye). PSV.
 };
 
 struct FloorSprite

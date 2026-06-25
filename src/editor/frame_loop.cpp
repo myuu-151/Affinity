@@ -7684,9 +7684,9 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "spriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
         // Player camera presets (Mode 4): one line per slot.
         for (const auto& cs : sp.cameraSlots)
-            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
+            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                     cs.name.empty() ? "Camera" : cs.name.c_str(),
-                    cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch);
+                    cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw);
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -8201,7 +8201,7 @@ static bool SaveProject(const std::string& path)
             for (const auto& cs : sp.cameraSlots)
                 fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
-                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch);
+                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -8348,7 +8348,7 @@ static bool SaveProject(const std::string& path)
             for (const auto& cs : sp.cameraSlots)
                 fprintf(f, "m7CamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
-                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch);
+                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
@@ -8911,10 +8911,10 @@ static bool LoadProject(const std::string& path)
                 sp2.rigAnimClock = 0.0f;
             }
             else if (strncmp(line, "camSlot=", 8) == 0 && sSpriteCount > 0) {
-                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0;
-                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp) >= 1) {
+                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0;
+                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly) >= 1) {
                     CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp;
+                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly;
                     sSprites[sSpriteCount - 1].cameraSlots.push_back(cs);
                 }
             }
@@ -10231,10 +10231,10 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "msCamSlot=", 10) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
-                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0;
-                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp) >= 1) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly) >= 1) {
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp;
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
                     }
                 }
@@ -10707,10 +10707,10 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "m7CamSlot=", 10) == 0 && !sM7Scenes.empty()) {
                 MapScene& ms = sM7Scenes.back();
                 if (ms.spriteCount > 0) {
-                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0;
-                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp) >= 1) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly) >= 1) {
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp;
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
                     }
                 }
@@ -15550,6 +15550,58 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 }
 
 // ---- Right top: Object Editor (replaces Tileset in Edit mode) ----
+// Camera-preset (camera slot) editor block — shared by the object-properties
+// panel (3D Scene / Mode7 tabs) and the Meshes tab, so Yaw/Pitch/Distance/Height
+// can be authored right next to the live 3D slot gizmo (which only renders in the
+// Meshes tab's GL viewport).
+static void DrawCameraPresetsChunk(FloorSprite& sp)
+{
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), sBuildTarget == BuildTarget::PSV ? "Camera Presets (3D Scene)" : "Camera Presets (Mode 4)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slot 0 is always the scene default camera. These are extra angles a SetCamera node blends to on an event (SetCamera Slot = 1, 2, ...). The camera keeps orbit-following the player.");
+    for (int ci = 0; ci < (int)sp.cameraSlots.size(); ci++) {
+        CameraSlot& cs = sp.cameraSlots[ci];
+        ImGui::PushID(40000 + ci);
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), "Slot %d: %s###cs", ci + 1, cs.name.empty() ? "Camera" : cs.name.c_str());
+        if (ImGui::TreeNode(hdr)) {
+            char nb[64]; snprintf(nb, sizeof(nb), "%s", cs.name.c_str());
+            if (ImGui::InputText("Name##csn", nb, sizeof(nb))) { cs.name = nb; sProjectDirty = true; }
+            if (ImGui::DragFloat("Yaw (deg)##csa", &cs.angle, 1.0f, 0.0f, 360.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::DragFloat("Pitch##csp", &cs.orbitPitch, 0.5f, -80.0f, 80.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Orbit pitch while this slot is active (PSV).\nPositive = look down, negative = look up.\n0 = auto (derive from Height / Distance).\nSame units as Camera Properties > Pitch.");
+            if (ImGui::DragFloat("H Rotation (deg)##cshr", &cs.lookYaw, 0.5f, -90.0f, 90.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Horizontal rotation of the camera's AIM (pan).\nRotates the look direction left/right so the subject sits\noff-center, WITHOUT moving the eye (that's Yaw).\n0 = look straight at the player.");
+            if (ImGui::DragFloat("Distance##csd", &cs.distance, 1.0f, 0.0f, 400.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = keep the scene's orbit distance");
+            if (ImGui::DragFloat("Height##csh", &cs.height, 0.5f, -50.0f, 200.0f, "%.1f")) sProjectDirty = true;
+            if (ImGui::SmallButton("Remove Slot##csr")) {
+                sp.cameraSlots.erase(sp.cameraSlots.begin() + ci);
+                sProjectDirty = true;
+                ImGui::TreePop(); ImGui::PopID();
+                break;
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::Button("+ Add Camera Slot##csadd")) {
+        // Seed a new slot from the scene's current camera so it starts as a copy
+        // of what you're looking at (sCamObj.angle is radians).
+        CameraSlot ncs;
+        ncs.angle = sCamObj.angle * 180.0f / 3.14159265f;
+        if (ncs.angle < 0.0f) ncs.angle += 360.0f;
+        ncs.horizon  = sCamObj.horizon;
+        ncs.orbitPitch = sCamObj.orbitPitch;   // inherit the scene-start pitch authoring
+        ncs.height   = sCamObj.height;
+        ncs.distance = 0.0f;   // 0 = keep the scene's orbit distance
+        char nm[32]; snprintf(nm, sizeof(nm), "Camera %d", (int)sp.cameraSlots.size() + 1);
+        ncs.name = nm;
+        sp.cameraSlots.push_back(ncs);
+        sProjectDirty = true;
+    }
+}
+
 static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
 {
     ImGui::SetNextWindowPos(pos);
@@ -15724,50 +15776,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         }
 
         // ---- Player camera presets (Mode 4) ----
-        if (sp.type == SpriteType::Player) {
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), sBuildTarget == BuildTarget::PSV ? "Camera Presets (3D Scene)" : "Camera Presets (Mode 4)");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slot 0 is always the scene default camera. These are extra angles a SetCamera node blends to on an event (SetCamera Slot = 1, 2, ...). The camera keeps orbit-following the player.");
-            for (int ci = 0; ci < (int)sp.cameraSlots.size(); ci++) {
-                CameraSlot& cs = sp.cameraSlots[ci];
-                ImGui::PushID(40000 + ci);
-                char hdr[80];
-                snprintf(hdr, sizeof(hdr), "Slot %d: %s###cs", ci + 1, cs.name.empty() ? "Camera" : cs.name.c_str());
-                if (ImGui::TreeNode(hdr)) {
-                    char nb[64]; snprintf(nb, sizeof(nb), "%s", cs.name.c_str());
-                    if (ImGui::InputText("Name##csn", nb, sizeof(nb))) { cs.name = nb; sProjectDirty = true; }
-                    if (ImGui::DragFloat("Yaw (deg)##csa", &cs.angle, 1.0f, 0.0f, 360.0f, "%.0f")) sProjectDirty = true;
-                    if (ImGui::DragFloat("Pitch##csp", &cs.orbitPitch, 0.5f, -80.0f, 80.0f, "%.0f deg")) sProjectDirty = true;
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Orbit pitch while this slot is active (PSV).\nPositive = look down, negative = look up.\n0 = auto (derive from Height / Distance).\nSame units as Camera Properties > Pitch.");
-                    if (ImGui::DragFloat("Distance##csd", &cs.distance, 1.0f, 0.0f, 400.0f, "%.0f")) sProjectDirty = true;
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = keep the scene's orbit distance");
-                    if (ImGui::DragFloat("Height##csh", &cs.height, 0.5f, -50.0f, 200.0f, "%.1f")) sProjectDirty = true;
-                    if (ImGui::SmallButton("Remove Slot##csr")) {
-                        sp.cameraSlots.erase(sp.cameraSlots.begin() + ci);
-                        sProjectDirty = true;
-                        ImGui::TreePop(); ImGui::PopID();
-                        break;
-                    }
-                    ImGui::TreePop();
-                }
-                ImGui::PopID();
-            }
-            if (ImGui::Button("+ Add Camera Slot##csadd")) {
-                // Seed a new slot from the scene's current camera so it starts as
-                // a copy of what you're looking at (sCamObj.angle is radians).
-                CameraSlot ncs;
-                ncs.angle = sCamObj.angle * 180.0f / 3.14159265f;
-                if (ncs.angle < 0.0f) ncs.angle += 360.0f;
-                ncs.horizon  = sCamObj.horizon;
-                ncs.orbitPitch = sCamObj.orbitPitch;   // inherit the scene-start pitch authoring
-                ncs.height   = sCamObj.height;
-                ncs.distance = 0.0f;   // 0 = keep the scene's orbit distance
-                char nm[32]; snprintf(nm, sizeof(nm), "Camera %d", (int)sp.cameraSlots.size() + 1);
-                ncs.name = nm;
-                sp.cameraSlots.push_back(ncs);
-                sProjectDirty = true;
-            }
-        }
+        if (sp.type == SpriteType::Player)
+            DrawCameraPresetsChunk(sp);
 
         // Sprite asset link
         {
@@ -18298,7 +18308,7 @@ void FrameTick(float dt)
                 for (const auto& fsCam : sSprites) {
                     if (fsCam.type != SpriteType::Player) continue;
                     for (const auto& cs : fsCam.cameraSlots)
-                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch });
+                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw });
                     break;
                 }
                 exportCam.walkSpeed = sCamObj.walkSpeed;
@@ -21857,6 +21867,20 @@ void FrameTick(float dt)
     else if (sActiveTab == EditorTab::ThreeD)
     {
         Draw3DView(ImVec2(vp->WorkPos.x, bodyY), ImVec2(totalW, bodyH));
+        // Camera-slot editor for the selected Player, floating over the 3D view so
+        // Yaw/Pitch/Distance/Height can be dialed in while watching the live gizmo
+        // (the gizmo renders here, in this tab's GL viewport).
+        if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
+            && sSprites[sSelectedSprite].type == SpriteType::Player)
+        {
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + totalW - Scaled(290), bodyY + Scaled(12)), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(Scaled(278), 0.0f), ImGuiCond_FirstUseEver);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.11f, 0.11f, 0.14f, 0.94f));
+            if (ImGui::Begin("Camera Slots##meshtabcam"))
+                DrawCameraPresetsChunk(sSprites[sSelectedSprite]);
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
     }
     else if (sActiveTab == EditorTab::Events)
     {
@@ -36327,6 +36351,81 @@ void Render3DViewport()
         glBegin(GL_POINTS);
         glVertex3f(sx, sy + h + 2.0f, sz);
         glEnd();
+    }
+
+    // ---- Camera slot helpers (selected Player) ----
+    // For each camera preset, draw a frustum gizmo from the computed eye position
+    // back to the object using the PSV runtime orbit formula (eye = target -
+    // sin/cos(yaw)*cos(pitch)*dist, +sin(pitch)*dist height), so Yaw/Pitch/Distance/
+    // Height can be authored visually — you see where the shot sits + what it frames.
+    if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
+        && sSprites[sSelectedSprite].type == SpriteType::Player
+        && !sSprites[sSelectedSprite].cameraSlots.empty())
+    {
+        const FloorSprite& ps = sSprites[sSelectedSprite];
+        glDisable(GL_DEPTH_TEST);   // always-on-top authoring helper
+        static const float pal[6][3] = {
+            {1.0f,0.55f,0.15f},{0.25f,0.8f,1.0f},{0.6f,1.0f,0.35f},
+            {1.0f,0.4f,0.8f},{1.0f,0.9f,0.25f},{0.7f,0.55f,1.0f}};
+        for (int ci = 0; ci < (int)ps.cameraSlots.size(); ci++)
+        {
+            const CameraSlot& cs = ps.cameraSlots[ci];
+            float yaw   = cs.angle * 0.01745329f;
+            float dist  = (cs.distance > 1.0f) ? cs.distance : 60.0f;        // scene-default fallback
+            float pitch = (cs.orbitPitch != 0.0f) ? cs.orbitPitch * 0.01745329f
+                                                  : atan2f(cs.height > 0.0f ? cs.height : 8.0f, dist); // auto-pitch
+            float tx = ps.x, ty = ps.y + cs.height * 0.5f, tz = ps.z;        // look point
+            float horizR = cosf(pitch) * dist;
+            float ex = tx - sinf(yaw) * horizR;                              // eye (matches main.c:4031-4058)
+            float ey = ty + sinf(pitch) * dist;
+            float ez = tz - cosf(yaw) * horizR;
+            const float* col = pal[ci % 6];
+            // The framing square is the camera's IMAGE PLANE, centered on the look
+            // point and oriented PERPENDICULAR to where the camera looks — so it
+            // visibly ROTATES (yaws) as you change Yaw and H Rotation, instead of
+            // staying world-aligned. H Rotation (lookYaw) rotates the look direction
+            // horizontally (matches the runtime aimAngle = camAngle + lookYaw).
+            float lyr = cs.lookYaw * 0.01745329f;
+            float lvx = tx - ex, lvy = ty - ey, lvz = tz - ez;       // eye -> look point
+            float fx =  lvx*cosf(lyr) + lvz*sinf(lyr);               // rotate horizontally by lookYaw
+            float fy2 = lvy;
+            float fz = -lvx*sinf(lyr) + lvz*cosf(lyr);
+            float fl = sqrtf(fx*fx + fy2*fy2 + fz*fz); if (fl < 1e-3f) fl = 1.0f;
+            fx/=fl; fy2/=fl; fz/=fl;
+            float rx = fz, rz = -fx;                                  // right = up(0,1,0) x forward
+            float rl = sqrtf(rx*rx + rz*rz); if (rl < 1e-3f) { rx = 1.0f; rz = 0.0f; rl = 1.0f; } rx/=rl; rz/=rl;
+            float ux = fy2*rz, uy = fz*rx - fx*rz, uz = -fy2*rx;      // up = forward x right (ry = 0)
+            float fr = 7.0f;   // framing-square half size
+            float c1x=tx-rx*fr+ux*fr, c1y=ty+uy*fr, c1z=tz-rz*fr+uz*fr;
+            float c2x=tx+rx*fr+ux*fr, c2y=ty+uy*fr, c2z=tz+rz*fr+uz*fr;
+            float c3x=tx+rx*fr-ux*fr, c3y=ty-uy*fr, c3z=tz+rz*fr-uz*fr;
+            float c4x=tx-rx*fr-ux*fr, c4y=ty-uy*fr, c4z=tz-rz*fr-uz*fr;
+            // frustum edges: eye -> 4 corners of the (rotating) image plane
+            glColor3f(col[0]*0.7f, col[1]*0.7f, col[2]*0.7f);
+            glLineWidth(1.5f);
+            glBegin(GL_LINES);
+            glVertex3f(ex,ey,ez); glVertex3f(c1x,c1y,c1z);
+            glVertex3f(ex,ey,ez); glVertex3f(c2x,c2y,c2z);
+            glVertex3f(ex,ey,ez); glVertex3f(c3x,c3y,c3z);
+            glVertex3f(ex,ey,ez); glVertex3f(c4x,c4y,c4z);
+            glEnd();
+            // the rotating image plane (what the shot frames)
+            glColor3f(col[0], col[1], col[2]);
+            glBegin(GL_LINE_LOOP);
+            glVertex3f(c1x,c1y,c1z); glVertex3f(c2x,c2y,c2z);
+            glVertex3f(c3x,c3y,c3z); glVertex3f(c4x,c4y,c4z);
+            glEnd();
+            // eye marker: a 3D cross so it reads from any view angle
+            float s = 3.0f;
+            glLineWidth(2.5f);
+            glBegin(GL_LINES);
+            glVertex3f(ex-s,ey,ez); glVertex3f(ex+s,ey,ez);
+            glVertex3f(ex,ey-s,ez); glVertex3f(ex,ey+s,ez);
+            glVertex3f(ex,ey,ez-s); glVertex3f(ex,ey,ez+s);
+            glEnd();
+        }
+        glLineWidth(1.0f);
+        glEnable(GL_DEPTH_TEST);
     }
 
     // ---- Camera start object ----

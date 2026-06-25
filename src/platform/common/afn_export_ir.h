@@ -159,7 +159,7 @@ struct AfnCameraExport
     bool  wallAware      = false; // PSV: pull the orbit camera in off walls (no clip-through)
     // Player camera presets (Mode 4): extra slots a SetCamera node blends to.
     // Runtime slot 0 = the scene default above; these are slots 1..N.
-    struct CamSlot { float angle = 0.0f, horizon = 60.0f, distance = 0.0f, height = 14.0f, orbitPitch = 0.0f; };
+    struct CamSlot { float angle = 0.0f, horizon = 60.0f, distance = 0.0f, height = 14.0f, orbitPitch = 0.0f, lookYaw = 0.0f; };
     std::vector<CamSlot> camSlots;
 };
 

@@ -1194,6 +1194,8 @@ int afn_face_lock = 0;                        // MovePlayer "Consistent Facing":
                                               // rig yaw while moving (strafe/moonwalk)
 int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
 int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
+static float s_camLookYaw = 0.0f;             // eased camera AIM pan (rad) — the active slot's lookYaw (column 5)
+static float s_prevPlayerYaw = 0.0f;          // last frame's model facing (deg) — camera slots frame relative to it
 
 // Camera-delay ease rates (x/256 catch-up per frame), normally emitted into
 // psv_mapdata.h by the exporter from the editor's camera settings. Fallbacks
@@ -3043,6 +3045,14 @@ int main(void)
         // during the swing (no spin), same as the NDS.
         if (afn_active_camera < 0 || afn_active_camera >= AFN_CAM_SLOT_COUNT) afn_active_camera = 0;
         const float* S = afn_cam_slots[afn_active_camera];
+        // Slot Yaw as a RELATIVE offset from the scene-default camera (slot 0). While
+        // locked-on the lock assist owns yaw (it faces the target), so a Set Camera's
+        // absolute yaw never applied — switching after orbiting looked inconsistent
+        // (a 180 orbit flipped it). Feeding this offset into the lock-facing instead
+        // makes a slot rotate the framing by its authored angle RELATIVE to the
+        // current facing, consistently regardless of orbit. Slot 0 -> 0 (faces target).
+        float slotYawOff = S[0] - afn_cam_slots[0][0];
+        s_camLookYaw += (S[5] - s_camLookYaw) * 0.125f;     // ease the AIM pan toward the active slot's lookYaw
         float camDistTgt   = S[1] > 1.0f ? S[1] : camDist;  // keep manual zoom unless slot overrides
         float camHeightTgt = S[2];
         camDist   += (camDistTgt   - camDist)   * 0.125f;
@@ -3058,7 +3068,13 @@ int main(void)
             // the yaw/pitch ease and let Set Camera only blend distance/height (zoom).
             if (afn_cam_lock_target >= 0) s_camYawEasing = 0;
             if (s_camYawEasing) {
-                int yawTgt = (int)(S[0] * (65536.0f / 6.2831853f));
+                // A camera SLOT frames relative to the MODEL's facing (so the switch
+                // lands where the character looks, not a fixed world angle); slot 0
+                // (scene default) keeps its absolute authored yaw. Plus the slot's
+                // yaw offset. Matches the locked path below.
+                int yawTgt = (afn_active_camera == 0)
+                    ? (int)(S[0] * (65536.0f / 6.2831853f))
+                    : (int)((s_prevPlayerYaw * (3.14159265f / 180.0f) + slotYawOff) * (65536.0f / 6.2831853f));
                 int d = (int)(int16_t)(uint16_t)(yawTgt - orbit_angle);   // brad, wrap-safe
                 orbit_angle = (int)(uint16_t)(orbit_angle + (d >> 3));
                 // Every slot carries an explicit orbit Pitch (deg) in column 4
@@ -3103,7 +3119,13 @@ int main(void)
                     // on swings the camera around to frame it. Camera forward
                     // is +(sin,cos)(camAngle), so facing the target means
                     // forward ∝ (target - player).
-                    float desired = atan2f(ldx, ldz);
+                    // A camera SLOT frames relative to the MODEL's facing (consistent
+                    // to where the character looks, independent of orbit); slot 0
+                    // (scene default) keeps facing the lock target. Plus the slot's
+                    // yaw offset.
+                    float baseYaw = (afn_active_camera == 0) ? atan2f(ldx, ldz)
+                                                             : s_prevPlayerYaw * (3.14159265f / 180.0f);
+                    float desired = baseYaw + slotYawOff;
                     float cur = orbit_angle * (6.2831853f / 65536.0f);
                     float diff = desired - cur;
                     while (diff >  3.14159265f) diff -= 6.2831853f;
@@ -3594,6 +3616,7 @@ int main(void)
         if (afn_qa_cd > 0) afn_qa_cd--;   // spam-gate countdown
         if (s_qaCamPunch > 0.001f) s_qaCamPunch -= s_qaCamPunch * 0.12f; else s_qaCamPunch = 0.0f;   // ease the punch back out
 #endif
+        s_prevPlayerYaw = playerYaw;   // snapshot the finalized model facing for next frame's camera-slot framing
 
         // Node-driven world-axis push velocity (boost pads / knockback). 8.8
         // fixed. BoostForward wrote a pending magnitude -> decompose along the
@@ -4111,9 +4134,12 @@ int main(void)
         // the exact same view as the old look-at(player).
         glMatrixMode(GL_MODELVIEW);
         float view[16];
-        float fwdVX = sinf(camAngle) * cp;
+        // Camera AIM pan (slot lookYaw): rotate ONLY the look direction by s_camLookYaw,
+        // leaving the eye at the orbit position, so the subject sits off-center.
+        float aimAngle = camAngle + s_camLookYaw;
+        float fwdVX = sinf(aimAngle) * cp;
         float fwdVY = -sinf(pitch);
-        float fwdVZ = cosf(camAngle) * cp;
+        float fwdVZ = cosf(aimAngle) * cp;
         look_at(view, ex, ey, ez, ex + fwdVX, ey + fwdVY, ez + fwdVZ, 0.0f, 1.0f, 0.0f);
 #ifdef AFN_HAS_HUD
         memcpy(s_hudSceneView, view, sizeof(s_hudSceneView));   // for world-anchored HUD elements

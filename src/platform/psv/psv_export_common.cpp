@@ -301,16 +301,20 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
     //     follows the player and blends the live camera toward afn_active_camera.
     //     PSV honors column 4 (pitch) per slot; NDS still uses column 3 (horizon).
     f << "#define AFN_CAM_SLOT_COUNT " << (1 + (int)camera.camSlots.size()) << "\n";
-    f << "static const float afn_cam_slots[][5] = {\n";
+    // Column 5 = lookYaw (radians): horizontal AIM pan — rotates the look direction
+    // off the eye->player line (subject off-center) without moving the eye. Slot 0
+    // (scene default) has no pan.
+    f << "static const float afn_cam_slots[][6] = {\n";
     f << "    { " << Flt(camera.angle) << ", " << Flt(orbitDist / 4.0f) << ", "
                   << Flt(WY(camera.height)) << ", " << Flt(camera.horizon) << ", "
-                  << Flt(camera.orbitPitch) << " },\n";
+                  << Flt(camera.orbitPitch) << ", " << Flt(0.0f) << " },\n";
     for (const auto& cs : camera.camSlots) {
         float ang = cs.angle * 3.14159265f / 180.0f;                 // editor deg -> radians
         float di  = (cs.distance > 0.0f) ? cs.distance / 4.0f : orbitDist / 4.0f;
         float he  = WY(cs.height);
+        float ly  = cs.lookYaw * 3.14159265f / 180.0f;               // editor deg -> radians
         f << "    { " << Flt(ang) << ", " << Flt(di) << ", " << Flt(he) << ", "
-                      << Flt(cs.horizon) << ", " << Flt(cs.orbitPitch) << " },\n";
+                      << Flt(cs.horizon) << ", " << Flt(cs.orbitPitch) << ", " << Flt(ly) << " },\n";
     }
     f << "};\n";
     // Active preset. PSV has no scripts yet, so this stays 0 (scene default); the
