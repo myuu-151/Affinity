@@ -1230,7 +1230,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Not Landing",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Charge Shot",     0xFF3355AA, 1, 1, 3, 0, {"Max Charge (int)","Min Scale% (int)","Max Scale% (int)"}, {}, {} },
     { "Is Charging",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
-    { "Fire Charge Shot",0xFF3355AA, 1, 1, 5, 0, {"Damage (int)","Speed (int)","Hit Radius","Homing %","Circle Home"}, {}, {} },
+    { "Fire Charge Shot",0xFF3355AA, 1, 1, 7, 0, {"Damage (int)","Speed (int)","Hit Radius","Homing %","Circle Home","Homing Life","Forward Life"}, {}, {} },
     { "Is Firing",       0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is False",        0xFF885533, 1, 1, 1, 0, {"Condition"}, {}, {} },
     { "Switch on Int",   0xFF885533, 1, 5, 1, 0, {"Value"}, {}, {"= 0","= 1","= 2","= 3","Default"} },
@@ -1566,7 +1566,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
     case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
     case VsNodeType::IsNotCharging: desc = "Gate (PSV): passes exec only while NO Charge Shot is charging — the inverse of Is Charging. Pair them off one On Key Pressed to fork an action: Is Not Charging -> normal move/dodge, Is Charging -> the charge-variant. Keeps the two mutually exclusive (e.g. so a charge-dodge and a normal dodge don't fight over the same cooldown)."; break;
-    case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile speed in TENTHS of px/frame (25 = 2.5, default 60 = 6.0); Hit Radius = connect slop (smaller = must be closer); Homing %% = how hard it curves toward the target while the target is AHEAD (12 default; a dodge still clears it because of Circle Home); Circle Home (0/1) = with 0 (default) it stops homing + flies straight once the target is behind, so it never turns around to chase a dodge. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
+    case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile speed in TENTHS of px/frame (25 = 2.5, default 60 = 6.0); Hit Radius = connect slop (smaller = must be closer); Homing %% = how hard it curves toward the target while the target is AHEAD (12 default; a dodge still clears it because of Circle Home); Circle Home (0/1) = with 0 (default) it stops homing + flies straight once the target is behind, so it never turns around to chase a dodge. Homing Life / Forward Life = how many frames a locked-on vs forward shot stays alive (240 / 90 default) — shorten Forward Life to clean up a MISS faster, since each fired blast is its own pooled projectile (several can be on the field at once). On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
     case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
     case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
     case VsNodeType::IsClashReady: desc = "Gate: passes exec while the runtime senses a clash is ready (both sides' full-charge beams airborne and meeting). Pair with On Rise to fire the start sequence once: On Update -> Is Clash Ready -> On Rise -> Clash Begin + Show HUD + Play Sound + Freeze Player."; break;
@@ -23282,7 +23282,7 @@ void FrameTick(float dt)
                 case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
                 case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
     case VsNodeType::IsNotCharging: desc = "Gate (PSV): passes exec only while NO Charge Shot is charging — the inverse of Is Charging. Pair them off one On Key Pressed to fork an action: Is Not Charging -> normal move/dodge, Is Charging -> the charge-variant. Keeps the two mutually exclusive (e.g. so a charge-dodge and a normal dodge don't fight over the same cooldown)."; break;
-                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile speed in TENTHS of px/frame (25 = 2.5, default 60 = 6.0); Hit Radius = connect slop (smaller = must be closer); Homing %% = how hard it curves toward the target while the target is AHEAD (12 default; a dodge still clears it because of Circle Home); Circle Home (0/1) = with 0 (default) it stops homing + flies straight once the target is behind, so it never turns around to chase a dodge. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air) behind Is Firing so the launch pose holds."; break;
+                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile speed in TENTHS of px/frame (25 = 2.5, default 60 = 6.0); Hit Radius = connect slop (smaller = must be closer); Homing %% = how hard it curves toward the target while the target is AHEAD (12 default; a dodge still clears it because of Circle Home); Circle Home (0/1) = with 0 (default) it stops homing + flies straight once the target is behind, so it never turns around to chase a dodge. Homing Life / Forward Life = how many frames a locked-on vs forward shot stays alive (240 / 90 default) — shorten Forward Life to clean up a MISS faster, since each fired blast is its own pooled projectile (several can be on the field at once). On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air) behind Is Firing so the launch pose holds."; break;
                 case VsNodeType::IsFiring:      desc = "Gate (PSV): passes exec for a short window (~0.5s / 30 frames) right after a Charge Shot is fired — the mirror of Is Charging for the launch side. Without it the launch anim only flashes for one frame because Fire Charge Shot runs once on release. Wire On Update -> Is Firing -> Is On Ground -> Play(atk_spc_lnc), and behind Is Airborne use atk_spc_lnc_air, so the launch pose holds while the blast leaves."; break;
                 case VsNodeType::IsFalse:       desc = "Gate: passes exec only when the Condition data input is ZERO — the inverse of Is True ('if not'). Wire a boolean expression into Condition: Compare, And/Or/Not, Get HP, Get Flag, Is Key Down, Get Player X/Y/Z, etc. Example: Get Flag(3) -> Is False -> (runs while flag 3 is clear)."; break;
                 case VsNodeType::SwitchInt:     desc = "Routes exec to one of five outputs by an integer Value: '= 0'..'= 3' fire when Value equals that case, 'Default' fires for anything else. Great for state machines: Get Variable/Get State -> Switch on Int -> per-state branches. Feed Value from any data expression (Get*, Compare, math)."; break;
@@ -25217,7 +25217,7 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::FireChargeShot: {
                     editorCode = "// Release: fire the charged ball as a homing projectile";
-                    char fcBuf[1100];
+                    char fcBuf[1500];
                     snprintf(fcBuf, sizeof(fcBuf),
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
                         "    afn_fb_fire_req = 1;                  // request launch this frame\n"
@@ -25226,20 +25226,25 @@ void FrameTick(float dt)
                         "    afn_fb_hit_r    = %s;                 // Hit Radius slop (smaller = must be closer)\n"
                         "    afn_fb_homing   = %s / 100.0f;        // Homing %% (4 = gentle, dodgeable; 100 = perfect)\n"
                         "    afn_fb_circle   = %s;                 // Circle Home: 0 = fly off once passed, 1 = orbit\n"
+                        "    afn_fb_life_homing = %s;              // Homing Life: frames a homing shot lives (240 = 4s)\n"
+                        "    afn_fb_life_fwd    = %s;              // Forward Life: frames a forward/miss shot lives (90 = 1.5s)\n"
                         "    afn_fb_tgt      = afn_cam_lock_target; // homing target (-1 = fire straight forward)\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c focus-blast block) ---\n"
                         "    // Drive from On Key Released. Spawns a POOLED projectile (AFN_FB_POOL=6)\n"
-                        "    // from the charge orb's spot + facing, dmg = dmg_max * (level/max) — so\n"
-                        "    // several blasts can be on the field at once and the orb is free to charge\n"
-                        "    // again immediately. Step Focus Blast advances every pooled shot: each\n"
-                        "    // EASES toward the target by Homing %% while it's AHEAD (Circle Home off =\n"
-                        "    // flies straight once passed, so a dodge isn't chased). Hits within Speed + Hit Radius.",
+                        "    // from the charge orb's spot + facing, dmg = dmg_max * (level/max), life =\n"
+                        "    // Homing/Forward Life by lock state — so several blasts coexist and the orb\n"
+                        "    // is free to charge again immediately (shorten Forward Life to clean up a\n"
+                        "    // miss faster). Step Focus Blast advances every pooled shot: each EASES\n"
+                        "    // toward the target by Homing %% while it's AHEAD (Circle Home off = flies\n"
+                        "    // straight once passed, so a dodge isn't chased). Hits within Speed + Hit Radius.",
                         fmtInt(infoNode.id, 0, "30"),
                         fmtInt(infoNode.id, 1, "60"),
                         fmtInt(infoNode.id, 2, "4"),
                         fmtInt(infoNode.id, 3, "12"),
-                        fmtInt(infoNode.id, 4, "0"));
+                        fmtInt(infoNode.id, 4, "0"),
+                        fmtInt(infoNode.id, 5, "240"),
+                        fmtInt(infoNode.id, 6, "90"));
                     setActionFunc(infoNode, "_fire_charge_shot", fcBuf);
                     break;
                 }

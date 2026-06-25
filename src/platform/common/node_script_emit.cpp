@@ -577,16 +577,21 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* hrD  = findDataIn(a->id, 2);
                 auto* hmD  = findDataIn(a->id, 3);
                 auto* ciD  = findDataIn(a->id, 4);
+                auto* lhD  = findDataIn(a->id, 5);
+                auto* lfD  = findDataIn(a->id, 6);
                 int dmg = dmgD ? resolveInt(dmgD) : 30;
                 int sp  = spD  ? resolveInt(spD)  : 60;   // tenths of px/frame (60 = 6.0)
                 int hr  = hrD  ? resolveInt(hrD)  : 4;    // hit slop (world px)
                 int hm  = hmD  ? resolveInt(hmD)  : 12;   // homing % (12 = 0.12 ease/frame; 100 = perfect)
                 int ci  = ciD  ? resolveInt(ciD)  : 0;    // circle home (1 = orbit; 0 = fly off once passed)
+                int lh  = lhD  ? resolveInt(lhD)  : 240;  // homing-shot lifetime (frames)
+                int lf  = lfD  ? resolveInt(lfD)  : 90;   // forward-shot lifetime (frames)
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
                 f << "    afn_fb_fire_req = 1;\n";
                 f << "    afn_fb_dmg_max  = " << dmg << ";\n";
                 f << "    afn_fb_speed    = " << sp << " / 10.0f;\n";
                 f << "    afn_fb_hit_r    = " << hr << "; afn_fb_homing = " << hm << " / 100.0f; afn_fb_circle = " << (ci ? 1 : 0) << ";\n";
+                f << "    afn_fb_life_homing = " << lh << "; afn_fb_life_fwd = " << lf << ";\n";
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 f << "    afn_fb_tgt      = afn_cam_lock_target;\n";
                 f << "#else\n";

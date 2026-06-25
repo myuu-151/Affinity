@@ -1501,7 +1501,9 @@ float afn_fb_x, afn_fb_y, afn_fb_z;   // CHARGE orb world position (flight is th
 float afn_fb_scale      = 0.05f;      // current render scale of the ball
 float afn_fb_dirx = 0, afn_fb_dirz = 1;   // forward direction (no-lock fallback)
 int   afn_fb_cur_dmg    = 0;          // damage this shot will deal (locked at fire)
-int   afn_fb_life       = 0;          // forward-shot lifetime countdown (frames)
+int   afn_fb_life       = 0;          // (legacy, unused) forward-shot lifetime countdown
+int   afn_fb_life_homing = 240;       // Fire Charge Shot tunable: homing-shot lifetime (frames)
+int   afn_fb_life_fwd    = 90;        // Fire Charge Shot tunable: forward-shot lifetime (frames)
 int   afn_fb_fire_timer = 0;          // Is Firing gate: frames remaining in the post-launch
                                       // window (set on fire, counts down) so the launch anim
                                       // can hold instead of flashing for one frame
@@ -3390,7 +3392,7 @@ int main(void)
                     s->dirx = fbFx;  s->dirz = fbFz;
                     s->scale = afn_fb_scale;
                     s->dmg = (int)(afn_fb_dmg_max * frac); if (s->dmg < 1) s->dmg = 1;
-                    s->life = (afn_fb_tgt >= 0) ? 240 : 90;             // homing gets longer to chase
+                    s->life = (afn_fb_tgt >= 0) ? afn_fb_life_homing : afn_fb_life_fwd;   // Fire Charge Shot tunables
                     s->tgt = afn_fb_tgt;
                     s->full = (frac >= afn_clash_full_pct * 0.01f) ? 1 : 0;
                     if (s->full) s_pbBeamFull = 1;   // a full-charge beam is now in flight (clash sense)
