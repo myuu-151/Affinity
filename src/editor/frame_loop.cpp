@@ -893,6 +893,9 @@ enum class VsNodeType : int {
     AiBlockBegin,    // action: enemy raises its guard (block clip) for a window
     AiBlockStep,     // action: hold the enemy block stance; flags done at the end
     CanFireBlast,    // gate: passes only when NO Focus Blast is in flight (so re-fire SFX/charge is suppressed)
+    QuickAttack,     // action: dash-in melee lunge toward the lock target (or forward) + contact damage + skid
+    IsDashing,       // gate: passes while a Quick Attack dash/skid is in progress (phase != 0)
+    QuickAttackHit,  // gate: passes on the single frame a Quick Attack contact lands
     COUNT
 };
 
@@ -1295,6 +1298,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "AI Block Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Block Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "Can Fire Blast",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Quick Attack",    0xFF3355AA, 1, 1, 11, 0, {"Speed (int)","Stop Range","Damage (int)","Max Frames","Skid Frames","Punch %","Lunge Clip","Skid Clip","Idle Clip","Cooldown (int)","Energy Cost (int)"}, {}, {} },
+    { "Is Dashing",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Quick Attack Hit",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1594,6 +1600,9 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::SetBlock: desc = "Sets the player's blocking flag (On 0/1). While 1, an incoming enemy hit is reduced to Block Dmg % (default 20) and the player spends Energy Cost energy per BLOCKED HIT (not per press — block freely, only pay when a hit actually lands). Wire On Key Held(Block) -> Set Block(1, cost) and On Key Released -> Set Block(0), next to your block clip."; break;
     case VsNodeType::ShouldAiBlock: desc = "Gate: passes when a player blast is incoming (within Dodge Range) and the Block % chance rolls true — and the AI isn't already dodging/blocking. The AI dodges OR blocks. Wire: AI Sense -> Should AI Block -> On Rise -> AI Block Begin + Set AI State(Block)."; break;
     case VsNodeType::CanFireBlast: desc = "Gate: passes its exec ONLY while no Focus Blast is in flight (afn_fb_active == 0). The blast machine is single-shot — once a shot is on the field you can't charge or fire a new one — but the fire/charge SFX node would still play on the button press. Wire your Focus Blast charge/fire sound (and the charge start, if you want) behind this gate so it stays silent while a shot is already out: On Key Pressed(fire) -> Can Fire Blast -> Play Sound."; break;
+    case VsNodeType::QuickAttack: desc = "Dash-in melee (PSV): drive from On Key Pressed (e.g. Triangle). Lunges the player toward the Lock On target (or straight forward if nothing is locked), and on reaching Stop Range deals Damage once (enemy Block cuts it) and punches the camera in for impact; a whiff overshoots until Max Frames runs out, then a short Skid decelerates to a stop. Movement mirrors the Dodge (committed burst, wall-collide); normal movement is suppressed for the whole move. Tunables: Speed, Stop Range, Damage, Max Frames (dash budget), Skid Frames, Punch % (camera zoom-in, 0 = off), Lunge/Skid/Idle Clip (rig poses for each phase, -1 = leave current), Cooldown (spam-gate frames), Energy Cost. Pair with Is Dashing (hold poses / i-frames) and Quick Attack Hit (smack SFX/FX)."; break;
+    case VsNodeType::IsDashing: desc = "Gate: passes while a Quick Attack is mid-move (dash OR skid, afn_qa_phase != 0). Use it to hold the lunge/skid pose, grant i-frames, block other inputs, or loop a dash SFX for the committed window."; break;
+    case VsNodeType::QuickAttackHit: desc = "Gate: passes on the SINGLE frame a Quick Attack dash reaches Stop Range and lands its hit (one per dash). Wire the smack SFX, impact FX, or a HUD flash behind it."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
     case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
     case VsNodeType::IsClashWon: desc = "Gate: passes when the clash balance is pushed fully to the enemy (>= 1.0). Use to resolve a win: hide the clash HUD, stop the struggle/mash SFX, play win_clash, and Set HP(enemy, 0)."; break;
@@ -24711,6 +24720,58 @@ void FrameTick(float dt)
                         "    // (if(!afn_fb_active)), so a 2nd press can't summon a beam — but a Play Sound\n"
                         "    // node on the press would still fire. Gate that SFX here so it stays silent\n"
                         "    // while a shot is already on the field: On Key Pressed(fire) -> Can Fire Blast -> Play Sound.");
+                    break;
+                }
+                case VsNodeType::QuickAttack: {
+                    editorCode = "// Dash-in melee: lunge at the lock target, smack, skid";
+                    char qaBuf[1400];
+                    snprintf(qaBuf, sizeof(qaBuf),
+                        "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
+                        "    if (afn_qa_cd <= 0 && afn_qa_phase == 0 && afn_energy >= %s) {\n"
+                        "        afn_qa_speed = %s; afn_qa_range = %s; afn_qa_dmg = %s;     // dash speed / contact range / damage\n"
+                        "        afn_qa_max = %s; afn_qa_skid = %s; afn_qa_punch = %s;      // dash budget / skid frames / cam punch %%\n"
+                        "        afn_qa_clip_lunge = %s; afn_qa_clip_skid = %s; afn_qa_clip_idle = %s;\n"
+                        "        afn_qa_cd = %s; afn_qa_tgt = afn_cam_lock_target; afn_qa_trigger = 1;\n"
+                        "    }\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c movement block) ---\n"
+                        "    // Drive from On Key Pressed(Triangle). The trigger captures the lock target\n"
+                        "    // (or straight forward if none) and runs a 3-phase lunge: (1) DASH toward it\n"
+                        "    // with a quick ease-in + wall collide; on reaching Stop Range deal Damage once\n"
+                        "    // (enemy Block cuts it) + punch the camera; a whiff overshoots to Max Frames.\n"
+                        "    // (2) SKID = a short decelerating slide holding the skid pose. Normal movement\n"
+                        "    // is suppressed while dashing. Pose: set Lunge/Skid Clip here, or gate poses\n"
+                        "    // with Is Dashing; hit SFX/FX off Quick Attack Hit.",
+                        fmtInt(infoNode.id, 10, "0"),
+                        fmtInt(infoNode.id, 0, "90"),
+                        fmtInt(infoNode.id, 1, "14"),
+                        fmtInt(infoNode.id, 2, "12"),
+                        fmtInt(infoNode.id, 3, "28"),
+                        fmtInt(infoNode.id, 4, "12"),
+                        fmtInt(infoNode.id, 5, "20"),
+                        fmtInt(infoNode.id, 6, "-1"),
+                        fmtInt(infoNode.id, 7, "-1"),
+                        fmtInt(infoNode.id, 8, "-1"),
+                        fmtInt(infoNode.id, 9, "0"));
+                    setActionFunc(infoNode, "_quick_attack", qaBuf);
+                    break;
+                }
+                case VsNodeType::IsDashing: {
+                    editorCode = "// Gate: passes while a Quick Attack dash/skid is in progress";
+                    setActionFunc(infoNode, "_is_dashing",
+                        "    if (afn_qa_phase != 0) { /* downstream: lunge/skid pose, i-frames, SFX */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_qa_phase: 0 idle, 1 dash, 2 skid. True for the whole committed window.\n"
+                        "    // Use it to hold the lunge pose, block other input, or grant i-frames.");
+                    break;
+                }
+                case VsNodeType::QuickAttackHit: {
+                    editorCode = "// Gate: passes on the single frame a Quick Attack lands";
+                    setActionFunc(infoNode, "_quick_attack_hit",
+                        "    if (afn_qa_hit) { /* downstream: hit SFX, impact FX, hitstop */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_qa_hit = 1 ONLY on the frame the dash reaches Stop Range and deals its\n"
+                        "    // damage (one per dash). Pair with Play Sound / a HUD flash for the smack.");
                     break;
                 }
                 case VsNodeType::IsBlastIncoming: {

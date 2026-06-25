@@ -757,6 +757,50 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
+            case AfnScriptNodeType::QuickAttack: {
+                // Dash-in melee (PSV): capture the lock target + tunables and raise
+                // afn_qa_trigger; the movement block runs the lunge -> contact ->
+                // skid machine next (player pos lives there, like Dodge). Gated on
+                // the cooldown AND affording the energy cost.
+                auto* spD = findDataIn(a->id, 0);
+                auto* srD = findDataIn(a->id, 1);
+                auto* dmD = findDataIn(a->id, 2);
+                auto* mfD = findDataIn(a->id, 3);
+                auto* skD = findDataIn(a->id, 4);
+                auto* puD = findDataIn(a->id, 5);
+                auto* lcD = findDataIn(a->id, 6);
+                auto* scD = findDataIn(a->id, 7);
+                auto* icD = findDataIn(a->id, 8);
+                auto* cdD = findDataIn(a->id, 9);
+                auto* ecD = findDataIn(a->id, 10);
+                int sp = spD ? resolveInt(spD) : 90;
+                int sr = srD ? resolveInt(srD) : 14;
+                int dm = dmD ? resolveInt(dmD) : 12;
+                int mf = mfD ? resolveInt(mfD) : 28;
+                int sk = skD ? resolveInt(skD) : 12;
+                int pu = puD ? resolveInt(puD) : 20;
+                int lc = lcD ? resolveInt(lcD) : -1;   // lunge clip (-1 = leave rig clip)
+                int sc = scD ? resolveInt(scD) : -1;   // skid clip
+                int ic = icD ? resolveInt(icD) : -1;   // idle clip to snap back to
+                int cd = cdD ? resolveInt(cdD) : 0;    // spam-gate lockout frames
+                int ec = ecD ? resolveInt(ecD) : 0;    // energy cost (0 = free)
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n";
+                f << "    if (afn_qa_cd <= 0 && afn_qa_phase == 0 && afn_energy >= " << ec << ") {\n";
+                f << "        afn_qa_speed = " << sp << "; afn_qa_range = " << sr << "; afn_qa_dmg = " << dm << ";\n";
+                f << "        afn_qa_max = " << mf << "; afn_qa_skid = " << sk << "; afn_qa_punch = " << pu << ";\n";
+                f << "        afn_qa_clip_lunge = " << lc << "; afn_qa_clip_skid = " << sc << "; afn_qa_clip_idle = " << ic << ";\n";
+                f << "        afn_qa_cd = " << cd << ";\n";
+                f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                f << "        afn_qa_tgt = afn_cam_lock_target;   // dash homes the lock target (-1 = straight forward)\n";
+                f << "#else\n";
+                f << "        afn_qa_tgt = -1;\n";
+                f << "#endif\n";
+                f << "        afn_qa_trigger = 1;\n";
+                if (ec != 0) f << "        afn_energy -= " << ec << "; if (afn_energy < 0) afn_energy = 0;\n";
+                f << "    }\n";
+                f << "#endif\n";
+                break;
+            }
             case AfnScriptNodeType::IsDodging:
                 f << "    if (afn_dodge_frames > 0) {\n"; break;
             case AfnScriptNodeType::IsNotDodging:
@@ -1590,6 +1634,18 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // play on the press. Put that SFX (and the charge start) behind this
                 // gate so nothing fires while a shot is already on the field.
                 f << "    if (!afn_fb_active) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsDashing) {
+                f << "    if (afn_qa_phase != 0) {\n";   // dash OR skid in progress
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::QuickAttackHit) {
+                f << "    if (afn_qa_hit) {\n";          // the single frame contact lands
                 walkExec(a->id, 0);
                 f << "    }\n";
                 return;

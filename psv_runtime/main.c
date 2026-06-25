@@ -1475,6 +1475,19 @@ int afn_dodge_idle = -1;   // clip to snap back to when the roll ends (-1 = leav
 int afn_dodge_ramp = 0;    // frames to ease the roll speed in from 0 (quadratic; 0 = instant/stiff)
 int afn_dodge_falloff = 0; // frames to ease the roll speed back to 0 at the end (quadratic; 0 = hard stop)
 int afn_dodge_cd = 0;      // spam-gate lockout countdown; the node only fires when <= 0, set to Cooldown on a dodge
+// Quick Attack node (dash-in melee): a committed lunge toward the lock target
+// (or straight forward with no lock), contact damage, then a skid recovery.
+// Movement mirrors the dodge envelope (ramp ease-in + wall sub-stepping). The
+// node raises afn_qa_trigger + sets the tunables/clips; the movement block runs
+// the 3-phase machine. Is Dashing gates on phase != 0; Quick Attack Hit on the
+// contact frame.
+int afn_qa_trigger = 0, afn_qa_phase = 0;   // phase: 0 idle, 1 dash, 2 skid
+int afn_qa_frames = 0, afn_qa_active = 0, afn_qa_hit = 0, afn_qa_tgt = -1;
+int afn_qa_speed = 90, afn_qa_range = 14, afn_qa_dmg = 12;          // speed (*0.08 px/f), contact range (px), damage
+int afn_qa_max = 28, afn_qa_skid = 12, afn_qa_punch = 20, afn_qa_cd = 0;  // dash budget, skid frames, cam punch %, cooldown
+int afn_qa_clip_lunge = -1, afn_qa_clip_skid = -1, afn_qa_clip_idle = -1; // rig clips for each phase
+static float s_qaDirX = 0.0f, s_qaDirZ = 1.0f, s_qaYaw = 0.0f, s_qaCamPunch = 0.0f;
+static int   s_qaDealt = 0, s_qaTotal = 0;
 // Focus Blast (Charge Shot / Is Charging / Fire Charge Shot nodes): hold-to-
 // charge homing projectile. The CHARGE node asserts afn_fb_charge_req each held
 // frame and the runtime grows the player's hidden effect sub-sprite (the ball);
@@ -3204,7 +3217,7 @@ int main(void)
         // right AND afn_move_speed. No walk-speed fallback — purely node-driven.
         int facedByMove = 0;
         static float sTankRelFace = 0.0f;   // tank drive: facing offset from the heading (deg)
-        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen) {
+        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen && afn_qa_phase == 0) {
             float speed = afn_move_speed * 0.08f;
             float dx = mvX*speed, dz = mvZ*speed;
             float dlen = sqrtf(dx*dx + dz*dz);
@@ -3513,6 +3526,73 @@ int main(void)
             // node's Cooldown on a dodge); bleed it down one per frame.
             if (afn_dodge_cd > 0) afn_dodge_cd--;
         }
+#endif
+
+        // Quick Attack (dash-in melee). Triggered by the Quick Attack node. Phase 1
+        // (dash): lunge toward the captured lock target (or straight forward) with a
+        // quick ease-in, wall-collide, and on reaching Stop Range deal damage once +
+        // punch the camera. A whiff overshoots until the Max Frames budget runs out.
+        // Phase 2 (skid): a short decelerating slide that holds the skid pose, then
+        // hands the rig back. Normal movement is suppressed while phase != 0.
+#if defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+        afn_qa_hit = 0;   // 1 only on the frame contact lands (Quick Attack Hit gate)
+        if (afn_qa_trigger && afn_qa_phase == 0 && afn_dodge_frames <= 0 && !afn_player_frozen) {
+            float dirx = 0.0f, dirz = 1.0f; int haveDir = 0;
+            if (afn_qa_tgt >= 0) {
+                for (int n = 0; n < AFN_NPC_COUNT; n++)
+                    if ((int)afn_npc_inst[n][7] == afn_qa_tgt) {
+                        float tx = s_npcX[n] - playerX, tz = s_npcZ[n] - playerZ;
+                        float l = sqrtf(tx*tx + tz*tz);
+                        if (l > 0.001f) { dirx = tx/l; dirz = tz/l; haveDir = 1; }
+                        break;
+                    }
+            }
+            if (!haveDir) { float fy = playerYaw * (3.14159265f/180.0f); dirx = sinf(fy); dirz = cosf(fy); }  // no target -> forward
+            s_qaDirX = dirx; s_qaDirZ = dirz;
+            s_qaYaw  = atan2f(dirx, dirz) * (180.0f/3.14159265f);   // face the lunge
+            afn_qa_phase = 1; afn_qa_frames = afn_qa_max; s_qaTotal = afn_qa_max;
+            s_qaDealt = 0; afn_qa_active = 1;
+        }
+        afn_qa_trigger = 0;
+        if (afn_qa_phase == 1 && !afn_player_frozen) {
+            float sp = afn_qa_speed * 0.08f;
+            int ramp = 4; if (ramp > s_qaTotal) ramp = s_qaTotal;   // brief ease-in out of the windup
+            if (ramp > 0) { float t = (float)(s_qaTotal - afn_qa_frames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; sp *= t*t; }
+            float ix = s_qaDirX*sp, iz = s_qaDirZ*sp;
+            int sub = (int)(sp/3.0f) + 1;
+            for (int st = 0; st < sub; st++) { playerX += ix/sub; playerZ += iz/sub; collide_walls(&playerX, &playerZ, playerY); }
+            playerYaw = s_qaYaw;
+            if (afn_qa_clip_lunge >= 0) afn_rig_clip = afn_qa_clip_lunge;
+            if (afn_qa_tgt >= 0 && !s_qaDealt) {   // contact check vs the target
+                for (int n = 0; n < AFN_NPC_COUNT; n++)
+                    if ((int)afn_npc_inst[n][7] == afn_qa_tgt) {
+                        float dx = s_npcX[n] - playerX, dz = s_npcZ[n] - playerZ;
+                        if (dx*dx + dz*dz <= (float)afn_qa_range*afn_qa_range) {
+                            int dmg = afn_ai_blocking ? (afn_qa_dmg * afn_block_pct) / 100 : afn_qa_dmg;   // enemy Block reduces it
+                            if (afn_qa_tgt < NUM_SPRITES) { afn_hp[afn_qa_tgt] -= dmg; if (afn_hp[afn_qa_tgt] < 0) afn_hp[afn_qa_tgt] = 0; }
+                            s_qaDealt = 1; afn_qa_hit = 1;
+                            s_qaCamPunch = afn_qa_punch * 0.01f; if (s_qaCamPunch > 0.6f) s_qaCamPunch = 0.6f;   // camera punch-in
+                            afn_qa_phase = 2; afn_qa_frames = afn_qa_skid;   // -> skid
+                        }
+                        break;
+                    }
+            }
+            if (afn_qa_phase == 1 && --afn_qa_frames <= 0) { afn_qa_phase = 2; afn_qa_frames = afn_qa_skid; }   // whiff -> skid
+        } else if (afn_qa_phase == 2 && !afn_player_frozen) {
+            float dec = (afn_qa_skid > 0) ? (float)afn_qa_frames / (float)afn_qa_skid : 0.0f;   // decelerating slide
+            float sp = afn_qa_speed * 0.08f * dec * 0.5f;
+            float ix = s_qaDirX*sp, iz = s_qaDirZ*sp;
+            int sub = (int)(sp/3.0f) + 1;
+            for (int st = 0; st < sub; st++) { playerX += ix/sub; playerZ += iz/sub; collide_walls(&playerX, &playerZ, playerY); }
+            playerYaw = s_qaYaw;
+            if (afn_qa_clip_skid >= 0) afn_rig_clip = afn_qa_clip_skid;
+            if (--afn_qa_frames <= 0) {
+                afn_qa_phase = 0; afn_qa_active = 0;
+                if (afn_qa_clip_idle >= 0 && afn_input_fwd == 0 && afn_input_right == 0) afn_rig_clip = afn_qa_clip_idle;
+            }
+        }
+        if (afn_qa_cd > 0) afn_qa_cd--;   // spam-gate countdown
+        if (s_qaCamPunch > 0.001f) s_qaCamPunch -= s_qaCamPunch * 0.12f; else s_qaCamPunch = 0.0f;   // ease the punch back out
 #endif
 
         // Node-driven world-axis push velocity (boost pads / knockback). 8.8
@@ -3922,6 +4002,10 @@ int main(void)
             pitch = afn_cam_orbit_pitch_cr * 0.01f;
             // (timer advance is node-driven now — the Orbit Cam Step node)
         }
+
+        // Quick Attack camera punch-in: snap the camera closer on the smack frame
+        // (s_qaCamPunch set there) and ease it back out over the skid for impact.
+        if (s_qaCamPunch > 0.001f) effDist *= (1.0f - s_qaCamPunch);
 
         // Ease rate from what the player is doing: Sprint node sets
         // afn_speed_prio this tick (script ran above, so it's current);

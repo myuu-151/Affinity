@@ -549,6 +549,9 @@ enum class AfnScriptNodeType : int {
     AiBlockBegin,    // action: enemy raises its guard (block clip) for a window
     AiBlockStep,     // action: hold the enemy block stance; flags done at the end
     CanFireBlast,    // gate: passes only when NO Focus Blast is in flight (so re-fire SFX/charge is suppressed)
+    QuickAttack,     // action: dash-in melee lunge toward the lock target (or forward) + contact damage + skid
+    IsDashing,       // gate: passes while a Quick Attack dash/skid is in progress (phase != 0)
+    QuickAttackHit,  // gate: passes on the single frame a Quick Attack contact lands
     COUNT
 };
 
