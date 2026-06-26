@@ -302,19 +302,29 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
     //     PSV honors column 4 (pitch) per slot; NDS still uses column 3 (horizon).
     f << "#define AFN_CAM_SLOT_COUNT " << (1 + (int)camera.camSlots.size()) << "\n";
     // Column 5 = lookYaw (radians): horizontal AIM pan — rotates the look direction
-    // off the eye->player line (subject off-center) without moving the eye. Slot 0
-    // (scene default) has no pan.
-    f << "static const float afn_cam_slots[][6] = {\n";
+    // off the eye->player line (subject off-center) without moving the eye.
+    // Column 6 = lockAware (1/0): while locked-on, keep the lock target framed.
+    // Column 7 = hOffset (world px): lateral TRANSLATE of the framing (camera slides
+    // sideways). Column 8 = depthOffset (world px): forward/back dolly along the look
+    // direction. Column 9 = lookPitch (radians): vertical AIM tilt — rotates the look
+    // up/down (subject higher/lower in frame) without moving the eye. Column 10 =
+    // vOffset (world px): vertical TRANSLATE — slides the eye + look point up/down.
+    // Slot 0 (scene default) has no pan/tilt/offset and is runtime lock-aware.
+    f << "static const float afn_cam_slots[][11] = {\n";
     f << "    { " << Flt(camera.angle) << ", " << Flt(orbitDist / 4.0f) << ", "
                   << Flt(WY(camera.height)) << ", " << Flt(camera.horizon) << ", "
-                  << Flt(camera.orbitPitch) << ", " << Flt(0.0f) << " },\n";
+                  << Flt(camera.orbitPitch) << ", " << Flt(0.0f) << ", " << Flt(0.0f) << ", " << Flt(0.0f) << ", " << Flt(0.0f) << ", " << Flt(0.0f) << ", " << Flt(0.0f) << " },\n";
     for (const auto& cs : camera.camSlots) {
         float ang = cs.angle * 3.14159265f / 180.0f;                 // editor deg -> radians
         float di  = (cs.distance > 0.0f) ? cs.distance / 4.0f : orbitDist / 4.0f;
         float he  = WY(cs.height);
         float ly  = cs.lookYaw * 3.14159265f / 180.0f;               // editor deg -> radians
+        float lp  = cs.lookPitch * 3.14159265f / 180.0f;             // editor deg -> radians
+        float hoff = cs.hOffset / 4.0f;                              // editor units -> world px
+        float doff = cs.depthOffset / 4.0f;                          // editor units -> world px
+        float voff = cs.vOffset / 4.0f;                              // editor units -> world px
         f << "    { " << Flt(ang) << ", " << Flt(di) << ", " << Flt(he) << ", "
-                      << Flt(cs.horizon) << ", " << Flt(cs.orbitPitch) << ", " << Flt(ly) << " },\n";
+                      << Flt(cs.horizon) << ", " << Flt(cs.orbitPitch) << ", " << Flt(ly) << ", " << Flt(cs.lockAware) << ", " << Flt(hoff) << ", " << Flt(doff) << ", " << Flt(lp) << ", " << Flt(voff) << " },\n";
     }
     f << "};\n";
     // Active preset. PSV has no scripts yet, so this stays 0 (scene default); the

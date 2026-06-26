@@ -115,6 +115,21 @@ extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8
 #define ENEMY_DODGE_RAMP      6
 #define ENEMY_DODGE_SPEED     9.0f
 #define ENEMY_DODGE_CD        45
+// HARDCODED enemy melee reflexes (prototype — migrate to nodes once the feel is set):
+//  - Quick Attack: occasional dash-in melee mirroring the player's (lunge/skid clips).
+//  - Jump-evade: hop a player Quick Attack that's dashing straight at the enemy.
+#define ENEMY_QA_RANGE        70.0f     // dash-in only when the player is within this range
+#define ENEMY_QA_CHANCE       0.012f    // per-frame trigger chance (in range, off cooldown)
+#define ENEMY_QA_MAX          26        // dash frame budget (whiff timeout)
+#define ENEMY_QA_SKID         12        // skid recovery frames
+#define ENEMY_QA_SPEED        34.0f     // dash speed feed (matches the player's QA)
+#define ENEMY_QA_STOP         26.0f     // contact range — deal damage to the player
+#define ENEMY_QA_DMG          8         // melee damage
+#define ENEMY_QA_CD           90        // cooldown after a dash
+#define ENEMY_JUMP_VEL        1.5f      // jump-evade launch velocity = player's jump (player_vy 384 / 256),
+                                        // same gravity (afn_gravity/256) -> identical arc to the player
+#define ENEMY_JUMP_CHANCE     0.65f     // chance to evade a player Quick Attack by jumping
+#define ENEMY_JUMP_CD         40        // jump-evade cooldown
 #define ENEMY_BAR_HEIGHT      18.0f     // world units above the NPC origin
 #define ENEMY_BAR_W           64.0f     // HUD pixels (960x544 space)
 #define ENEMY_BAR_H           7.0f
@@ -125,6 +140,10 @@ static int   s_efbActive = 0, s_efbCharging = 0, s_efbDmg = 0, s_efbLife = 0;   
 static float s_efbX, s_efbY, s_efbZ, s_efbDirX = 0, s_efbDirZ = 1, s_efbScale = 0.05f, s_efbSpeed = 0, s_efbHoming = 0;
 static int   s_eDodgeFrames = 0, s_eDodgeTotal = 0, s_eDodgeClip = 24;          // enemy dodge roll
 static float s_eDodgeDX = 0, s_eDodgeDZ = 0;
+// HARDCODED melee-reflex state (enemy Quick Attack + jump-evade).
+static int   s_eqaPhase = 0, s_eqaFrames = 0, s_eqaCD = 0, s_eqaDealt = 0;       // enemy QA dash/skid
+static float s_eqaDirX = 0.0f, s_eqaDirZ = 1.0f, s_eqaYaw = 0.0f;
+static int   s_eJumpCD = 0, s_ePrevPlayerQA = 0;                                 // jump-evade cooldown + edge
 // Enemy combat AI — FULLY NODE-ORCHESTRATED (enemy BP). The runtime keeps the
 // heavy primitives (movement/strafe/dodge math, muzzle-bone aim, projectile,
 // navmesh) as helper functions the nodes call (afn_ai_sense/roam/chase/strafe/
@@ -319,6 +338,7 @@ static void rig_init(void) {
     }
     // HARDCODED: reset enemy combat AI on (re)init so a scene restart re-seeds HP/state.
     s_aiInited = 0; s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0; afn_ai_state = AI_ROAM; afn_ai_slot = -1;
+    s_eqaPhase = 0; s_eqaCD = 0; s_eJumpCD = 0; s_ePrevPlayerQA = 0;   // clear melee reflexes
     for (int k = 0; k < AFN_FB_POOL; k++) s_fbPool[k].active = 0;   // clear any in-flight player blasts
     for (int r = 0; r < AFN_RIG_COUNT; r++) {
         const AfnRig* R = &afn_rigs[r];
@@ -1195,7 +1215,10 @@ int afn_face_lock = 0;                        // MovePlayer "Consistent Facing":
 int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
 int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
 static float s_camLookYaw = 0.0f;             // eased camera AIM pan (rad) — the active slot's lookYaw (column 5)
-static float s_prevPlayerYaw = 0.0f;          // last frame's model facing (deg) — camera slots frame relative to it
+static float s_camHOffset = 0.0f;             // eased camera lateral framing TRANSLATE (world px) — slot column 7
+static float s_camDepth   = 0.0f;             // eased camera forward/back dolly (world px) — slot column 8
+static float s_camLookPitch = 0.0f;           // eased camera AIM tilt (rad, + = up) — the active slot's lookPitch (column 9)
+static float s_camVOffset = 0.0f;             // eased camera vertical framing TRANSLATE (world px, + = up) — slot column 10
 
 // Camera-delay ease rates (x/256 catch-up per frame), normally emitted into
 // psv_mapdata.h by the exporter from the editor's camera settings. Fallbacks
@@ -1773,14 +1796,14 @@ void afn_ai_sense(void) {
 void afn_ai_roam(void) {
     int i = afn_ai_slot; if (i < 0) return;
 #ifdef AFN_HAS_NAVMESH
-    s_npcClip[i] = s_npcNavMoving[i] ? 30 : 26;
+    s_npcClip[i] = s_npcNavMoving[i] ? 32 : 26;   // 32 = Move (was 30; lunge/skid insert at 30/31 shifted it +2)
 #endif
 }
 
 // CHASE: close toward the player; set afn_ai_reached at the strafe radius.
 void afn_ai_chase(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 30;
+    s_npcClip[i] = 32;   // 32 = Move (was 30; shifted +2 by lunge/skid insertion)
     float px = (float)player_x, pz = (float)player_z;
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
     float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : 1.0f, sp = afn_ai_movespd_m * 0.001f;
@@ -1792,7 +1815,11 @@ void afn_ai_chase(void) {
 // STRAFE: orbit the player at the preferred distance (8-direction clip).
 void afn_ai_strafe(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    static const int eStrafe[8] = { 30,33,31,35,18,32,34,36 };
+    // 8-dir strafe walk clips. Indices corrected for the lunge(30)/skid(31) insertion
+    // that shifted every clip >= "Move" up by +2 (Move 30->32, strafeL 31->33,
+    // strafeLD 32->34, strafeLDFW 33->35, strafeR 34->36, strafeRD 35->37,
+    // strafeRDFW 36->38; backpeddle 18 unchanged). Same direction order as before.
+    static const int eStrafe[8] = { 32,35,33,37,18,34,36,38 };
     if (--s_aiStrafeLeg <= 0) { s_aiStrafeDir = ai_chance(0.5f) ? 1 : -1; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
     float ey = s_npcYaw[i] * DEG2RAD;
     float efx = sinf(ey), efz = cosf(ey), erx = cosf(ey), erz = -sinf(ey);
@@ -1897,6 +1924,67 @@ void afn_ai_dodge_step(void) {
         s_npcClip[i] = s_eDodgeClip;
         afn_ai_dodge_done = (--s_eDodgeFrames == 0) ? 1 : 0;
     } else afn_ai_dodge_done = 1;
+}
+
+// HARDCODED enemy melee reflex (prototype): runs each frame for the enemy NPC AFTER
+// the node BP has moved it (so it overrides position/clip while active). Two parts:
+//   1) Jump-evade — when the player's Quick Attack is dashing straight at this enemy
+//      (afn_qa_phase==1, afn_qa_tgt==eidx), roll once on the dash's rising edge to hop
+//      (s_npcVY launch; the per-NPC gravity integrator arcs + lands it). Clips 27/28.
+//   2) Quick Attack — occasional dash-in melee mirroring the player's: lunge (30) at
+//      ENEMY_QA_SPEED toward the player, contact damage to afn_health within QA_STOP,
+//      then a decelerating skid (31). Suppresses BP motion by overwriting X/Z/Yaw/clip.
+// To migrate: expose the tunables as node pins + a SetAiState(QuickAttack/Jump) path.
+static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
+    if (afn_ai_state == AI_DEAD) { s_eqaPhase = 0; s_ePrevPlayerQA = 0; return; }
+
+    // --- Jump-evade ---------------------------------------------------------
+    int playerDashAtMe = (afn_qa_phase == 1 && afn_qa_tgt == eidx);
+    if (s_eJumpCD > 0) s_eJumpCD--;
+    if (playerDashAtMe && !s_ePrevPlayerQA && s_npcGround[i] && s_eqaPhase == 0
+        && s_eDodgeFrames == 0 && s_eJumpCD == 0 && ai_chance(ENEMY_JUMP_CHANCE)) {
+        s_npcVY[i] = ENEMY_JUMP_VEL; s_npcGround[i] = 0; s_eJumpCD = ENEMY_JUMP_CD;
+    }
+    s_ePrevPlayerQA = playerDashAtMe;
+
+    // --- Quick Attack dash-in ----------------------------------------------
+    if (s_eqaCD > 0) s_eqaCD--;
+    if (s_eqaPhase == 0 && s_eqaCD == 0 && s_npcGround[i]
+        && (afn_ai_state == AI_STRAFE || afn_ai_state == AI_CHASE)   // only from neutral movement
+        && s_eDodgeFrames == 0 && s_eBlockFrames == 0) {
+        float dx = px - s_npcX[i], dz = pz - s_npcZ[i], d2 = dx*dx + dz*dz;
+        if (d2 <= ENEMY_QA_RANGE*ENEMY_QA_RANGE && ai_chance(ENEMY_QA_CHANCE)) {
+            float d = sqrtf(d2); if (d < 1e-3f) d = 1.0f;
+            s_eqaDirX = dx/d; s_eqaDirZ = dz/d;
+            s_eqaYaw = atan2f(s_eqaDirX, s_eqaDirZ) * (180.0f/3.14159265f);
+            s_eqaPhase = 1; s_eqaFrames = ENEMY_QA_MAX; s_eqaDealt = 0;
+        }
+    }
+    if (s_eqaPhase == 1) {
+        float sp = ENEMY_QA_SPEED * 0.08f;
+        int ramp = 4; { float t = (float)(ENEMY_QA_MAX - s_eqaFrames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; sp *= t*t; }
+        float ix = s_eqaDirX*sp, iz = s_eqaDirZ*sp; int sub = (int)(sp/3.0f) + 1;
+        for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
+        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 30;   // lunge
+        if (!s_eqaDealt) {
+            float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
+            if (dx*dx + dz*dz <= ENEMY_QA_STOP*ENEMY_QA_STOP) {
+                int dmg = afn_player_blocking ? (ENEMY_QA_DMG * afn_block_pct) / 100 : ENEMY_QA_DMG;
+                afn_health -= dmg; if (afn_health < 0) afn_health = 0;
+                s_eqaDealt = 1; s_eqaPhase = 2; s_eqaFrames = ENEMY_QA_SKID;
+            }
+        }
+        if (s_eqaPhase == 1 && --s_eqaFrames <= 0) { s_eqaPhase = 2; s_eqaFrames = ENEMY_QA_SKID; }   // whiff -> skid
+    } else if (s_eqaPhase == 2) {
+        float dec = (ENEMY_QA_SKID > 0) ? (float)s_eqaFrames / (float)ENEMY_QA_SKID : 0.0f;
+        float sp = ENEMY_QA_SPEED * 0.08f * dec * 0.5f;
+        float ix = s_eqaDirX*sp, iz = s_eqaDirZ*sp; int sub = (int)(sp/3.0f) + 1;
+        for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
+        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 31;   // skid
+        if (--s_eqaFrames <= 0) { s_eqaPhase = 0; s_eqaCD = ENEMY_QA_CD; }
+    }
+    // Airborne (jump-evade) clip when not mid-QA: rising = jump (27), falling = jump_fall (28).
+    if (s_eqaPhase == 0 && !s_npcGround[i]) s_npcClip[i] = (s_npcVY[i] > 0.0f) ? 27 : 28;
 }
 
 // CHARGE begin: roll charge-vs-tap, start the wind-up (called once on entry).
@@ -2989,6 +3077,7 @@ int main(void)
             // Restart/Title from the results menu starts a clean battle (rig_init's
             // reset only runs at boot, not on a scene swap).
             s_aiInited = 0; afn_ai_state = AI_ROAM; afn_ai_slot = -1; s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0;
+            s_eqaPhase = 0; s_eqaCD = 0; s_eJumpCD = 0; s_ePrevPlayerQA = 0;   // clear melee reflexes
             afn_hp[AFN_ENEMY_EIDX] = ENEMY_HP_MAX;   // seed HP before the first script tick (else BP Is HP Zero fires at start)
             afn_ai_dodge_done = afn_ai_charge_done = afn_ai_fire_done = afn_ai_reached = 0;
             s_playerClipHold = 0;   // clear the player die-clip hold (HoldSkelClip)
@@ -3051,36 +3140,32 @@ int main(void)
         // (a 180 orbit flipped it). Feeding this offset into the lock-facing instead
         // makes a slot rotate the framing by its authored angle RELATIVE to the
         // current facing, consistently regardless of orbit. Slot 0 -> 0 (faces target).
-        float slotYawOff = S[0] - afn_cam_slots[0][0];
         s_camLookYaw += (S[5] - s_camLookYaw) * 0.125f;     // ease the AIM pan toward the active slot's lookYaw
+        s_camHOffset += (S[7] - s_camHOffset) * 0.125f;     // ease the lateral framing offset toward the slot's hOffset
+        s_camDepth   += (S[8] - s_camDepth)   * 0.125f;     // ease the forward/back dolly toward the slot's depthOffset
+        s_camLookPitch += (S[9] - s_camLookPitch) * 0.125f; // ease the AIM tilt toward the active slot's lookPitch
+        s_camVOffset += (S[10] - s_camVOffset) * 0.125f;    // ease the vertical framing offset toward the slot's vOffset
         float camDistTgt   = S[1] > 1.0f ? S[1] : camDist;  // keep manual zoom unless slot overrides
         float camHeightTgt = S[2];
         camDist   += (camDistTgt   - camDist)   * 0.125f;
         camHeight += (camHeightTgt - camHeight) * 0.125f;
         {
-            static int s_prevCamSlot = 0, s_camYawEasing = 0;
+            static int s_prevCamSlot = 0, s_camYawEasing = 0, s_prevLock = -1;
             if (afn_active_camera != s_prevCamSlot) { s_prevCamSlot = afn_active_camera; s_camYawEasing = 1; }
-            // While locked on, the lock assist (below) owns yaw + pitch — it eases
-            // the orbit to frame the target every frame. If the slot-switch ALSO
-            // eased yaw toward the slot's absolute S[0], a Set Camera would yank the
-            // camera toward that authored angle (sometimes the character's front)
-            // before the lock pulls it back — a visible snap. So when locked, drop
-            // the yaw/pitch ease and let Set Camera only blend distance/height (zoom).
+            // Just UNLOCKED (lock target -> -1): re-ease the slot's yaw/pitch so the
+            // camera resets to the slot's framing — otherwise it stays at the lock
+            // assist's pitch (reads as a tilt). Absolute target = stable, converges.
+            if (s_prevLock >= 0 && afn_cam_lock_target < 0) s_camYawEasing = 1;
+            s_prevLock = afn_cam_lock_target;
+            // While locked on, the lock assist (below) owns yaw + pitch — it eases the
+            // orbit to frame the target every frame; a Set Camera only blends distance/
+            // height (zoom), no yaw snap.
             if (afn_cam_lock_target >= 0) s_camYawEasing = 0;
             if (s_camYawEasing) {
-                // A camera SLOT frames relative to the MODEL's facing (so the switch
-                // lands where the character looks, not a fixed world angle); slot 0
-                // (scene default) keeps its absolute authored yaw. Plus the slot's
-                // yaw offset. Matches the locked path below.
-                int yawTgt = (afn_active_camera == 0)
-                    ? (int)(S[0] * (65536.0f / 6.2831853f))
-                    : (int)((s_prevPlayerYaw * (3.14159265f / 180.0f) + slotYawOff) * (65536.0f / 6.2831853f));
-                int d = (int)(int16_t)(uint16_t)(yawTgt - orbit_angle);   // brad, wrap-safe
-                orbit_angle = (int)(uint16_t)(orbit_angle + (d >> 3));
-                // Every slot carries an explicit orbit Pitch (deg) in column 4
-                // (slot 0 = afn_cam_start_pitch). Honor it uniformly so authoring
-                // matches Camera Properties > Pitch; 0 = auto, derive the tilt from
-                // the slot's height/distance (the legacy behavior).
+                // KEEP the current orbit YAW on a switch / unlock — re-house in the
+                // direction you're already looking, don't flip to the slot's world
+                // angle. Only re-settle the PITCH (the lock assist took it over while
+                // locked). Slot pitch in column 4 (deg); 0 = auto from height/distance.
                 float slotPitchDeg = S[4];
                 int pitchTgt;
                 if (slotPitchDeg != 0.0f)
@@ -3089,9 +3174,7 @@ int main(void)
                     pitchTgt = (int)(atan2f(camHeightTgt > 0.0f ? camHeightTgt : 8.0f, camDistTgt) * (65536.0f / 6.2831853f));
                 int pd = pitchTgt - orbit_pitch;
                 orbit_pitch += pd >> 3;
-                if (d > -300 && d < 300 && pd > -300 && pd < 300) {
-                    orbit_angle = (int)(uint16_t)yawTgt; orbit_pitch = pitchTgt; s_camYawEasing = 0;
-                }
+                if (pd > -300 && pd < 300) { orbit_pitch = pitchTgt; s_camYawEasing = 0; }
             }
         }
 
@@ -3119,19 +3202,21 @@ int main(void)
                     // on swings the camera around to frame it. Camera forward
                     // is +(sin,cos)(camAngle), so facing the target means
                     // forward ∝ (target - player).
-                    // A camera SLOT frames relative to the MODEL's facing (consistent
-                    // to where the character looks, independent of orbit); slot 0
-                    // (scene default) keeps facing the lock target. Plus the slot's
-                    // yaw offset.
-                    float baseYaw = (afn_active_camera == 0) ? atan2f(ldx, ldz)
-                                                             : s_prevPlayerYaw * (3.14159265f / 180.0f);
-                    float desired = baseYaw + slotYawOff;
-                    float cur = orbit_angle * (6.2831853f / 65536.0f);
-                    float diff = desired - cur;
-                    while (diff >  3.14159265f) diff -= 6.2831853f;
-                    while (diff < -3.14159265f) diff += 6.2831853f;
-                    orbit_angle = (int)(uint16_t)(orbit_angle
-                                 + (int)(diff * (65536.0f / 6.2831853f) * 0.10f));   // ease toward
+                    // Slot 0 (the usual/default camera) AND Lock-On Aware slots (col 6)
+                    // face the lock TARGET — the normal lock-on. A non-aware preset
+                    // holds its own absolute authored yaw instead.
+                    int slotLockAware = (afn_active_camera == 0) || (S[6] != 0.0f);
+                    if (slotLockAware) {
+                        // Aware (incl. slot 0 / usual lock): ease the yaw to FACE the target.
+                        float desired = atan2f(ldx, ldz);
+                        float cur = orbit_angle * (6.2831853f / 65536.0f);
+                        float diff = desired - cur;
+                        while (diff >  3.14159265f) diff -= 6.2831853f;
+                        while (diff < -3.14159265f) diff += 6.2831853f;
+                        orbit_angle = (int)(uint16_t)(orbit_angle
+                                     + (int)(diff * (65536.0f / 6.2831853f) * 0.10f));   // ease toward
+                    }
+                    // Non-aware slot: keep the current yaw (don't lock-track) — no flip.
                     // Up/down follows the same convention: ease orbit_pitch toward
                     // the player->target VERTICAL angle (positive pitch = look down,
                     // matching the boot seed atan2(camHeight,camDist)). Manual up/down
@@ -3228,9 +3313,12 @@ int main(void)
         // movement + facing follow afn_player_heading (D-pad turned), so the
         // camera orbits independently. Otherwise movement is camera-relative.
         // Lock Strafe overrides both: axes follow the player->target line.
+        // Camera-relative movement follows the camera's AIM (camAngle + the slot's
+        // H Rotation pan), so "up" is always away from the camera ON SCREEN. Using
+        // the bare camAngle let any leftover pan walk the player diagonally.
         float moveAngle = lockStrafing ? lockAngle
                         : (afn_tank_camera && afn_tank_move)
-                          ? (afn_player_heading * (6.2831853f/65536.0f)) : camAngle;
+                          ? (afn_player_heading * (6.2831853f/65536.0f)) : (camAngle + s_camLookYaw);
         float fwdX = sinf(moveAngle), fwdZ = cosf(moveAngle);
         float rgtX = cosf(moveAngle), rgtZ = -sinf(moveAngle);
         float mvX = fAmt*fwdX + rAmt*rgtX;
@@ -3589,7 +3677,9 @@ int main(void)
                 for (int n = 0; n < AFN_NPC_COUNT; n++)
                     if ((int)afn_npc_inst[n][7] == afn_qa_tgt) {
                         float dx = s_npcX[n] - playerX, dz = s_npcZ[n] - playerZ;
-                        if (dx*dx + dz*dz <= (float)afn_qa_range*afn_qa_range) {
+                        // Contact is 2D (X/Z); an airborne enemy (jump-evade) has hopped
+                        // over the dash — the lunge whiffs under it. Grounded only.
+                        if (s_npcGround[n] && dx*dx + dz*dz <= (float)afn_qa_range*afn_qa_range) {
                             int dmg = afn_ai_blocking ? (afn_qa_dmg * afn_block_pct) / 100 : afn_qa_dmg;   // enemy Block reduces it
                             if (afn_qa_tgt < NUM_SPRITES) { afn_hp[afn_qa_tgt] -= dmg; if (afn_hp[afn_qa_tgt] < 0) afn_hp[afn_qa_tgt] = 0; }
                             s_qaDealt = 1; afn_qa_hit = 1;
@@ -3616,7 +3706,6 @@ int main(void)
         if (afn_qa_cd > 0) afn_qa_cd--;   // spam-gate countdown
         if (s_qaCamPunch > 0.001f) s_qaCamPunch -= s_qaCamPunch * 0.12f; else s_qaCamPunch = 0.0f;   // ease the punch back out
 #endif
-        s_prevPlayerYaw = playerYaw;   // snapshot the finalized model facing for next frame's camera-slot framing
 
         // Node-driven world-axis push velocity (boost pads / knockback). 8.8
         // fixed. BoostForward wrote a pending magnitude -> decompose along the
@@ -3709,6 +3798,11 @@ int main(void)
                 float hx = afn_npc_col[i][0], hy = afn_npc_col[i][1], hz = afn_npc_col[i][2];
                 float cx = afn_npc_col[i][3], cy = afn_npc_col[i][4], cz = afn_npc_col[i][5];
                 float nbottom = cy - hy;
+
+                // HARDCODED melee reflex (enemy only): runs after the BP moved the NPC
+                // and before gravity, so the QA dash overrides motion and a jump-evade's
+                // s_npcVY launch gets integrated this frame. See afn_ai_melee_reflex.
+                if (eidx == AFN_ENEMY_EIDX) afn_ai_melee_reflex(i, eidx, playerX, playerZ);
 
 #ifdef AFN_HAS_NAVMESH
                 // Navigation (editor NPC Navigation section): walk the Detour
@@ -4134,13 +4228,33 @@ int main(void)
         // the exact same view as the old look-at(player).
         glMatrixMode(GL_MODELVIEW);
         float view[16];
-        // Camera AIM pan (slot lookYaw): rotate ONLY the look direction by s_camLookYaw,
-        // leaving the eye at the orbit position, so the subject sits off-center.
+        // Camera AIM rotation (slot lookYaw / lookPitch): rotate ONLY the look
+        // direction, leaving the eye at the orbit position, so the subject sits
+        // off-center (pan) and higher/lower in frame (tilt). aimPitch subtracts
+        // s_camLookPitch so + = tilt UP (pitch convention: + = look down).
         float aimAngle = camAngle + s_camLookYaw;
-        float fwdVX = sinf(aimAngle) * cp;
-        float fwdVY = -sinf(pitch);
-        float fwdVZ = cosf(aimAngle) * cp;
-        look_at(view, ex, ey, ez, ex + fwdVX, ey + fwdVY, ez + fwdVZ, 0.0f, 1.0f, 0.0f);
+        float aimPitch = pitch - s_camLookPitch;
+        float cpA = cosf(aimPitch);
+        float fwdVX = sinf(aimAngle) * cpA;
+        float fwdVY = -sinf(aimPitch);
+        float fwdVZ = cosf(aimAngle) * cpA;
+        // H Offset: slide the camera sideways along its right axis. Depth Offset:
+        // dolly straight toward/away the PLAYER (not the aim angle) so the zoom is
+        // ALWAYS along the camera->player axis — consistent in/out regardless of the
+        // slot's orbit angle or pan. Both translate the eye + look point together.
+        float dpx = playerX - ex, dpz = playerZ - ez;
+        float dpl = sqrtf(dpx*dpx + dpz*dpz); if (dpl < 1e-3f) dpl = 1.0f; dpx /= dpl; dpz /= dpl;
+        // H Offset slides the eye along the FIXED orbit-frame right axis (camAngle),
+        // NOT the panned aim (aimAngle). Using the aim made the offset eye sweep
+        // around as H Rotation panned — H Rotation then read as an orbit. In the
+        // orbit frame the offset is a static lateral slide and H Rotation pivots the
+        // aim ON THE SPOT around it. Depth still dollies straight toward the player.
+        float ofx = cosf(camAngle) * s_camHOffset + dpx * s_camDepth;
+        float ofz = -sinf(camAngle) * s_camHOffset + dpz * s_camDepth;
+        // V Offset: slide the eye AND look point up/down in world Y by the same amount,
+        // so the whole shot translates vertically without tilting the aim.
+        float ofy = s_camVOffset;
+        look_at(view, ex+ofx, ey+ofy, ez+ofz, ex+ofx + fwdVX, ey+ofy + fwdVY, ez+ofz + fwdVZ, 0.0f, 1.0f, 0.0f);
 #ifdef AFN_HAS_HUD
         memcpy(s_hudSceneView, view, sizeof(s_hudSceneView));   // for world-anchored HUD elements
         s_hudSceneViewValid = 1;

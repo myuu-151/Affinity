@@ -7684,9 +7684,9 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "spriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
         // Player camera presets (Mode 4): one line per slot.
         for (const auto& cs : sp.cameraSlots)
-            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
+            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                     cs.name.empty() ? "Camera" : cs.name.c_str(),
-                    cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw);
+                    cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -8201,7 +8201,7 @@ static bool SaveProject(const std::string& path)
             for (const auto& cs : sp.cameraSlots)
                 fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
-                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw);
+                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -8348,7 +8348,7 @@ static bool SaveProject(const std::string& path)
             for (const auto& cs : sp.cameraSlots)
                 fprintf(f, "m7CamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
-                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw);
+                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
@@ -8911,10 +8911,10 @@ static bool LoadProject(const std::string& path)
                 sp2.rigAnimClock = 0.0f;
             }
             else if (strncmp(line, "camSlot=", 8) == 0 && sSpriteCount > 0) {
-                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0;
-                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly) >= 1) {
+                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0, cla = 0, cho = 0, cdo = 0, clp = 0, cvo = 0;
+                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f|%f|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly, &cla, &cho, &cdo, &clp, &cvo) >= 1) {
                     CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly;
+                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly; cs.lockAware = (cla != 0.0f); cs.hOffset = cho; cs.depthOffset = cdo; cs.lookPitch = clp; cs.vOffset = cvo;
                     sSprites[sSpriteCount - 1].cameraSlots.push_back(cs);
                 }
             }
@@ -10231,10 +10231,10 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "msCamSlot=", 10) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
-                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0;
-                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly) >= 1) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0, cla = 0, cho = 0, cdo = 0, clp = 0, cvo = 0;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly, &cla, &cho, &cdo, &clp, &cvo) >= 1) {
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly;
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly; cs.lockAware = (cla != 0.0f); cs.hOffset = cho; cs.depthOffset = cdo; cs.lookPitch = clp; cs.vOffset = cvo;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
                     }
                 }
@@ -10707,10 +10707,10 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "m7CamSlot=", 10) == 0 && !sM7Scenes.empty()) {
                 MapScene& ms = sM7Scenes.back();
                 if (ms.spriteCount > 0) {
-                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0;
-                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly) >= 1) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0, cla = 0, cho = 0, cdo = 0, clp = 0, cvo = 0;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f|%f|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp, &cly, &cla, &cho, &cdo, &clp, &cvo) >= 1) {
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly;
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly; cs.lockAware = (cla != 0.0f); cs.hOffset = cho; cs.depthOffset = cdo; cs.lookPitch = clp; cs.vOffset = cvo;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
                     }
                 }
@@ -15572,6 +15572,16 @@ static void DrawCameraPresetsChunk(FloorSprite& sp)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Orbit pitch while this slot is active (PSV).\nPositive = look down, negative = look up.\n0 = auto (derive from Height / Distance).\nSame units as Camera Properties > Pitch.");
             if (ImGui::DragFloat("H Rotation (deg)##cshr", &cs.lookYaw, 0.5f, -90.0f, 90.0f, "%.0f deg")) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Horizontal rotation of the camera's AIM (pan).\nRotates the look direction left/right so the subject sits\noff-center, WITHOUT moving the eye (that's Yaw).\n0 = look straight at the player.");
+            if (ImGui::DragFloat("V Rotation (deg)##csvr", &cs.lookPitch, 0.5f, -90.0f, 90.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Vertical rotation of the camera's AIM (tilt).\nRotates the look direction up/down so the subject sits\nhigher/lower in frame, WITHOUT moving the eye (that's Pitch).\n+ = tilt up, - = tilt down. 0 = look straight at the player.");
+            if (ImGui::DragFloat("H Offset##csho", &cs.hOffset, 1.0f, -200.0f, 200.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Horizontal TRANSLATE of the framing — slides the camera\nsideways (left/right) so the whole shot moves laterally,\ndistinct from H Rotation (which spins the aim).\n0 = centered.");
+            if (ImGui::DragFloat("Depth Offset##csdo", &cs.depthOffset, 1.0f, -200.0f, 200.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward/back TRANSLATE (dolly) — slides the camera along\nits look direction. + = toward the subject (closer),\n- = away (farther). Distinct from Distance (orbit radius).");
+            if (ImGui::DragFloat("V Offset##csvo", &cs.vOffset, 1.0f, -200.0f, 200.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Vertical TRANSLATE of the framing — slides the camera\n(and look point) up/down so the whole shot moves vertically,\ndistinct from V Rotation (which tilts the aim). + = up.\n0 = centered.");
+            if (ImGui::Checkbox("Lock-On Aware##csla", &cs.lockAware)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("While the player is LOCKED-ON:\nON  = keep the lock target framed (camera faces the enemy)\n      at this slot's distance / height / pitch / pan.\nOFF = point where this slot's Yaw says, relative to the\n      model (the enemy may leave the frame).");
             if (ImGui::DragFloat("Distance##csd", &cs.distance, 1.0f, 0.0f, 400.0f, "%.0f")) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = keep the scene's orbit distance");
             if (ImGui::DragFloat("Height##csh", &cs.height, 0.5f, -50.0f, 200.0f, "%.1f")) sProjectDirty = true;
@@ -15774,10 +15784,6 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             ImGui::DragFloat("Rotation##spr", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         }
-
-        // ---- Player camera presets (Mode 4) ----
-        if (sp.type == SpriteType::Player)
-            DrawCameraPresetsChunk(sp);
 
         // Sprite asset link
         {
@@ -16306,6 +16312,10 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             }
             ImGui::PopItemWidth();
         }
+
+        // ---- Player camera presets (Mode 4) — housed below Collision ----
+        if (sp.type == SpriteType::Player)
+            DrawCameraPresetsChunk(sp);
 
         if (ImGui::Button("Duplicate") && sSpriteCount < kMaxFloorSprites)
         {
@@ -18308,7 +18318,7 @@ void FrameTick(float dt)
                 for (const auto& fsCam : sSprites) {
                     if (fsCam.type != SpriteType::Player) continue;
                     for (const auto& cs : fsCam.cameraSlots)
-                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw });
+                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset });
                     break;
                 }
                 exportCam.walkSpeed = sCamObj.walkSpeed;
@@ -36382,24 +36392,47 @@ void Render3DViewport()
             const float* col = pal[ci % 6];
             // The framing square is the camera's IMAGE PLANE, centered on the look
             // point and oriented PERPENDICULAR to where the camera looks — so it
-            // visibly ROTATES (yaws) as you change Yaw and H Rotation, instead of
+            // visibly ROTATES as you change Yaw, H Rotation and V Rotation, instead of
             // staying world-aligned. H Rotation (lookYaw) rotates the look direction
-            // horizontally (matches the runtime aimAngle = camAngle + lookYaw).
+            // horizontally (matches the runtime aimAngle = camAngle + lookYaw); V
+            // Rotation (lookPitch) tilts it up/down (+ = up).
             float lyr = cs.lookYaw * 0.01745329f;
-            float lvx = tx - ex, lvy = ty - ey, lvz = tz - ez;       // eye -> look point
-            float fx =  lvx*cosf(lyr) + lvz*sinf(lyr);               // rotate horizontally by lookYaw
+            float lvx = tx - ex, lvy = ty - ey, lvz = tz - ez;       // eye -> model
+            float fx =  lvx*cosf(lyr) + lvz*sinf(lyr);               // LOOK direction, rotated by lookYaw
             float fy2 = lvy;
             float fz = -lvx*sinf(lyr) + lvz*cosf(lyr);
             float fl = sqrtf(fx*fx + fy2*fy2 + fz*fz); if (fl < 1e-3f) fl = 1.0f;
+            float D = fl;                                            // eye -> plane distance
             fx/=fl; fy2/=fl; fz/=fl;
-            float rx = fz, rz = -fx;                                  // right = up(0,1,0) x forward
+            // V Rotation (lookPitch): tilt the unit look direction up/down (+ = up).
+            float lpr = cs.lookPitch * 0.01745329f;
+            if (lpr != 0.0f) {
+                float hmag = sqrtf(fx*fx + fz*fz);
+                float curP = atan2f(fy2, hmag > 1e-4f ? hmag : 1e-4f);   // current elevation
+                float newP = curP + lpr, c2 = cosf(newP), s2 = sinf(newP);
+                if (hmag > 1e-4f) { fx = fx/hmag*c2; fz = fz/hmag*c2; }
+                fy2 = s2;
+            }
+            float rx = fz, rz = -fx;                                  // image-plane right = up(0,1,0) x forward
             float rl = sqrtf(rx*rx + rz*rz); if (rl < 1e-3f) { rx = 1.0f; rz = 0.0f; rl = 1.0f; } rx/=rl; rz/=rl;
-            float ux = fy2*rz, uy = fz*rx - fx*rz, uz = -fy2*rx;      // up = forward x right (ry = 0)
+            float ux = fy2*rz, uy = fz*rx - fx*rz, uz = -fy2*rx;      // image-plane up = forward x right (ry = 0)
+            // Translate the whole rig: Depth dollies the eye along the look direction.
+            // H Offset slides it along the FIXED yaw-frame right (eye->model BEFORE the
+            // lookYaw pan), matching the runtime — so the offset is a static lateral
+            // slide and H Rotation pivots the aim ON THE SPOT around it instead of
+            // sweeping the offset eye around (which read as an orbit).
+            float ho = cs.hOffset, de = cs.depthOffset;
+            float yl = sqrtf(lvx*lvx + lvz*lvz); if (yl < 1e-3f) yl = 1.0f;
+            float yrx = lvz/yl, yrz = -lvx/yl;                  // yaw-frame right, un-panned
+            // V Offset slides the eye (and the plane that rides D ahead of it) straight
+            // up/down in world Y — a pure vertical TRANSLATE, no tilt.
+            ex += fx*de + yrx*ho; ey += fy2*de + cs.vOffset; ez += fz*de + yrz*ho;
+            float pcx = ex + fx*D, pcy = ey + fy2*D, pcz = ez + fz*D; // plane center along the look ray
             float fr = 7.0f;   // framing-square half size
-            float c1x=tx-rx*fr+ux*fr, c1y=ty+uy*fr, c1z=tz-rz*fr+uz*fr;
-            float c2x=tx+rx*fr+ux*fr, c2y=ty+uy*fr, c2z=tz+rz*fr+uz*fr;
-            float c3x=tx+rx*fr-ux*fr, c3y=ty-uy*fr, c3z=tz+rz*fr-uz*fr;
-            float c4x=tx-rx*fr-ux*fr, c4y=ty-uy*fr, c4z=tz-rz*fr-uz*fr;
+            float c1x=pcx-rx*fr+ux*fr, c1y=pcy+uy*fr, c1z=pcz-rz*fr+uz*fr;
+            float c2x=pcx+rx*fr+ux*fr, c2y=pcy+uy*fr, c2z=pcz+rz*fr+uz*fr;
+            float c3x=pcx+rx*fr-ux*fr, c3y=pcy-uy*fr, c3z=pcz+rz*fr-uz*fr;
+            float c4x=pcx-rx*fr-ux*fr, c4y=pcy-uy*fr, c4z=pcz-rz*fr-uz*fr;
             // frustum edges: eye -> 4 corners of the (rotating) image plane
             glColor3f(col[0]*0.7f, col[1]*0.7f, col[2]*0.7f);
             glLineWidth(1.5f);

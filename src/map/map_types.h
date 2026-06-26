@@ -387,6 +387,20 @@ struct CameraSlot
     float lookYaw = 0.0f;         // horizontal AIM rotation in degrees — pans the camera's
                                   // look direction left/right (subject off-center), independent
                                   // of the orbit Yaw (which moves the eye). PSV.
+    bool  lockAware = false;      // PSV: while locked-on, ON = keep the lock target framed (camera
+                                  // faces the enemy at this slot's dist/height/pan); OFF = point
+                                  // where the slot's Yaw says relative to the model.
+    float hOffset = 0.0f;         // horizontal TRANSLATE of the framing, editor units — slides the
+                                  // camera sideways (left/right) so the framing moves laterally,
+                                  // distinct from H Rotation (which spins the aim). PSV.
+    float depthOffset = 0.0f;     // forward/back TRANSLATE (dolly), editor units — slides the camera
+                                  // along its look direction (+ = toward the subject, - = away). PSV.
+    float lookPitch = 0.0f;       // vertical AIM rotation in degrees — tilts the camera's look
+                                  // up/down (+ = up) so the subject sits higher/lower in frame,
+                                  // without moving the eye (that's Pitch). PSV.
+    float vOffset = 0.0f;         // vertical TRANSLATE of the framing, editor units — slides the
+                                  // camera (and look point) up/down in world Y so the whole shot
+                                  // moves vertically without tilting. + = up. PSV.
 };
 
 struct FloorSprite

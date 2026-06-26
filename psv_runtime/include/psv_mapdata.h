@@ -2078,8 +2078,8 @@ const float afn_sprint_speed = 53.0f;
 #define AFN_JUMP_CAM_LAND 94
 #define AFN_JUMP_CAM_AIR 30
 #define AFN_CAM_SLOT_COUNT 2
-static const float afn_cam_slots[][5] = {
-    { 0.0f, 18.215f, 12.5f, 10.0f, 10.0f },
-    { 0.0f, 30.0f, 12.5f, 0.0f, 10.0f },
+static const float afn_cam_slots[][11] = {
+    { 0.0f, 18.215f, 12.5f, 10.0f, 10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },
+    { 0.0f, 5.5f, 1.625f, 0.0f, 16.0f, -0.872665f, 1.0f, 5.75f, -7.25f, 0.20944f, 1.0f },
 };
 static int afn_active_camera = 0;
