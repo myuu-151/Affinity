@@ -899,6 +899,9 @@ enum class VsNodeType : int {
     ChargeUp,        // action: hold-to-charge — reveal the player's hidden attached effect (aura) +
                      // fill the Energy meter per held frame. Gate with On Key Held(button).
     QuickAttackStarted, // gate: passes on the single frame a Quick Attack dash actually begins
+    AiQuickAttack,   // action (enemy AI): per-frame melee reflex — dash-in Quick Attack + jump-evade
+    EnemyAiTiming,   // action (enemy AI): set the remaining decision/timing knobs (de-aggro, strafe leg, etc.)
+    AiClips,         // action (enemy AI): set the enemy anim clip indices (name-resolved -> drift-proof)
     COUNT
 };
 
@@ -909,7 +912,7 @@ struct VsNodeTypeDef {
     int outExec;        // number of exec output pins
     int inData;         // number of data input pins
     int outData;        // number of data output pins
-    const char* inDataNames[12];
+    const char* inDataNames[16];
     const char* outDataNames[4];
     const char* outExecNames[5];
 };
@@ -1284,9 +1287,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "AI Strafe",       0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Dodge Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Dodge Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
-    { "AI Charge Begin", 0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Charge Begin", 0xFF55AA66, 1, 1, 1, 0, {"Charge SFX"}, {}, {} },
     { "AI Charge Step",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
-    { "AI Fire Beam",    0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Fire Beam",    0xFF55AA66, 1, 1, 2, 0, {"Charged SFX", "Tap SFX"}, {}, {} },
     { "AI Fire Recover", 0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "Enemy AI",        0xFF55AA66, 1, 1, 12, 0, {"Detect Range", "Lose Range", "Pref Dist", "Atk Cooldown", "Charge %", "Dodge %", "Move Speed", "Dodge Range", "Block %", "Block Dmg %", "Charge Speed", "Tap Speed"}, {}, {} },
     { "Orbit Cam Step",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
@@ -1302,11 +1305,14 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "AI Block Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Block Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "Can Fire Blast",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
-    { "Quick Attack",    0xFF3355AA, 1, 1, 11, 0, {"Speed (int)","Stop Range","Damage (int)","Max Frames","Skid Frames","Punch %","Lunge Clip","Skid Clip","Idle Clip","Cooldown (int)","Energy Cost (int)"}, {}, {} },
+    { "Quick Attack",    0xFF3355AA, 1, 1, 13, 0, {"Speed (int)","Stop Range","Damage (int)","Max Frames","Skid Frames","Punch %","Lunge Clip","Skid Clip","Idle Clip","Cooldown (int)","Energy Cost (int)","Trail Alpha","Trail Length"}, {}, {} },
     { "Is Dashing",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Quick Attack Hit",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Charge Up",       0xFF3355AA, 1, 1, 2, 0, {"Energy/Frame (int)", "Charge Clip (Skel Anim)"}, {}, {} },
     { "Quick Attack Started",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Ai Quick Attack", 0xFFAA5566, 1, 1, 12, 0, {"Dash Range", "Trigger /1000", "Dash Speed", "Contact Range", "Damage", "Cooldown", "Jump Vel x100", "Jump % (unused)", "Jump Cooldown", "Whoosh SFX", "Trail Alpha", "Trail Length"}, {}, {} },
+    { "AI Timing",       0xFF55AA66, 1, 1, 10, 0, {"De-Aggro Frames", "Strafe Leg", "Yaw Ease x100", "Tap Windup", "Fire Recover", "Dodge Frames", "Dodge Cooldown", "Dodge Speed (-1=player)", "Dodge Ramp (-1=player)", "Dodge Falloff (-1=player)"}, {}, {} },
+    { "AI Clips",        0xFF55AA66, 1, 1, 16, 0, {"Move", "Idle", "Strafe L", "Strafe LD", "Strafe LDFW", "Strafe R", "Strafe RD", "Strafe RDFW", "Backpeddle", "Block", "Charge Pose", "Launch", "Lunge", "Skid", "Jump", "Jump Fall"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1598,18 +1604,21 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AiStrafe: desc = "STRAFE action: circle-strafes the player, correcting toward the preferred distance, with an 8-direction clip. Run under Is AI State(Strafe)."; break;
     case VsNodeType::AiDodgeBegin: desc = "Starts a side-roll dodge (picks a side, sets the roll vector/frames/cooldown). Fire once on the dodge-ready edge: Is AI Flag(dodge_ready) -> On Rise -> AI Dodge Begin + Set AI State(Dodge)."; break;
     case VsNodeType::AiDodgeStep: desc = "Integrates the dodge roll (ease-in/out, wall collision) and sets 'dodge_done' when finished. Run under Is AI State(Dodge); on dodge_done -> Set AI State(Strafe)."; break;
-    case VsNodeType::AiChargeBegin: desc = "Starts a shot wind-up: rolls Charge % (full charge vs quick tap) and sets the wind-up length. Fire once on entering Charge."; break;
+    case VsNodeType::AiChargeBegin: desc = "Starts a shot wind-up: rolls Charge % (full charge vs quick tap) and sets the wind-up length. Fire once on entering Charge. Charge SFX = the sound instance played (looped, proximity-gained, voice-tracked) during a full charge — default 4 ('charge'); set it from a Sound Instance node, or -1 for silent."; break;
     case VsNodeType::AiChargeStep: desc = "Holds the charge pose and grows the orb at the muzzle bone; sets 'charge_done' when the wind-up elapses. Run under Is AI State(Charge); on charge_done -> AI Fire Beam + Set AI State(Fire)."; break;
-    case VsNodeType::AiFireBeam: desc = "Launches the enemy projectile from the muzzle toward the player (sets damage/speed/homing and the full-beam flag for clashes), and starts the recovery + attack cooldown."; break;
+    case VsNodeType::AiFireBeam: desc = "Launches the enemy projectile from the muzzle toward the player (sets damage/speed/homing and the full-beam flag for clashes), and starts the recovery + attack cooldown. Charged SFX / Tap SFX = the launch sound instances, played at proximity gain — defaults 5 ('shoot', for a full charge) and 6 ('smallblast', for a tap)."; break;
     case VsNodeType::AiFireRecover: desc = "Holds the launch clip and sets 'fire_done' when the recovery timer elapses. Run under Is AI State(Fire); on fire_done -> Set AI State(Strafe)."; break;
     case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000), Dodge Range (px from an incoming blast — homing OR forward — at which it reacts), Block % (chance to block instead of dodge an incoming blast), Block Dmg % (damage taken while blocking — 20 = take 20%; applies to BOTH the enemy and your block), Charge Speed + Tap Speed (the enemy's projectile launch speeds in TENTHS of px/frame, like your Fire Charge Shot — 20 = 2.0 full charge, 25 = 2.5 tap). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800/24/30/20/20/25."; break;
     case VsNodeType::SetBlock: desc = "Sets the player's blocking flag (On 0/1). While 1, an incoming enemy hit is reduced to Block Dmg % (default 20) and the player spends Energy Cost energy per BLOCKED HIT (not per press — block freely, only pay when a hit actually lands). Wire On Key Held(Block) -> Set Block(1, cost) and On Key Released -> Set Block(0), next to your block clip."; break;
     case VsNodeType::ShouldAiBlock: desc = "Gate: passes when a player blast is incoming (within Dodge Range) and the Block % chance rolls true — and the AI isn't already dodging/blocking. The AI dodges OR blocks. Wire: AI Sense -> Should AI Block -> On Rise -> AI Block Begin + Set AI State(Block)."; break;
     case VsNodeType::CanFireBlast: desc = "Gate: passes its exec ONLY while no Focus Blast is in flight (afn_fb_active == 0). The blast machine is single-shot — once a shot is on the field you can't charge or fire a new one — but the fire/charge SFX node would still play on the button press. Wire your Focus Blast charge/fire sound (and the charge start, if you want) behind this gate so it stays silent while a shot is already out: On Key Pressed(fire) -> Can Fire Blast -> Play Sound."; break;
-    case VsNodeType::QuickAttack: desc = "Dash-in melee (PSV): drive from On Key Pressed (e.g. Triangle). Lunges the player toward the Lock On target (or straight forward if nothing is locked), and on reaching Stop Range deals Damage once (enemy Block cuts it) and punches the camera in for impact; a whiff overshoots until Max Frames runs out, then a short Skid decelerates to a stop. Movement mirrors the Dodge (committed burst, wall-collide); normal movement is suppressed for the whole move. Tunables: Speed, Stop Range, Damage, Max Frames (dash budget), Skid Frames, Punch % (camera zoom-in, 0 = off), Lunge/Skid/Idle Clip (rig poses for each phase, -1 = leave current), Cooldown (spam-gate frames), Energy Cost. Pair with Is Dashing (hold poses / i-frames) and Quick Attack Hit (smack SFX/FX)."; break;
+    case VsNodeType::QuickAttack: desc = "Dash-in melee (PSV): drive from On Key Pressed (e.g. Triangle). Lunges the player toward the Lock On target (or straight forward if nothing is locked), and on reaching Stop Range deals Damage once (enemy Block cuts it) and punches the camera in for impact; a whiff overshoots until Max Frames runs out, then a short Skid decelerates to a stop. Movement mirrors the Dodge (committed burst, wall-collide); normal movement is suppressed for the whole move. Tunables: Speed, Stop Range, Damage, Max Frames (dash budget), Skid Frames, Punch % (camera zoom-in, 0 = off), Lunge/Skid/Idle Clip (rig poses for each phase, -1 = leave current), Cooldown (spam-gate frames), Energy Cost, Trail Alpha (afterimage peak alpha, default 96; 0 = no trail) and Trail Length (ghost count 0-6, default 6). Pair with Is Dashing (hold poses / i-frames) and Quick Attack Hit (smack SFX/FX)."; break;
     case VsNodeType::IsDashing: desc = "Gate: passes while a Quick Attack is mid-move (dash OR skid, afn_qa_phase != 0). Use it to hold the lunge/skid pose, grant i-frames, block other inputs, or loop a dash SFX for the committed window."; break;
     case VsNodeType::QuickAttackHit: desc = "Gate: passes on the SINGLE frame a Quick Attack dash reaches Stop Range and lands its hit (one per dash). Wire the smack SFX, impact FX, or a HUD flash behind it."; break;
     case VsNodeType::QuickAttackStarted: desc = "Gate: passes on the SINGLE frame a Quick Attack dash ACTUALLY begins (after the cooldown/energy/charge gate, unlike the raw key press). Drive On Update -> Quick Attack Started -> Play Sound for a swing-whoosh that never fires on a blocked press."; break;
+    case VsNodeType::AiQuickAttack: desc = "Enemy AI melee reflex (run every frame from the enemy's On Update, AFTER its movement/state nodes so it can override pose + position). Two behaviours: (1) Quick Attack — when the player is within Dash Range and off cooldown, it rolls Trigger /1000 per frame to dash in at Dash Speed, dealing Damage on contact within Contact Range (a connect ends the dash; only a whiff plays the skid). (2) Jump-evade — ALWAYS hops a player Quick Attack dashing straight at it (Jump Vel x100 launch, same gravity arc as the player), even mid-charge. Auto-suppressed during the beam-clash struggle. Jump % is reserved (unused) for a future chance-gated evade. Tunables match the old #defines: Dash Range 70, Trigger 12/1000, Dash Speed 34, Contact Range 14, Damage 8, Cooldown 90, Jump Vel 150 (=1.5), Jump Cooldown 40. Whoosh SFX = the dash sound instance (proximity-gained), default 17 ('quicksweep'). Trail Alpha (afterimage peak alpha, default 96; 0 = off) and Trail Length (white ghost count 0-6, default 6)."; break;
+    case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
+    case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::ChargeUp: desc = "Hold-to-charge. While this runs each frame, it REVEALS the player's hidden attached effect models (the charge aura) and adds Energy/Frame to the Energy meter (clamped to max). The aura auto-hides the frame you stop running it. Drive it from On Key Held(Circle) so holding the button charges; release hides the aura and stops filling. Give the aura mesh 'Hidden (effect)' so it stays invisible until charging."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
     case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
@@ -25123,6 +25132,7 @@ void FrameTick(float dt)
                         "        afn_qa_max = %s; afn_qa_skid = %s; afn_qa_punch = %s;      // dash budget / skid frames / cam punch %%\n"
                         "        afn_qa_clip_lunge = %s; afn_qa_clip_skid = %s; afn_qa_clip_idle = %s;\n"
                         "        afn_qa_cd = %s; afn_qa_tgt = afn_cam_lock_target; afn_qa_trigger = 1;\n"
+                        "        afn_qa_trail_alpha = %s; afn_qa_trail_len = %s;   // cyan dash afterimage (peak alpha / ghosts, max 6)\n"
                         "    }\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c movement block) ---\n"
@@ -25143,7 +25153,9 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 6, "-1"),
                         fmtInt(infoNode.id, 7, "-1"),
                         fmtInt(infoNode.id, 8, "-1"),
-                        fmtInt(infoNode.id, 9, "0"));
+                        fmtInt(infoNode.id, 9, "0"),
+                        fmtInt(infoNode.id, 11, "96"),
+                        fmtInt(infoNode.id, 12, "6"));
                     setActionFunc(infoNode, "_quick_attack", qaBuf);
                     break;
                 }
@@ -25174,6 +25186,67 @@ void FrameTick(float dt)
                         "    // cooldown/energy/charge gate) — unlike the raw key press. Drive On Update ->\n"
                         "    // Quick Attack Started -> Play Sound for a swing-whoosh that never plays on a\n"
                         "    // blocked press.");
+                    break;
+                }
+                case VsNodeType::AiQuickAttack: {
+                    editorCode = "// Enemy AI melee reflex: dash-in Quick Attack + jump-evade (per-frame)";
+                    setActionFunc(infoNode, "_ai_quick_attack",
+                        "    afn_eqa_range = <Dash Range>; afn_eqa_chance_m = <Trigger /1000>;\n"
+                        "    afn_eqa_speed = <Dash Speed>; afn_eqa_stop = <Contact Range>; afn_eqa_dmg = <Damage>;\n"
+                        "    afn_eqa_cd = <Cooldown>; afn_eqa_jump_vel_m = <Jump Vel x100>;\n"
+                        "    afn_eqa_jump_chance = <Jump % (unused)>; afn_eqa_jump_cd = <Jump Cooldown>;\n"
+                        "    afn_ai_sfx_whoosh = <Whoosh SFX>;   // dash whoosh instance (default 17 = 'quicksweep')\n"
+                        "    afn_eqa_trail_alpha = <Trail Alpha>; afn_eqa_trail_len = <Trail Length>;   // white dash afterimage\n"
+                        "    afn_ai_quick_attack();   // runs the reflex for the AI slot (afn_ai_slot)\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_quick_attack(): i = afn_ai_slot; suppressed while the clash backdrop\n"
+                        "    // is up; calls afn_ai_melee_reflex(i, player_x, player_z):\n"
+                        "    //  Jump-evade: player QA dashing at me (afn_qa_phase==1 && afn_qa_tgt==eidx,\n"
+                        "    //    the PLAYER's QA state), grounded, off cd -> s_npcVY[i]=afn_eqa_jump_vel_m/100;\n"
+                        "    //    gravity arcs it. ALWAYS jumps (afn_eqa_jump_chance is reserved/unused).\n"
+                        "    //  Quick Attack: in AI_STRAFE/CHASE, player within afn_eqa_range, ai_chance\n"
+                        "    //    (afn_eqa_chance_m/1000) -> dash at afn_eqa_speed (lunge clip 34); within\n"
+                        "    //    afn_eqa_stop deal afn_eqa_dmg to afn_health (Block cuts it), connect ends\n"
+                        "    //    the dash; whiff -> skid (35). Player can JUMP over it (grounded check).");
+                    break;
+                }
+                case VsNodeType::EnemyAiTiming: {
+                    editorCode = "// Set the enemy AI's remaining decision/timing knobs (run before AI Sense)";
+                    setActionFunc(infoNode, "_enemy_ai_timing",
+                        "    afn_ait_lose_frames = <De-Aggro Frames>; afn_ait_strafe_leg = <Strafe Leg>;\n"
+                        "    afn_ait_yaw_ease_m = <Yaw Ease x100>;   // /100 -> the turn-to-face lerp (0.35)\n"
+                        "    afn_ait_tap_windup = <Tap Windup>; afn_ait_fire_recover = <Fire Recover>;\n"
+                        "    afn_ait_dodge_frames = <Dodge Frames>; afn_ait_dodge_cd = <Dodge Cooldown>;\n"
+                        "    afn_ait_dodge_speed = <Dodge Speed (-1=player)>; afn_ait_dodge_ramp = <Dodge Ramp (-1=player)>;\n"
+                        "    afn_ait_dodge_falloff = <Dodge Falloff (-1=player)>;   // -1 = inherit the player's roll\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_sense(): de-aggro when afn_ai_dist > Lose Range for afn_ait_lose_frames\n"
+                        "    //   frames (afn_ai_lose_ready); faces the player by diff * afn_ait_yaw_ease_m/100.\n"
+                        "    // afn_ai_strafe(): re-rolls strafe direction every afn_ait_strafe_leg frames.\n"
+                        "    // afn_ai_dodge_begin(): s_eDodgeFrames = afn_ait_dodge_frames; cd = afn_ait_dodge_cd.\n"
+                        "    // afn_ai_charge_begin()/step(): a tap winds up over afn_ait_tap_windup frames.\n"
+                        "    // afn_ai_fire_beam(): recovery timer = afn_ait_fire_recover.\n"
+                        "    // afn_ai_dodge_step(): roll speed/ramp/falloff = afn_ait_dodge_* if >=0, else\n"
+                        "    //   the player's afn_dodge_speed/ramp/falloff (Dodge node) — so -1 = same roll.");
+                    break;
+                }
+                case VsNodeType::AiClips: {
+                    editorCode = "// Set the enemy anim clip indices (unwired pins name-resolve at export)";
+                    setActionFunc(infoNode, "_ai_clips",
+                        "    afn_aic_move = <Move>; afn_aic_idle = <Idle>;   // each pin: export resolves the\n"
+                        "    afn_aic_strafe_l = <Strafe L>; afn_aic_strafe_ld = <Strafe LD>;   // clip NAME -> current\n"
+                        "    afn_aic_strafe_ldfw = <Strafe LDFW>; afn_aic_strafe_r = <Strafe R>;   // rig index, so a glTF\n"
+                        "    afn_aic_strafe_rd = <Strafe RD>; afn_aic_strafe_rdfw = <Strafe RDFW>;   // re-sort can't drift it\n"
+                        "    afn_aic_backpeddle = <Backpeddle>; afn_aic_block = <Block>;\n"
+                        "    afn_aic_charge = <Charge Pose>; afn_aic_launch = <Launch>;\n"
+                        "    afn_aic_lunge = <Lunge>; afn_aic_skid = <Skid>; afn_aic_jump = <Jump>; afn_aic_jumpfall = <Jump Fall>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_roam/chase use afn_aic_move/idle; afn_ai_strafe builds its 8-dir clip\n"
+                        "    //   table from afn_aic_strafe_*/move/backpeddle; afn_ai_charge_step = afn_aic_charge;\n"
+                        "    //   afn_ai_fire_recover = afn_aic_launch; afn_ai_block = afn_aic_block; the Quick\n"
+                        "    //   Attack reflex uses afn_aic_lunge/skid/jump/jumpfall.\n"
+                        "    // Codegen: an UNWIRED pin emits resolveClipName(\"<name>\", <fallback>) at export;\n"
+                        "    //   a wired Skeletal Animation node overrides that clip.");
                     break;
                 }
                 case VsNodeType::IsBlastIncoming: {
@@ -25230,7 +25303,14 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AiChargeBegin: {
                     editorCode = "// Start a shot wind-up (rolls charge vs tap)";
-                    setActionFunc(infoNode, "_ai_charge_begin", "    afn_ai_charge_begin();   // Charge % roll -> windup length; s_efbCharging = 1");
+                    setActionFunc(infoNode, "_ai_charge_begin",
+                        "    afn_ai_sfx_charge = <Charge SFX>;   // sound instance (default 4 = 'charge'); -1 = leave\n"
+                        "    afn_ai_charge_begin();   // Charge % roll -> windup length; s_efbCharging = 1\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_charge_begin(): if a FULL charge, plays afn_ai_sfx_charge looped at\n"
+                        "    //   proximity gain (afn_enemy_sfx_gain(dist)) and tracks its voice (s_eChargeVoice)\n"
+                        "    //   so stopping it can't cut the player's shared chargefocus. afn_ai_charge_step\n"
+                        "    //   re-asserts the SAME instance if it gets stolen.");
                     break;
                 }
                 case VsNodeType::AiChargeStep: {
@@ -25240,7 +25320,13 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AiFireBeam: {
                     editorCode = "// Launch the projectile toward the player";
-                    setActionFunc(infoNode, "_ai_fire_beam", "    afn_ai_fire_beam();   // aim from muzzle, set dmg/speed/homing/full-beam, start recover + atk cooldown");
+                    setActionFunc(infoNode, "_ai_fire_beam",
+                        "    afn_ai_sfx_shoot = <Charged SFX>; afn_ai_sfx_tap = <Tap SFX>;   // 5 / 6 default\n"
+                        "    afn_ai_fire_beam();   // aim from muzzle, set dmg/speed/homing/full-beam, start recover + atk cooldown\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_fire_beam(): plays (s_aiChargeShot ? afn_ai_sfx_shoot : afn_ai_sfx_tap)\n"
+                        "    //   at proximity gain. Charged shots always reach full -> the big 'shoot' SFX,\n"
+                        "    //   the same instance the player plays at >=95% charge; taps stay 'smallblast'.");
                     break;
                 }
                 case VsNodeType::AiFireRecover: {

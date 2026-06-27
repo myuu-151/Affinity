@@ -20,7 +20,17 @@ void EmitNodeScriptBodies(std::ostream& f,
                           const std::vector<AfnSpriteExport>& sprites,
                           const std::vector<AfnSoundInstanceExport>& soundInstances,
                           const std::vector<int>& hudLayerRemap,
-                          const std::vector<int>& hudLayerCount) {
+                          const std::vector<int>& hudLayerCount,
+                          const std::vector<std::string>& clipNames) {
+    // Name-resolve a rig clip (case-insensitive) -> its current index, or `fallback`
+    // if the rig has no clip by that name (keeps today's behaviour). Lets the AI Clips
+    // node default its pins by NAME so a glTF re-sort can't drift the enemy's anims.
+    auto resolveClipName = [&](const char* nm, int fallback) -> int {
+        auto lc = [](const std::string& s){ std::string o = s; for (char& c : o) if (c >= 'A' && c <= 'Z') c += 32; return o; };
+        std::string want = lc(nm);
+        for (size_t i = 0; i < clipNames.size(); i++) if (lc(clipNames[i]) == want) return (int)i;
+        return fallback;
+    };
     // Translate a node's flat editor-layer index to the runtime afn_hud_layer[]
     // range [first, first+count). Identity (count 1) when no remap is supplied.
     auto remapLayer = [&](int F) -> int {
@@ -808,12 +818,16 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int ic = icD ? resolveInt(icD) : -1;   // idle clip to snap back to
                 int cd = cdD ? resolveInt(cdD) : 0;    // spam-gate lockout frames
                 int ec = ecD ? resolveInt(ecD) : 0;    // energy cost (0 = free)
+                auto* taD = findDataIn(a->id, 11); auto* tlD = findDataIn(a->id, 12);
+                int ta = taD ? resolveInt(taD) : 96;   // afterimage trail alpha (peak ~96)
+                int tl = tlD ? resolveInt(tlD) : 6;    // afterimage trail length (ghosts, max 6)
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
                 f << "    if (afn_qa_cd <= 0 && afn_qa_phase == 0 && afn_energy >= " << ec << ") {\n";
                 f << "        afn_qa_speed = " << sp << "; afn_qa_range = " << sr << "; afn_qa_dmg = " << dm << ";\n";
                 f << "        afn_qa_max = " << mf << "; afn_qa_skid = " << sk << "; afn_qa_punch = " << pu << ";\n";
                 f << "        afn_qa_clip_lunge = " << lc << "; afn_qa_clip_skid = " << sc << "; afn_qa_clip_idle = " << ic << ";\n";
                 f << "        afn_qa_cd = " << cd << ";\n";
+                f << "        afn_qa_trail_alpha = " << ta << "; afn_qa_trail_len = " << tl << ";   // dash afterimage\n";
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 f << "        afn_qa_tgt = afn_cam_lock_target;   // dash homes the lock target (-1 = straight forward)\n";
                 f << "#else\n";
@@ -1151,10 +1165,71 @@ void EmitNodeScriptBodies(std::ostream& f,
             case AfnScriptNodeType::AiStrafe:      f << "    afn_ai_strafe();\n"; break;
             case AfnScriptNodeType::AiDodgeBegin:  f << "    afn_ai_dodge_begin();\n"; break;
             case AfnScriptNodeType::AiDodgeStep:   f << "    afn_ai_dodge_step();\n"; break;
-            case AfnScriptNodeType::AiChargeBegin: f << "    afn_ai_charge_begin();\n"; break;
+            case AfnScriptNodeType::AiChargeBegin: {
+                auto* d0=findDataIn(a->id,0);   // Charge SFX instance (default 4 = BCHARGE)
+                f << "    afn_ai_sfx_charge = " << (d0?resolveInt(d0):4) << "; afn_ai_charge_begin();\n";
+                break;
+            }
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
-            case AfnScriptNodeType::AiFireBeam:    f << "    afn_ai_fire_beam();\n"; break;
+            case AfnScriptNodeType::AiFireBeam: {
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Charged / Tap SFX (5 / 6)
+                f << "    afn_ai_sfx_shoot = " << (d0?resolveInt(d0):5) << "; afn_ai_sfx_tap = " << (d1?resolveInt(d1):6) << "; afn_ai_fire_beam();\n";
+                break;
+            }
             case AfnScriptNodeType::AiFireRecover: f << "    afn_ai_fire_recover();\n"; break;
+            case AfnScriptNodeType::AiQuickAttack: {
+                // Enemy melee reflex (dash-in Quick Attack + jump-evade). Tunables feed
+                // afn_qa_* globals; defaults match the old #defines. afn_qa_jump_chance
+                // is exported but currently UNUSED (the reflex always jump-evades).
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6); auto* d7=findDataIn(a->id,7); auto* d8=findDataIn(a->id,8);
+                auto* d9=findDataIn(a->id,9);   // Whoosh SFX instance (default 17 = QSWEEP)
+                auto* d10=findDataIn(a->id,10); auto* d11=findDataIn(a->id,11);   // afterimage trail alpha / length
+                f << "    afn_eqa_range = " << (d0?resolveInt(d0):70) << "; afn_eqa_chance_m = " << (d1?resolveInt(d1):12) << ";\n";
+                f << "    afn_eqa_speed = " << (d2?resolveInt(d2):34) << "; afn_eqa_stop = " << (d3?resolveInt(d3):14)
+                  << "; afn_eqa_dmg = " << (d4?resolveInt(d4):8) << ";\n";
+                f << "    afn_eqa_cd = " << (d5?resolveInt(d5):90) << "; afn_eqa_jump_vel_m = " << (d6?resolveInt(d6):150) << ";\n";
+                f << "    afn_eqa_jump_chance = " << (d7?resolveInt(d7):65) << "; afn_eqa_jump_cd = " << (d8?resolveInt(d8):40) << ";\n";
+                f << "    afn_ai_sfx_whoosh = " << (d9?resolveInt(d9):17) << ";\n";
+                f << "    afn_eqa_trail_alpha = " << (d10?resolveInt(d10):96) << "; afn_eqa_trail_len = " << (d11?resolveInt(d11):6) << ";\n";
+                f << "    afn_ai_quick_attack();\n";
+                break;
+            }
+            case AfnScriptNodeType::EnemyAiTiming: {
+                // Remaining enemy AI decision/timing knobs (defaults = old #defines).
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6); auto* d7=findDataIn(a->id,7);
+                auto* d8=findDataIn(a->id,8); auto* d9=findDataIn(a->id,9);
+                f << "    afn_ait_lose_frames = " << (d0?resolveInt(d0):150) << "; afn_ait_strafe_leg = " << (d1?resolveInt(d1):90) << ";\n";
+                f << "    afn_ait_yaw_ease_m = " << (d2?resolveInt(d2):35) << ";\n";
+                f << "    afn_ait_tap_windup = " << (d3?resolveInt(d3):12) << "; afn_ait_fire_recover = " << (d4?resolveInt(d4):18) << ";\n";
+                f << "    afn_ait_dodge_frames = " << (d5?resolveInt(d5):20) << "; afn_ait_dodge_cd = " << (d6?resolveInt(d6):45) << ";\n";
+                // Dodge feel: -1 = inherit the player's Dodge-node values (default).
+                f << "    afn_ait_dodge_speed = " << (d7?resolveInt(d7):-1) << "; afn_ait_dodge_ramp = " << (d8?resolveInt(d8):-1)
+                  << "; afn_ait_dodge_falloff = " << (d9?resolveInt(d9):-1) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::AiClips: {
+                // Enemy anim clips. Unwired pins name-resolve to the current rig index
+                // (drift-proof across a glTF re-sort); a wired SkelAnim node overrides.
+                // Fallback = the 44-anim literal if the rig has no clip by that name.
+                auto clip = [&](int pin, const char* nm, int fb) -> int {
+                    auto* d = findDataIn(a->id, pin);
+                    return d ? resolveInt(d) : resolveClipName(nm, fb);
+                };
+                f << "    afn_aic_move = " << clip(0,"Move",36) << "; afn_aic_idle = " << clip(1,"Idle",30) << ";\n";
+                f << "    afn_aic_strafe_l = " << clip(2,"strafeL",37) << "; afn_aic_strafe_ld = " << clip(3,"strafeLD",38)
+                  << "; afn_aic_strafe_ldfw = " << clip(4,"strafeLDFW",39) << ";\n";
+                f << "    afn_aic_strafe_r = " << clip(5,"strafeR",40) << "; afn_aic_strafe_rd = " << clip(6,"strafeRD",41)
+                  << "; afn_aic_strafe_rdfw = " << clip(7,"strafeRDFW",42) << ";\n";
+                f << "    afn_aic_backpeddle = " << clip(8,"backpeddle",21) << "; afn_aic_block = " << clip(9,"Block",22) << ";\n";
+                f << "    afn_aic_charge = " << clip(10,"atk_spc_chg",4) << "; afn_aic_launch = " << clip(11,"atk_spc_lnc",19) << ";\n";
+                f << "    afn_aic_lunge = " << clip(12,"lunge",34) << "; afn_aic_skid = " << clip(13,"lunge_skid",35)
+                  << "; afn_aic_jump = " << clip(14,"jump",31) << "; afn_aic_jumpfall = " << clip(15,"jump_fall",32) << ";\n";
+                break;
+            }
             case AfnScriptNodeType::AiBlockBegin:  f << "    afn_ai_block_begin();\n"; break;
             case AfnScriptNodeType::AiBlockStep:   f << "    afn_ai_block_step();\n"; break;
             case AfnScriptNodeType::SetBlock: {

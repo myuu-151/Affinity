@@ -557,6 +557,9 @@ enum class AfnScriptNodeType : int {
     QuickAttackHit,  // gate: passes on the single frame a Quick Attack contact lands
     ChargeUp,        // action: hold-to-charge — reveal player's hidden attached effect + fill energy
     QuickAttackStarted, // gate: passes on the single frame a Quick Attack dash actually begins
+    AiQuickAttack,   // action (enemy AI): per-frame melee reflex — dash-in Quick Attack + jump-evade
+    EnemyAiTiming,   // action (enemy AI): set the remaining decision/timing knobs (de-aggro, strafe leg, etc.)
+    AiClips,         // action (enemy AI): set the enemy anim clip indices (name-resolved -> drift-proof)
     COUNT
 };
 

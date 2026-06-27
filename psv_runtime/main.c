@@ -115,21 +115,24 @@ extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8
 #define ENEMY_DODGE_RAMP      6
 #define ENEMY_DODGE_SPEED     9.0f
 #define ENEMY_DODGE_CD        45
-// HARDCODED enemy melee reflexes (prototype — migrate to nodes once the feel is set):
+// Enemy melee reflex (Quick Attack + jump-evade) — NODE-DRIVEN via the Ai Quick Attack
+// node, which sets these afn_qa_* tunables each frame from its pins (defaults below match
+// the original #defines). Frame budgets stay compile-time.
 //  - Quick Attack: occasional dash-in melee mirroring the player's (lunge/skid clips).
 //  - Jump-evade: hop a player Quick Attack that's dashing straight at the enemy.
-#define ENEMY_QA_RANGE        70.0f     // dash-in only when the player is within this range
-#define ENEMY_QA_CHANCE       0.012f    // per-frame trigger chance (in range, off cooldown)
 #define ENEMY_QA_MAX          26        // dash frame budget (whiff timeout)
 #define ENEMY_QA_SKID         12        // skid recovery frames
-#define ENEMY_QA_SPEED        34.0f     // dash speed feed (matches the player's QA)
-#define ENEMY_QA_STOP         14.0f     // contact range — deal damage to the player (tightened from 26: was connecting from too far)
-#define ENEMY_QA_DMG          8         // melee damage
-#define ENEMY_QA_CD           90        // cooldown after a dash
-#define ENEMY_JUMP_VEL        1.5f      // jump-evade launch velocity = player's jump (player_vy 384 / 256),
-                                        // same gravity (afn_gravity/256) -> identical arc to the player
-#define ENEMY_JUMP_CHANCE     0.65f     // chance to evade a player Quick Attack by jumping
-#define ENEMY_JUMP_CD         40        // jump-evade cooldown
+// NB: prefix is afn_eqa_ (Enemy QA) — the player's Quick Attack already owns the
+// afn_qa_* names (afn_qa_range/speed/dmg/cd below at the player block). Don't merge.
+int afn_eqa_range       = 70;   // dash-in only when the player is within this range (px)
+int afn_eqa_chance_m    = 12;   // per-frame trigger chance, per-1000 (12 = 0.012)
+int afn_eqa_speed       = 34;   // dash speed feed (matches the player's QA)
+int afn_eqa_stop        = 14;   // contact range — deal damage to the player (px)
+int afn_eqa_dmg         = 8;    // melee damage
+int afn_eqa_cd          = 90;   // cooldown after a dash
+int afn_eqa_jump_vel_m  = 150;  // jump-evade launch velocity, per-100 (150 = 1.5 = player's jump arc)
+int afn_eqa_jump_chance = 65;   // RESERVED/UNUSED: future chance to evade (the reflex always jumps)
+int afn_eqa_jump_cd     = 40;   // jump-evade cooldown
 #define ENEMY_BAR_HEIGHT      18.0f     // world units above the NPC origin
 #define ENEMY_BAR_W           64.0f     // HUD pixels (960x544 space)
 #define ENEMY_BAR_H           7.0f
@@ -170,6 +173,31 @@ int afn_block_energy = 20;   // energy the player spends per blocked hit (Set Bl
 // Enemy projectile launch speeds, in tenths of px/frame (Enemy AI node tunables;
 // 20 = 2.0 full charge, 25 = 2.5 tap — like the player's Fire Charge Shot Speed).
 int afn_ai_chg_speed_t = 20, afn_ai_tap_speed_t = 25;
+// Enemy AI decision/timing knobs — NODE-DRIVEN (AI Timing node sets these each frame
+// before AI Sense). Defaults = the original ENEMY_* #defines, so no node / unwired
+// pins = unchanged behaviour. The state machine itself lives in the enemy BP graph.
+int afn_ait_lose_frames  = 150;  // outside Lose Range this many frames -> back to roam
+int afn_ait_strafe_leg   = 90;   // frames before re-rolling strafe direction
+int afn_ait_yaw_ease_m   = 35;   // x100: turn-to-face lerp (0.35)
+int afn_ait_tap_windup   = 12;   // quick-shot (tap) charge frames
+int afn_ait_fire_recover = 18;   // post-launch recovery frames
+int afn_ait_dodge_frames = 20;   // dodge roll duration
+int afn_ait_dodge_cd     = 45;   // frames between dodges
+// Enemy dodge roll feel — default -1 = INHERIT the player's Dodge-node values
+// (afn_dodge_speed/ramp/falloff), so the enemy rolls identically to the player; set
+// >=0 on the AI Timing node to give the enemy its own feel.
+int afn_ait_dodge_speed   = -1;  // -1 = inherit afn_dodge_speed
+int afn_ait_dodge_ramp    = -1;  // -1 = inherit afn_dodge_ramp
+int afn_ait_dodge_falloff = -1;  // -1 = inherit afn_dodge_falloff
+// Enemy AI animation clip indices — NODE-DRIVEN (AI Clips node, name-resolved at export
+// so they survive a glTF re-sort). Defaults = the current 44-anim indices, so no node =
+// unchanged. Used by afn_ai_roam/chase/strafe/charge_step/fire_recover/block + reflex.
+int afn_aic_move = 36, afn_aic_idle = 30;
+int afn_aic_strafe_l = 37, afn_aic_strafe_ld = 38, afn_aic_strafe_ldfw = 39;
+int afn_aic_strafe_r = 40, afn_aic_strafe_rd = 41, afn_aic_strafe_rdfw = 42;
+int afn_aic_backpeddle = 21, afn_aic_block = 22;
+int afn_aic_charge = 4, afn_aic_launch = 19;
+int afn_aic_lunge = 34, afn_aic_skid = 35, afn_aic_jump = 31, afn_aic_jumpfall = 32;
 static int s_eBlockFrames = 0;   // enemy block-stance countdown
 // Player death cinematic (die clip + camera orbit on a loss) is now NODE-DRIVEN
 // (ch_controller BP: Is Health Zero -> On Rise -> Hold Skel Clip + Orbit Cam On
@@ -199,6 +227,16 @@ static int s_eBlockFrames = 0;   // enemy block-stance countdown
 #define AFN_SND_SMALLBLAST  6    // 'smallblast' — tap (uncharged) beam launch
 #define AFN_SND_MIDBLAST    7    // 'midblast' — charged beam launch
 #define AFN_SND_BCHARGE     4    // 'charge' — beam charge wind-up
+// Enemy combat SFX instances — NODE-DRIVEN: set each frame by the AI nodes' SFX pins
+// (AI Charge Begin -> Charge SFX, AI Fire Beam -> Charged/Tap SFX, Ai Quick Attack ->
+// Whoosh SFX). Defaults below = the original hardcoded instances, so unwired pins keep
+// the exact same sounds. The proximity-gain (afn_enemy_sfx_gain) + charge-loop voice
+// tracking (s_eChargeVoice) stay in the runtime as audio infra — only WHICH instance
+// plays is node-chosen, so the audio behaviour is unchanged.
+int afn_ai_sfx_charge = AFN_SND_BCHARGE;    // charge wind-up (looping, voice-tracked)
+int afn_ai_sfx_shoot  = AFN_SND_SHOOT;      // full-charge blast launch
+int afn_ai_sfx_tap    = AFN_SND_SMALLBLAST; // tap (uncharged) blast launch
+int afn_ai_sfx_whoosh = AFN_SND_QSWEEP;     // Quick Attack dash whoosh
 int  afn_play_sfx_inst_gain(int inst, int gain);   // audio.c — play SFX instance, returns its voice idx
 void afn_stop_sfx_inst(int inst);                  // audio.c — stop a looping SFX instance (all voices)
 int  afn_sfx_active_inst(int inst);                // audio.c — is the instance's sample playing
@@ -228,20 +266,13 @@ static int afn_enemy_sfx_gain(float dist) {
 #define AFN_MASH_ELEM          13   // 'mash' Cross-button prompt element
 #define AFN_CLASH_PC_PRESSED   35   // global HUD piece index: button_pressed
 #define AFN_CLASH_PC_UNPRESSED 36   // global HUD piece index: button_unpressed
-#define AFN_CLASH_WINDOW       12   // both full-charge releases must land within this many frames
-#define AFN_CLASH_FULL_FRAC  0.85f  // "fully charged" = >= this fraction of max charge
-#define AFN_CLASH_PUSH       0.060f // balance gained per player Cross tap
-// AI masher tuned to a HIGH-skill CPU that's trying to WIN: relentless, near-perfect
-// cadence (~15 presses/sec) with almost no fumbles — it'll push you to your zone if
-// you're not mashing flat-out. (Push/interval are Beam Clash node tunables: AI Push /
-// AI Interval, set aggressive in the project.)
-#define AFN_CLASH_AI_TAP     0.050f // balance removed per AI press (default; AI Push pin overrides)
-#define AFN_CLASH_AI_MIN        6   // default; AI Interval pin overrides
-#define AFN_CLASH_AI_JIT        1   // +0..0 -> dead-steady cadence
-#define AFN_CLASH_AI_FUMBLE  0.01f  // ~1% chance of a brief slip (almost never)
-#define AFN_CLASH_AI_FUMBLE_LEN 6   // short fumble pause
-#define AFN_CLASH_MEET_R       18.0f// beams "meet" when their centers are within this (world units) — must be nearly touching
-#define AFN_CLASH_AIR_FALLBACK   90 // ...or clash anyway after both beams have been airborne this long (~1.5s)
+// All clash FEEL is NODE-DRIVEN (Beam Clash node -> afn_clash_* globals below): full-
+// charge threshold, player push, meet radius, air-fallback, clash damage %, and the AI
+// masher (push / interval / jitter / fumble / punish). The old AFN_CLASH_* tunable
+// #defines (window/full_frac/push/ai_tap/ai_min/ai_jit/ai_fumble*/meet_r/air_fallback)
+// were removed here — all dead, superseded by those globals. The masher is tuned to a
+// high-skill CPU trying to WIN (relentless ~15 presses/sec, near-zero fumbles); set the
+// node's AI Push / AI Interval aggressive in the project.
 static int   s_clashAirT = 0, s_clashAiTap = 0;           // air-fallback timer + AI press countdown
 static int   s_clashPressed = 0, s_clashPressTimer = 0;   // mash-press flash (button_pressed vs _unpressed)
 static int   s_pbBeamFull = 0, s_ebBeamFull = 0;          // 1 while each side's IN-FLIGHT beam is a full charge
@@ -518,6 +549,11 @@ static int   s_paHead = -1, s_paFilled = 0;
 static float s_eaTrail[PA_TRAIL_N][4];   // enemy x,y,z,yawDeg history (Quick Attack afterimage)
 static int   s_eaHead = -1, s_eaFilled = 0;
 extern int afn_qa_active;                // defined later in this TU; forward-declared for the afterimage gate
+// Quick Attack afterimage tunables — NODE-DRIVEN (Quick Attack / Ai Quick Attack nodes).
+// Trail Alpha scales the per-ghost alpha ramp (default 96 = the original peak); Trail
+// Length = how many of the 6 trail samples to draw (nearest N). Defaults = original look.
+int afn_qa_trail_alpha = 96, afn_qa_trail_len = 6;    // player (cyan)
+int afn_eqa_trail_alpha = 96, afn_eqa_trail_len = 6;  // enemy (white)
 
 // tint24 = 0xBBGGRR speed-ghost colour (player cyan, enemy red); alpha 0..255.
 static void draw_rig_afterimage(const AfnRig* R, const float* view,
@@ -602,10 +638,11 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
     // far/old -> near/recent so the brighter recent ghosts overlay the faint ones.
     if (afn_qa_active) {
         static const int paBack[6] = { 12, 10, 8, 6, 4, 2 };  // frames back
-        for (int k = 0; k < 6; k++) {
+        int n = afn_qa_trail_len; if (n < 0) n = 0; if (n > 6) n = 6;   // Trail Length: draw nearest N
+        for (int k = 6 - n; k < 6; k++) {
             if (paBack[k] >= s_paFilled) continue;
             int gi = (s_paHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
-            int a = 18 + (k + 1) * 13;   // old/far fainter -> recent/near brighter (~31..96)
+            int a = (18 + (k + 1) * 13) * afn_qa_trail_alpha / 96;   // far fainter -> near brighter, scaled by Trail Alpha
             draw_rig_afterimage(PR, view, s_paTrail[gi][0], s_paTrail[gi][1],
                                 s_paTrail[gi][2], s_paTrail[gi][3],
                                 AFN_PLAYER_SCALE, floorN, a, 0x00FFDC96u);   // light cyan
@@ -675,10 +712,11 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
             if (s_eaFilled < PA_TRAIL_N) s_eaFilled++;
             if (s_eqaPhase != 0) {
                 static const int paBack[6] = { 12, 10, 8, 6, 4, 2 };
-                for (int k = 0; k < 6; k++) {
+                int n = afn_eqa_trail_len; if (n < 0) n = 0; if (n > 6) n = 6;   // Trail Length
+                for (int k = 6 - n; k < 6; k++) {
                     if (paBack[k] >= s_eaFilled) continue;
                     int gi = (s_eaHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
-                    int a = 18 + (k + 1) * 13;
+                    int a = (18 + (k + 1) * 13) * afn_eqa_trail_alpha / 96;
                     draw_rig_afterimage(R, view, s_eaTrail[gi][0], s_eaTrail[gi][1],
                                         s_eaTrail[gi][2], s_eaTrail[gi][3],
                                         N[4], s_npcFloorN[i], a, 0x00FFFFFFu);   // white
@@ -1920,14 +1958,14 @@ void afn_ai_sense(void) {
 
     // De-aggro: outside lose range for LOSE_FRAMES -> ready to return to roam.
     if (afn_ai_state != AI_ROAM && afn_ai_dist > (float)afn_ai_lose_r) {
-        afn_ai_lose_ready = (++s_aiLoseT >= ENEMY_LOSE_FRAMES) ? 1 : 0;
+        afn_ai_lose_ready = (++s_aiLoseT >= afn_ait_lose_frames) ? 1 : 0;
     } else { s_aiLoseT = 0; afn_ai_lose_ready = 0; }
 
     // Face the player every combat frame (the lock-on, no reticle).
     if (afn_ai_state != AI_ROAM) {
         float toYaw = atan2f(dx, dz) * (180.0f / 3.14159265f);
         float diff = toYaw - s_npcYaw[i]; while (diff > 180.0f) diff -= 360.0f; while (diff < -180.0f) diff += 360.0f;
-        s_npcYaw[i] += diff * ENEMY_YAW_EASE;
+        s_npcYaw[i] += diff * (afn_ait_yaw_ease_m / 100.0f);
     }
 
     // (Dodge-ready is now a node: the Is Blast Incoming gate calls
@@ -1939,14 +1977,14 @@ void afn_ai_sense(void) {
 void afn_ai_roam(void) {
     int i = afn_ai_slot; if (i < 0) return;
 #ifdef AFN_HAS_NAVMESH
-    s_npcClip[i] = s_npcNavMoving[i] ? 36 : 30;   // Move : Idle (44-anim glTF: +atk_phs variants, +charge)
+    s_npcClip[i] = s_npcNavMoving[i] ? afn_aic_move : afn_aic_idle;   // Move : Idle (name-resolved via AI Clips)
 #endif
 }
 
 // CHASE: close toward the player; set afn_ai_reached at the strafe radius.
 void afn_ai_chase(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 36;   // 36 = Move (44-anim glTF)
+    s_npcClip[i] = afn_aic_move;   // Move (name-resolved via AI Clips)
     float px = (float)player_x, pz = (float)player_z;
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
     float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : 1.0f, sp = afn_ai_movespd_m * 0.001f;
@@ -1961,8 +1999,9 @@ void afn_ai_strafe(void) {
     // 8-dir strafe walk clips. 44-anim glTF map (atk_phs variants shift +3, "charge"
     // at 23 shifts the rest +1 more): Move 36, strafeL 37, strafeLD 38, strafeLDFW 39,
     // strafeR 40, strafeRD 41, strafeRDFW 42, backpeddle 21. Same direction order.
-    static const int eStrafe[8] = { 36,39,37,41,21,38,40,42 };
-    if (--s_aiStrafeLeg <= 0) { s_aiStrafeDir = ai_chance(0.5f) ? 1 : -1; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
+    int eStrafe[8] = { afn_aic_move, afn_aic_strafe_ldfw, afn_aic_strafe_l, afn_aic_strafe_rd,
+                       afn_aic_backpeddle, afn_aic_strafe_ld, afn_aic_strafe_r, afn_aic_strafe_rdfw };
+    if (--s_aiStrafeLeg <= 0) { s_aiStrafeDir = ai_chance(0.5f) ? 1 : -1; s_aiStrafeLeg = afn_ait_strafe_leg; }
     float ey = s_npcYaw[i] * DEG2RAD;
     float efx = sinf(ey), efz = cosf(ey), erx = cosf(ey), erz = -sinf(ey);
     float radial = (afn_ai_dist - (float)afn_ai_pref_r) * ENEMY_RANGE_K; if (radial > 1.0f) radial = 1.0f; if (radial < -1.0f) radial = -1.0f;
@@ -2016,13 +2055,13 @@ int afn_ai_blast_block(void) {
 void afn_ai_block_begin(void) {
     int i = afn_ai_slot; if (i < 0) return;
     s_eBlockFrames = 24; afn_ai_blocking = 1; afn_ai_block_done = 0;
-    s_npcClip[i] = 22;
+    s_npcClip[i] = afn_aic_block;
 }
 
 // BLOCK step: hold the guard + clip; set afn_ai_block_done when the window ends.
 void afn_ai_block_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    afn_ai_blocking = 1; s_npcClip[i] = 22;
+    afn_ai_blocking = 1; s_npcClip[i] = afn_aic_block;
     afn_ai_block_done = (--s_eBlockFrames <= 0) ? 1 : 0;
 }
 
@@ -2040,7 +2079,7 @@ void afn_ai_dodge_begin(void) {
     int clipL = afn_dodge_clip_l > 0 ? afn_dodge_clip_l : 28;   // DodgeL
     int clipR = afn_dodge_clip_r > 0 ? afn_dodge_clip_r : 29;   // DodgeR
     s_eDodgeClip = side > 0 ? clipR : clipL;                    // L/R clips flipped (enemy faces the player)
-    s_eDodgeFrames = s_eDodgeTotal = ENEMY_DODGE_FRAMES; s_aiDodgeCD = ENEMY_DODGE_CD; afn_ai_dodge_done = 0;
+    s_eDodgeFrames = s_eDodgeTotal = afn_ait_dodge_frames; s_aiDodgeCD = afn_ait_dodge_cd; afn_ai_dodge_done = 0;
 }
 
 // DODGE step: integrate the roll; set afn_ai_dodge_done when finished. Mirrors the
@@ -2052,13 +2091,13 @@ void afn_ai_dodge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
     if (s_eDodgeFrames > 0) {
         int total = s_eDodgeTotal, frames = s_eDodgeFrames;
-        int ramp = afn_dodge_ramp  > 0 ? afn_dodge_ramp  : 6;
-        int fall = afn_dodge_falloff > 0 ? afn_dodge_falloff : 6;
+        int ramp = afn_ait_dodge_ramp    >= 0 ? afn_ait_dodge_ramp    : (afn_dodge_ramp  > 0 ? afn_dodge_ramp  : 6);
+        int fall = afn_ait_dodge_falloff >= 0 ? afn_ait_dodge_falloff : (afn_dodge_falloff > 0 ? afn_dodge_falloff : 6);
         if (ramp > total) ramp = total; if (fall > total) fall = total;
         float env = 1.0f;
         if (ramp > 0) { float t = (float)(total - frames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; if (t*t < env) env = t*t; }
         if (fall > 0) { float u = (float)frames / (float)fall; if (u > 1.0f) u = 1.0f; if (u*u < env) env = u*u; }
-        int spd = afn_dodge_speed > 0 ? afn_dodge_speed : 70;
+        int spd = afn_ait_dodge_speed >= 0 ? afn_ait_dodge_speed : (afn_dodge_speed > 0 ? afn_dodge_speed : 70);
         float sp = spd * 0.08f * env;
         float ix = s_eDodgeDX * sp, iz = s_eDodgeDZ * sp;
         int sub = (int)(sp / 3.0f) + 1;
@@ -2089,7 +2128,7 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
     // arcs the launch regardless of what the enemy is doing.
     if (playerDashAtMe && !s_ePrevPlayerQA && s_npcGround[i] && s_eqaPhase == 0
         && s_eDodgeFrames == 0 && s_eJumpCD == 0) {
-        s_npcVY[i] = ENEMY_JUMP_VEL; s_npcGround[i] = 0; s_eJumpCD = ENEMY_JUMP_CD;
+        s_npcVY[i] = afn_eqa_jump_vel_m / 100.0f; s_npcGround[i] = 0; s_eJumpCD = afn_eqa_jump_cd;
     }
     s_ePrevPlayerQA = playerDashAtMe;
 
@@ -2099,72 +2138,84 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
         && (afn_ai_state == AI_STRAFE || afn_ai_state == AI_CHASE)   // only from neutral movement
         && s_eDodgeFrames == 0 && s_eBlockFrames == 0) {
         float dx = px - s_npcX[i], dz = pz - s_npcZ[i], d2 = dx*dx + dz*dz;
-        if (d2 <= ENEMY_QA_RANGE*ENEMY_QA_RANGE && ai_chance(ENEMY_QA_CHANCE)) {
+        if (d2 <= (float)afn_eqa_range*afn_eqa_range && ai_chance(afn_eqa_chance_m * 0.001f)) {
             float d = sqrtf(d2); if (d < 1e-3f) d = 1.0f;
             s_eqaDirX = dx/d; s_eqaDirZ = dz/d;
             s_eqaYaw = atan2f(s_eqaDirX, s_eqaDirZ) * (180.0f/3.14159265f);
             s_eqaPhase = 1; s_eqaFrames = ENEMY_QA_MAX; s_eqaDealt = 0;
-            afn_play_sfx_inst_gain(AFN_SND_QSWEEP, afn_enemy_sfx_gain(afn_ai_dist));   // dash whoosh (same as player)
+            afn_play_sfx_inst_gain(afn_ai_sfx_whoosh, afn_enemy_sfx_gain(afn_ai_dist));   // dash whoosh (Ai Quick Attack -> Whoosh SFX pin)
         }
     }
     if (s_eqaPhase == 1) {
-        float sp = ENEMY_QA_SPEED * 0.08f;
+        float sp = afn_eqa_speed * 0.08f;
         int ramp = 4; { float t = (float)(ENEMY_QA_MAX - s_eqaFrames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; sp *= t*t; }
         float ix = s_eqaDirX*sp, iz = s_eqaDirZ*sp; int sub = (int)(sp/3.0f) + 1;
         for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
-        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 34;   // lunge
+        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = afn_aic_lunge;   // lunge
         if (!s_eqaDealt) {
             float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
             // Grounded only — the player can JUMP over the enemy's Quick Attack, the
             // same way the enemy jump-evades the player's (the dash whiffs underneath).
-            if (player_on_ground && dx*dx + dz*dz <= ENEMY_QA_STOP*ENEMY_QA_STOP) {
-                int dmg = afn_player_blocking ? (ENEMY_QA_DMG * afn_block_pct) / 100 : ENEMY_QA_DMG;
+            if (player_on_ground && dx*dx + dz*dz <= (float)afn_eqa_stop*afn_eqa_stop) {
+                int dmg = afn_player_blocking ? (afn_eqa_dmg * afn_block_pct) / 100 : afn_eqa_dmg;
                 afn_health -= dmg; if (afn_health < 0) afn_health = 0;
                 // CONNECT: end the dash on the hit — no skid (skid is the overshoot
                 // recovery, only for a whiff). Stops it sliding INTO the player.
-                s_eqaDealt = 1; s_eqaPhase = 0; s_eqaCD = ENEMY_QA_CD;
+                s_eqaDealt = 1; s_eqaPhase = 0; s_eqaCD = afn_eqa_cd;
             }
         }
         if (s_eqaPhase == 1 && --s_eqaFrames <= 0) { s_eqaPhase = 2; s_eqaFrames = ENEMY_QA_SKID; }   // WHIFF -> skid recovery
     } else if (s_eqaPhase == 2) {
         float dec = (ENEMY_QA_SKID > 0) ? (float)s_eqaFrames / (float)ENEMY_QA_SKID : 0.0f;
-        float sp = ENEMY_QA_SPEED * 0.08f * dec * 0.5f;
+        float sp = afn_eqa_speed * 0.08f * dec * 0.5f;
         float ix = s_eqaDirX*sp, iz = s_eqaDirZ*sp; int sub = (int)(sp/3.0f) + 1;
         for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
-        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 35;   // skid
-        if (--s_eqaFrames <= 0) { s_eqaPhase = 0; s_eqaCD = ENEMY_QA_CD; }
+        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = afn_aic_skid;   // skid
+        if (--s_eqaFrames <= 0) { s_eqaPhase = 0; s_eqaCD = afn_eqa_cd; }
     }
     // Airborne (jump-evade) clip when not mid-QA: rising = jump (31), falling = jump_fall (32).
-    if (s_eqaPhase == 0 && !s_npcGround[i]) s_npcClip[i] = (s_npcVY[i] > 0.0f) ? 31 : 32;
+    if (s_eqaPhase == 0 && !s_npcGround[i]) s_npcClip[i] = (s_npcVY[i] > 0.0f) ? afn_aic_jump : afn_aic_jumpfall;
+}
+
+// NODE entry (Ai Quick Attack): run the melee reflex for the enemy AI slot. The Ai
+// Quick Attack node sets the afn_qa_* tunables above, then calls this each frame from
+// the enemy BP's On Update chain (placed AFTER the movement/state nodes so the reflex
+// overrides pose/position). Suppressed while the beam-clash struggle backdrop is up —
+// the enemy is locked in the side-view mash and must NOT Quick-Attack / damage the
+// player mid-clash. Replaces the old hardcoded call in the NPC update loop.
+void afn_ai_quick_attack(void) {
+    int i = afn_ai_slot; if (i < 0) return;
+    if (afn_hud_visible[AFN_CLASH_ELEM]) return;
+    afn_ai_melee_reflex(i, AFN_ENEMY_EIDX, (float)player_x, (float)player_z);
 }
 
 // CHARGE begin: roll charge-vs-tap, start the wind-up (called once on entry).
 void afn_ai_charge_begin(void) {
     s_aiChargeShot = ai_chance(afn_ai_chargeprob * 0.01f);
     // Same charge time as the player: full charge takes afn_fb_max frames (Focus Blast).
-    s_aiTimer = s_aiChargeShot ? afn_fb_max : ENEMY_TAP_WINDUP;
+    s_aiTimer = s_aiChargeShot ? afn_fb_max : afn_ait_tap_windup;
     s_efbScale = 0.05f; s_efbCharging = 1; afn_ai_charge_done = 0;   // seed small; charge_step grows it
     // Charge wind-up SFX — track OUR voice so stopping it can't cut the player's
     // chargefocus (same shared instance/sample).
-    if (s_aiChargeShot) s_eChargeVoice = afn_play_sfx_inst_gain(AFN_SND_BCHARGE, afn_enemy_sfx_gain(afn_ai_dist));
+    if (s_aiChargeShot) s_eChargeVoice = afn_play_sfx_inst_gain(afn_ai_sfx_charge, afn_enemy_sfx_gain(afn_ai_dist));
 }
 
 // CHARGE step: hold the charge pose, grow the orb at the muzzle; set
 // afn_ai_charge_done when the wind-up elapses (the FireBeam node then launches).
 void afn_ai_charge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 4; s_efbCharging = 1;   // 4 = atk_spc_chg (charge pose)
+    s_npcClip[i] = afn_aic_charge; s_efbCharging = 1;   // atk_spc_chg (charge pose)
     // Keep OUR charge voice alive — if it was cut, restart it. Check our specific
     // voice (not any sample-4 voice) so the player's chargefocus doesn't fool it.
-    if (s_aiChargeShot && !afn_inst_voice_active(s_eChargeVoice, AFN_SND_BCHARGE))
-        s_eChargeVoice = afn_play_sfx_inst_gain(AFN_SND_BCHARGE, afn_enemy_sfx_gain(afn_ai_dist));
+    if (s_aiChargeShot && !afn_inst_voice_active(s_eChargeVoice, afn_ai_sfx_charge))
+        s_eChargeVoice = afn_play_sfx_inst_gain(afn_ai_sfx_charge, afn_enemy_sfx_gain(afn_ai_dist));
     float mx, my, mz; enemy_muzzle(i, &mx, &my, &mz);
     s_efbX = mx; s_efbY = my; s_efbZ = mz;
     // Grow the orb LINEARLY across the whole wind-up (like the player's level-based
     // growth), so the charge visibly fills instead of snapping to full in a few
     // frames (old exp lerp). frac = 0..1 over the wind-up.
     float tgt = s_aiChargeShot ? ENEMY_CHG_SCALE : ENEMY_TAP_SCALE;
-    int total = s_aiChargeShot ? afn_fb_max : ENEMY_TAP_WINDUP;   // match player charge time
+    int total = s_aiChargeShot ? afn_fb_max : afn_ait_tap_windup;   // match player charge time
     float frac = total > 0 ? (1.0f - (float)s_aiTimer / (float)total) : 1.0f;
     if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
     s_efbScale = 0.05f + (tgt - 0.05f) * frac;
@@ -2184,15 +2235,15 @@ void afn_ai_fire_beam(void) {
     s_efbActive = 1; s_efbCharging = 0; s_efbLife = ENEMY_SHOT_LIFE;
     // Charged shot always charges to FULL, so it plays the big 'shoot' SFX (what the
     // player plays at >=95% charge), not midblast. Tap shots stay smallblast.
-    afn_play_sfx_inst_gain(s_aiChargeShot ? AFN_SND_SHOOT : AFN_SND_SMALLBLAST,
+    afn_play_sfx_inst_gain(s_aiChargeShot ? afn_ai_sfx_shoot : afn_ai_sfx_tap,
                            afn_enemy_sfx_gain(afn_ai_dist));   // beam launch SFX (same as player)
-    s_aiAtkCD = afn_ai_atkcd; s_aiTimer = ENEMY_FIRE_RECOVER;
+    s_aiAtkCD = afn_ai_atkcd; s_aiTimer = afn_ait_fire_recover;
 }
 
 // FIRE recover: hold the launch clip; set afn_ai_fire_done when recovery elapses.
 void afn_ai_fire_recover(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 19;   // 19 = atk_spc_lnc (launch)
+    s_npcClip[i] = afn_aic_launch;   // atk_spc_lnc (launch)
     afn_ai_fire_done = (--s_aiTimer <= 0) ? 1 : 0;
 }
 // HUD anim layer state — node-driven (PlayHudAnim resets+activates,
@@ -4014,14 +4065,12 @@ int main(void)
                 float cx = afn_npc_col[i][3], cy = afn_npc_col[i][4], cz = afn_npc_col[i][5];
                 float nbottom = cy - hy;
 
-                // HARDCODED melee reflex (enemy only): runs after the BP moved the NPC
-                // and before gravity, so the QA dash overrides motion and a jump-evade's
-                // s_npcVY launch gets integrated this frame. See afn_ai_melee_reflex.
-                // Suppressed during the beam-clash struggle (clash backdrop visible) —
-                // the enemy is locked in the side-view mash, so it must NOT Quick-Attack
-                // / damage the player mid-clash (that was killing the player mid-struggle).
-                if (eidx == AFN_ENEMY_EIDX && !afn_hud_visible[AFN_CLASH_ELEM])
-                    afn_ai_melee_reflex(i, eidx, playerX, playerZ);
+                // Melee reflex (enemy Quick Attack + jump-evade) is NODE-DRIVEN now:
+                // the enemy BP's On Update chain calls the Ai Quick Attack node (after
+                // its movement/state nodes) inside script_tick(), which ran above. It
+                // still lands after the BP move and before the gravity integrator below,
+                // so the dash overrides motion and a jump-evade launch arcs this frame.
+                // See afn_ai_quick_attack() / afn_ai_melee_reflex().
 
 #ifdef AFN_HAS_NAVMESH
                 // Navigation (editor NPC Navigation section): walk the Detour
@@ -4560,7 +4609,7 @@ int main(void)
         // Cut the looping charge wind-up SFX the instant the enemy stops charging
         // (fired, interrupted, died) — detect the s_efbCharging 1->0 edge.
         { static int s_prevEfbCharging = 0;
-          if (s_prevEfbCharging && !s_efbCharging) { afn_stop_inst_voice(s_eChargeVoice, AFN_SND_BCHARGE); s_eChargeVoice = -1; }
+          if (s_prevEfbCharging && !s_efbCharging) { afn_stop_inst_voice(s_eChargeVoice, afn_ai_sfx_charge); s_eChargeVoice = -1; }
           s_prevEfbCharging = s_efbCharging; }
         enemy_orb_render(view);   // HARDCODED: enemy projectile orb (charge spot / in flight)
 #endif

@@ -1,6 +1,7 @@
 #pragma once
 #include <ostream>
 #include <vector>
+#include <string>
 #include "afn_export_ir.h"
 
 namespace Affinity {
@@ -22,6 +23,10 @@ void EmitNodeScriptBodies(std::ostream& f,
                           const std::vector<AfnSpriteExport>& sprites,
                           const std::vector<AfnSoundInstanceExport>& soundInstances,
                           const std::vector<int>& hudLayerRemap = {},
-                          const std::vector<int>& hudLayerCount = {});
+                          const std::vector<int>& hudLayerCount = {},
+                          // Rig clip names in INDEX ORDER (clipNames[i] = name of clip i),
+                          // so the AI Clips node can name-resolve enemy clip defaults and
+                          // survive a glTF re-sort. Empty (NDS) = literal fallbacks.
+                          const std::vector<std::string>& clipNames = {});
 
 } // namespace Affinity
