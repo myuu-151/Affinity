@@ -396,6 +396,50 @@ static void DrawTriangleTex(float x0, float y0, float u0, float v0, float d0,
     }
 }
 
+// Like DrawTriangleTex but honors a per-pixel alpha plane (attached-model soft
+// alpha): blends each texel over the framebuffer by its alpha and skips fully
+// transparent texels. No z-write — drawn as a transparent overlay (editor preview).
+static void DrawTriangleTexA(float x0, float y0, float u0, float v0, float d0,
+                             float x1, float y1, float u1, float v1, float d1,
+                             float x2, float y2, float u2, float v2, float d2,
+                             const uint8_t* texPixels, const uint32_t* texPal,
+                             const uint8_t* texAlpha, int texW, int texH)
+{
+    int minX = std::max(0, (int)floorf(std::min({x0, x1, x2})));
+    int maxX = std::min(kGBAWidth - 1, (int)ceilf(std::max({x0, x1, x2})));
+    int minY = std::max(0, (int)floorf(std::min({y0, y1, y2})));
+    int maxY = std::min(kGBAHeight - 1, (int)ceilf(std::max({y0, y1, y2})));
+    float denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    if (fabsf(denom) < 0.001f) return;
+    float invD = 1.0f / denom;
+    bool perspOk = d0 > 0.01f && d1 > 0.01f && d2 > 0.01f;
+    float iz0 = perspOk ? 1.0f/d0 : 1.0f, iz1 = perspOk ? 1.0f/d1 : 1.0f, iz2 = perspOk ? 1.0f/d2 : 1.0f;
+    float uz0 = u0*iz0, uz1 = u1*iz1, uz2 = u2*iz2, vz0 = v0*iz0, vz1 = v1*iz1, vz2 = v2*iz2;
+    for (int y = minY; y <= maxY; y++) {
+        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        for (int x = minX; x <= maxX; x++) {
+            float w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) * invD;
+            float w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) * invD;
+            float w2 = 1.0f - w0 - w1;
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+            float su, sv;
+            if (perspOk) { float iiz = 1.0f/(w0*iz0 + w1*iz1 + w2*iz2); su = (w0*uz0 + w1*uz1 + w2*uz2)*iiz; sv = (w0*vz0 + w1*vz1 + w2*vz2)*iiz; }
+            else { su = u0*w0 + u1*w1 + u2*w2; sv = v0*w0 + v1*w1 + v2*w2; }
+            int tu = (int)floorf(su * texW) % texW; if (tu < 0) tu += texW;
+            int tv = (int)floorf(sv * texH) % texH; if (tv < 0) tv += texH;
+            int ti = tv * texW + tu;
+            uint8_t a = texAlpha[ti];
+            if (a < 8) continue;
+            uint32_t c = texPal[texPixels[ti]];
+            uint8_t tr = c & 0xFF, tg = (c >> 8) & 0xFF, tb = (c >> 16) & 0xFF;
+            float af = a / 255.0f, ia = 1.0f - af;
+            row[x*3+0] = (uint8_t)(tr*af + row[x*3+0]*ia);
+            row[x*3+1] = (uint8_t)(tg*af + row[x*3+1]*ia);
+            row[x*3+2] = (uint8_t)(tb*af + row[x*3+2]*ia);
+        }
+    }
+}
+
 // Draw a wireframe triangle edge
 static void DrawLine(int ax, int ay, int bx, int by,
                      uint8_t cr, uint8_t cg, uint8_t cb)
@@ -1122,6 +1166,82 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 drewSprite = true;
             }
         }
+        // Attached-model preview (scene tabs): textured SubModel mesh. When a Bone is
+        // selected it SNAPS to that bone (same as the runtime), so X/Y/Z translate the
+        // mesh off the joint identically in editor + game. Falls back to object origin.
+        if (sp.subIdx < 0 && fs.subModelCount > 0 && meshAssets) {
+            for (int smi = 0; smi < fs.subModelCount; smi++) {
+                const auto& sm = fs.subModels[smi];
+                if (sm.editorHide || sm.meshIdx < 0 || sm.meshIdx >= meshAssetCount) continue;
+                const MeshAsset& am = meshAssets[sm.meshIdx];
+                if (am.vertices.empty()) continue;
+                float ms = sm.scale;
+                float yr = (fs.rotation + sm.yaw) * 3.14159265f / 180.0f;
+                float cyr = cosf(yr), syr = sinf(yr);
+                // Bone snap: bone world pos (rig-rotated, object-scaled) + WORLD-axis
+                // offset, matching the runtime (s_player_bone_world + offset).
+                float bX, bY, bZ; bool snapped = false;
+                if (sm.boneIdx >= 0 && fs.riggedMeshIdx >= 0 && fs.riggedMeshIdx < riggedAssetCount && riggedAssets) {
+                    const RiggedMeshAsset& prm = riggedAssets[fs.riggedMeshIdx];
+                    int nb = prm.boneCount;
+                    if (sm.boneIdx < nb && (int)prm.bindPose.size() == nb) {
+                        BonePose P = prm.bindPose[sm.boneIdx];
+                        if (fs.rigAnimIdx >= 0 && fs.rigAnimIdx < (int)prm.clips.size() && prm.clips[fs.rigAnimIdx].frameCount > 0) {
+                            const RigAnimClip& clip = prm.clips[fs.rigAnimIdx];
+                            int fc = clip.frameCount;
+                            float ff = fs.rigAnimClock < 0 ? 0 : fs.rigAnimClock;
+                            int f0 = (int)floorf(ff) % fc, f1 = (f0 + 1) % fc; float u = ff - floorf(ff);
+                            const BonePose& A = clip.frames[f0*nb + sm.boneIdx];
+                            const BonePose& B = clip.frames[f1*nb + sm.boneIdx];
+                            P.px = A.px*(1-u)+B.px*u; P.py = A.py*(1-u)+B.py*u; P.pz = A.pz*(1-u)+B.pz*u;
+                        }
+                        float os = fs.scale;
+                        float oY = fs.rotation*3.14159265f/180.0f, oX = fs.rotationX*3.14159265f/180.0f, oZ = fs.rotationZ*3.14159265f/180.0f;
+                        float bcY=cosf(oY),bsY=sinf(oY),bcX=cosf(oX),bsX=sinf(oX),bcZ=cosf(oZ),bsZ=sinf(oZ);
+                        float lx=P.px*os, ly=P.py*os, lz=P.pz*os;
+                        float rxx=lx*bcY+lz*bsY, rzz=-lx*bsY+lz*bcY, ryy=ly;
+                        float ry2=ryy*bcX-rzz*bsX, rz2=ryy*bsX+rzz*bcX;
+                        float bxo=rxx*bcZ-ry2*bsZ, byo=rxx*bsZ+ry2*bcZ, bzo=rz2;
+                        bX = fs.x + bxo + sm.offsetX; bY = fs.y + byo + sm.offsetY; bZ = fs.z + bzo + sm.offsetZ;
+                        snapped = true;
+                    }
+                }
+                if (!snapped) { bX = fs.x + sm.offsetX; bY = fs.y + sm.offsetY; bZ = fs.z + sm.offsetZ; }
+                int nv = (int)am.vertices.size();
+                std::vector<float> vx(nv), vy(nv), vd(nv); std::vector<char> vvis(nv);
+                for (int v = 0; v < nv; v++) {
+                    const MeshVertex& mv = am.vertices[v];
+                    float lx = mv.px * ms, ly = mv.py * ms, lz = mv.pz * ms;
+                    float wx = bX + (lx * cyr + lz * syr);
+                    float wy = bY + ly;
+                    float wz = bZ + (-lx * syr + lz * cyr);
+                    vvis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, vx[v], vy[v]) ? 1 : 0;
+                    vd[v] = (wx - cam.x) * sinA - (wz - cam.z) * cosA;   // view-space forward depth
+                }
+                bool soft = am.useSoftAlpha && (int)am.texAlpha.size() == am.texW * am.texH && am.texW > 0;
+                bool tex  = am.textured && !am.texturePixels.empty() && am.texW > 0 && am.texH > 0;
+                auto tri = [&](int i0, int i1, int i2) {
+                    if (!vvis[i0] || !vvis[i1] || !vvis[i2]) return;
+                    const MeshVertex& a = am.vertices[i0]; const MeshVertex& b = am.vertices[i1]; const MeshVertex& c = am.vertices[i2];
+                    if (soft)
+                        DrawTriangleTexA(vx[i0],vy[i0],a.u,1.0f-a.v,vd[i0], vx[i1],vy[i1],b.u,1.0f-b.v,vd[i1], vx[i2],vy[i2],c.u,1.0f-c.v,vd[i2],
+                                         am.texturePixels.data(), am.texturePalette, am.texAlpha.data(), am.texW, am.texH);
+                    else if (tex)
+                        DrawTriangleTex(vx[i0],vy[i0],a.u,1.0f-a.v,vd[i0], vx[i1],vy[i1],b.u,1.0f-b.v,vd[i1], vx[i2],vy[i2],c.u,1.0f-c.v,vd[i2],
+                                        am.texturePixels.data(), am.texturePalette, am.texW, am.texH, 0.0f);
+                    else { DrawLine((int)vx[i0],(int)vy[i0],(int)vx[i1],(int)vy[i1],120,220,255);
+                           DrawLine((int)vx[i1],(int)vy[i1],(int)vx[i2],(int)vy[i2],120,220,255);
+                           DrawLine((int)vx[i2],(int)vy[i2],(int)vx[i0],(int)vy[i0],120,220,255); }
+                };
+                for (size_t t = 0; t + 3 <= am.indices.size(); t += 3)
+                    tri(am.indices[t], am.indices[t+1], am.indices[t+2]);
+                for (size_t qq = 0; qq + 4 <= am.quadIndices.size(); qq += 4) {
+                    int i0 = am.quadIndices[qq], i1 = am.quadIndices[qq+1], i2 = am.quadIndices[qq+2], i3 = am.quadIndices[qq+3];
+                    tri(i0, i1, i2); tri(i0, i2, i3);
+                }
+            }
+        }
+
         // Render mesh geometry for Mesh-type sprites (skip for sub-sprites)
         if (!drewSprite && !rigParent && sp.subIdx < 0 && fs.type == SpriteType::Mesh
             && fs.meshIdx >= 0 && fs.meshIdx < meshAssetCount && meshAssets)

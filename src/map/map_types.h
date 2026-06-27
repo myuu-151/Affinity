@@ -241,6 +241,12 @@ struct MeshAsset
                                               // cutout transparency. Textures with transparent padding
                                               // around opaque content should keep this off so the padding
                                               // doesn't bleed into face UVs near the edge.
+    // Attached-model sprite-style texture options (ignored by normal meshes):
+    bool useSoftAlpha = false;                // per-pixel (blended) alpha like sprite assets — drawn
+                                              // with GL_BLEND instead of a 1-bit cutout
+    std::vector<uint8_t> texAlpha;            // per-pixel alpha plane (texW*texH) when useSoftAlpha
+    int  psvColors = 0;                       // 0 = legacy 16/256 path (texture256); >0 = quantize to N
+                                              // colors sprite-style (attached models default to 128)
     unsigned int glTexID = 0;                 // OpenGL texture for editor preview
     bool texFiltered = false;                 // true = GL_LINEAR, false = GL_NEAREST
     bool texInIwram = false;                  // true = copy this texture into the IWRAM cache at boot (faster ldrb, shared 4KB budget)
@@ -471,6 +477,25 @@ struct FloorSprite
     static constexpr int kMaxSubSprites = 4;
     SubSprite subSprites[kMaxSubSprites];
     int subSpriteCount = 0;
+    // Attached models (extra 3D mesh layers riding the object, e.g. a charge aura).
+    // Imported as a single-texture OBJ (MeshAsset); the texture uses the sprite-style
+    // 128-color + soft-alpha pipeline. Optionally bone-driven like SubSprite.
+    struct SubModel {
+        int   meshIdx = -1;        // index into sMeshAssets (-1 = none)
+        float offsetX = 0.0f;      // local offset (bone-relative if boneIdx>=0)
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
+        float scale = 1.0f;        // size multiplier
+        float yaw = 0.0f;          // extra spin about Y (degrees)
+        bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
+        bool  hidden = false;      // start invisible at RUNTIME; a Cast Effect node reveals it
+        bool  editorHide = false;  // hide in the EDITOR preview only (declutter); still shows in-game
+        int   boneIdx = -1;        // -1 = anchor to parent origin; >=0 = ride this rig bone
+                                   // (player rig only for now); offset X/Y/Z is bone-relative
+    };
+    static constexpr int kMaxSubModels = 2;
+    SubModel subModels[kMaxSubModels];
+    int subModelCount = 0;
     // Blueprint script attachment
     int   blueprintIdx = -1;         // index into sBlueprintAssets (-1 = none)
     struct { int paramIdx; int value; } instanceParams[8] = {};

@@ -135,13 +135,16 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
         // memory (black) on real hardware (PPSSPP is more forgiving).
         if (textured) {
             int n = m.texW * m.texH;
+            bool soft = m.softAlpha && (int)m.texAlpha.size() == n;  // attached-model blended alpha
             f << "static const unsigned int __attribute__((aligned(16))) afn_mesh" << mi << "_tex[" << n << "] = {";
             for (int p = 0; p < n; p++) {
                 if (p % 8 == 0) f << "\n  ";
                 unsigned char pi = (p < (int)m.texPixels.size()) ? m.texPixels[p] : 0;
                 bool opaque = opaqueTex || pi != 0;        // index 0 transparent when alpha on
                 unsigned short pal = m.texPalette[pi];
-                f << "0x" << std::hex << Rgb15ToAbgr(pal, opaque) << std::dec << "u,";
+                unsigned int abgr = Rgb15ToAbgr(pal, opaque);
+                if (soft) abgr = (abgr & 0x00FFFFFFu) | ((unsigned int)m.texAlpha[p] << 24);  // per-pixel A
+                f << "0x" << std::hex << abgr << std::dec << "u,";
             }
             f << "\n};\n";
         }
@@ -220,7 +223,8 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
         f << "  { " << vc << ", " << ic << ", afn_mesh" << mi << "_verts, afn_mesh" << mi << "_idx, "
           << (textured ? 1 : 0) << ", " << (textured ? m.texW : 0) << ", " << (textured ? m.texH : 0) << ", "
           << (textured ? std::string("afn_mesh") + std::to_string(mi) + "_tex" : std::string("0")) << ", "
-          << (m.textureHasAlpha ? 1 : 0) << ", " << m.cullMode << ", " << m.lit << ", " << m.visible;
+          << (m.textureHasAlpha ? 1 : 0) << ", " << m.cullMode << ", " << m.lit << ", " << m.visible
+          << ", " << (m.softAlpha ? 1 : 0);
         if (isPsv) {
             if (mats > 0)
                 f << ", " << mats << ", afn_mesh" << mi << "_idx_ptrs, afn_mesh" << mi << "_idx_counts, afn_mesh"
@@ -230,7 +234,7 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0" << (isPsv ? ",0,0,0,0,0,0" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----
@@ -253,6 +257,30 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
     for (size_t k = 0; k < inst.size(); k++) f << (int)inst[k] << ",";
     if (inst.empty()) f << "0,";
     f << "};\n";
+    // Attached-MODEL mesh instances: parent editor-sprite idx (for live re-anchor),
+    // bone (player rig joint, -1 = none), and local offset — PARALLEL TO afn_sprites.
+    // (The billboard afn_spr_parent/bone/poff arrays are a SEPARATE index space and
+    // must NOT be indexed by a mesh-instance index.)
+    {
+        bool anyA = false;
+        for (size_t k = 0; k < inst.size(); k++)
+            if (sprites[inst[k]].parentIdx >= 0 || sprites[inst[k]].boneIdx >= 0) { anyA = true; break; }
+        if (anyA) {
+            f << "#define AFN_HAS_MESH_INST_ATTACH 1\n";
+            f << "static const int afn_mesh_inst_parent[" << inst.size() << "] = {";
+            for (size_t k = 0; k < inst.size(); k++) f << sprites[inst[k]].parentIdx << ",";
+            f << "};\n";
+            f << "static const int afn_mesh_inst_bone[" << inst.size() << "] = {";
+            for (size_t k = 0; k < inst.size(); k++) f << sprites[inst[k]].boneIdx << ",";
+            f << "};\n";
+            f << "static const float afn_mesh_inst_poff[" << inst.size() << "][3] = {";
+            for (size_t k = 0; k < inst.size(); k++) {
+                const auto& s = sprites[inst[k]];
+                f << "{" << Flt(WL(s.offsetX)) << "," << Flt(WL(s.offsetY)) << "," << Flt(WL(s.offsetZ)) << "},";
+            }
+            f << "};\n";
+        }
+    }
     // Total editor sprite count — sizes the script-glue per-sprite arrays
     // (afn_sprite_visible[], afn_hp[], ...). Guarded so a runtime can override.
     f << "#ifndef NUM_SPRITES\n#define NUM_SPRITES " << (sprites.empty()?1:(int)sprites.size()) << "\n#endif\n\n";

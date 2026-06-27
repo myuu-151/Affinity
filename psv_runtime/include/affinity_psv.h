@@ -58,6 +58,7 @@ typedef struct {
     int                   cullMode;     // 0 back, 1 front, 2 none
     int                   lit;          // 1 = lit, 0 = unlit
     int                   visible;      // 0 = collision-only
+    int                   blend;        // 1 = alpha-blend (attached-model soft alpha), 0 = opaque/cutout
     // Multi-material (OBJ usemtl): mats>0 => draw group-per-slot (each slot binds
     // its own texture), ignoring the single texture fields above. 0 => single-tex.
     int                          mats;

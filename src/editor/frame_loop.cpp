@@ -896,6 +896,9 @@ enum class VsNodeType : int {
     QuickAttack,     // action: dash-in melee lunge toward the lock target (or forward) + contact damage + skid
     IsDashing,       // gate: passes while a Quick Attack dash/skid is in progress (phase != 0)
     QuickAttackHit,  // gate: passes on the single frame a Quick Attack contact lands
+    ChargeUp,        // action: hold-to-charge — reveal the player's hidden attached effect (aura) +
+                     // fill the Energy meter per held frame. Gate with On Key Held(button).
+    QuickAttackStarted, // gate: passes on the single frame a Quick Attack dash actually begins
     COUNT
 };
 
@@ -916,8 +919,9 @@ struct VsNodeTypeDef {
 // serialized into project files and consumed by the runtime keyName() tables.
 static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right", "X", "Y",
     "L-Stick Up", "L-Stick Down", "L-Stick Left", "L-Stick Right",
-    "R-Stick Up", "R-Stick Down", "R-Stick Left", "R-Stick Right" };
-static constexpr int kVsKeyCount = 20;   // 0-11 buttons/d-pad, 12-15 left stick, 16-19 right stick
+    "R-Stick Up", "R-Stick Down", "R-Stick Left", "R-Stick Right",
+    "L3", "R3" };
+static constexpr int kVsKeyCount = 22;   // 0-11 buttons/d-pad, 12-15 left stick, 16-19 right stick, 20-21 L3/R3
 static const char* sVsAxisNames[] = { "Left", "Right", "Up", "Down" };
 static constexpr int kVsAxisCount = 4;
 
@@ -939,7 +943,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
     { "Play Sound",      0xFF3355AA, 1, 1, 2, 0, {"Sound Instance", "Persist Link"}, {}, {} },
     { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
-    { "Jump",            0xFF3355AA, 1, 1, 2, 0, {"Force (float)", "Fall Force (float)"}, {}, {} },
+    { "Jump",            0xFF3355AA, 1, 1, 3, 0, {"Force (float)", "Fall Force (float)", "Energy Cost (int)"}, {}, {} },
     { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Orbit Camera",    0xFF3355AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
@@ -1301,6 +1305,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Quick Attack",    0xFF3355AA, 1, 1, 11, 0, {"Speed (int)","Stop Range","Damage (int)","Max Frames","Skid Frames","Punch %","Lunge Clip","Skid Clip","Idle Clip","Cooldown (int)","Energy Cost (int)"}, {}, {} },
     { "Is Dashing",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Quick Attack Hit",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Charge Up",       0xFF3355AA, 1, 1, 2, 0, {"Energy/Frame (int)", "Charge Clip (Skel Anim)"}, {}, {} },
+    { "Quick Attack Started",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1328,7 +1334,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
     case VsNodeType::PlaySound:     desc = "Plays a sound instance. Persist Link >0 keeps it alive across scene changes, sharing music only between scenes that play it with the same link; a different link swaps the held track."; break;
     case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
-    case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump."; break;
+    case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump. Energy Cost (int, optional): when > 0 the jump only fires if afn_energy >= cost and spends it on launch (0/unwired = free)."; break;
     case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
     case VsNodeType::Sprint:        desc = "Sets the player's movement speed (sprint)."; break;
     case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed whenever this runs. Gate it with On Key Held(key) to bind orbiting to a button (any key, remappable)."; break;
@@ -1476,7 +1482,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::SetAI:         desc = "Sets the AI behavior mode for a sprite (0=None, 1=Patrol, 2=Chase, 3=Flee)."; break;
     case VsNodeType::GetAI:         desc = "Outputs the current AI behavior mode of a sprite."; break;
     case VsNodeType::OnDeath:       desc = "Event: fires when the specified sprite's HP reaches 0."; break;
-    case VsNodeType::OnHit:         desc = "Event: fires when the specified sprite takes damage."; break;
+    case VsNodeType::OnHit:         desc = "Event: fires the frame an object takes damage. Object pin wired = that sprite; unwired = the player or anyone."; break;
     case VsNodeType::EmitParticle:  desc = "Spawns a particle effect at the given world position."; break;
     case VsNodeType::SetTint:       desc = "Sets a color tint on a sprite (RGB15)."; break;
     case VsNodeType::Shake:         desc = "Shakes a specific sprite for N frames."; break;
@@ -1603,6 +1609,8 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::QuickAttack: desc = "Dash-in melee (PSV): drive from On Key Pressed (e.g. Triangle). Lunges the player toward the Lock On target (or straight forward if nothing is locked), and on reaching Stop Range deals Damage once (enemy Block cuts it) and punches the camera in for impact; a whiff overshoots until Max Frames runs out, then a short Skid decelerates to a stop. Movement mirrors the Dodge (committed burst, wall-collide); normal movement is suppressed for the whole move. Tunables: Speed, Stop Range, Damage, Max Frames (dash budget), Skid Frames, Punch % (camera zoom-in, 0 = off), Lunge/Skid/Idle Clip (rig poses for each phase, -1 = leave current), Cooldown (spam-gate frames), Energy Cost. Pair with Is Dashing (hold poses / i-frames) and Quick Attack Hit (smack SFX/FX)."; break;
     case VsNodeType::IsDashing: desc = "Gate: passes while a Quick Attack is mid-move (dash OR skid, afn_qa_phase != 0). Use it to hold the lunge/skid pose, grant i-frames, block other inputs, or loop a dash SFX for the committed window."; break;
     case VsNodeType::QuickAttackHit: desc = "Gate: passes on the SINGLE frame a Quick Attack dash reaches Stop Range and lands its hit (one per dash). Wire the smack SFX, impact FX, or a HUD flash behind it."; break;
+    case VsNodeType::QuickAttackStarted: desc = "Gate: passes on the SINGLE frame a Quick Attack dash ACTUALLY begins (after the cooldown/energy/charge gate, unlike the raw key press). Drive On Update -> Quick Attack Started -> Play Sound for a swing-whoosh that never fires on a blocked press."; break;
+    case VsNodeType::ChargeUp: desc = "Hold-to-charge. While this runs each frame, it REVEALS the player's hidden attached effect models (the charge aura) and adds Energy/Frame to the Energy meter (clamped to max). The aura auto-hides the frame you stop running it. Drive it from On Key Held(Circle) so holding the button charges; release hides the aura and stops filling. Give the aura mesh 'Hidden (effect)' so it stays invisible until charging."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
     case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
     case VsNodeType::IsClashWon: desc = "Gate: passes when the clash balance is pushed fully to the enemy (>= 1.0). Use to resolve a win: hide the clash HUD, stop the struggle/mash SFX, play win_clash, and Set HP(enemy, 0)."; break;
@@ -7201,6 +7209,95 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     return LoadMeshTextureSlot(mesh, 0, path);
 }
 
+// Load an ATTACHED-MODEL texture with the sprite-style pipeline: quantize RGB to
+// mesh.psvColors (default 128) and capture per-pixel (soft) alpha so feathered
+// edges blend at runtime instead of a 1-bit cutout. Always slot 0, single texture.
+static bool LoadModelTextureSoft(MeshAsset& mesh, const std::string& path)
+{
+    int w, h, ch;
+    unsigned char* img = nullptr;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty())
+        img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
+    else { std::string resolved = ResolveAssetPath(path); img = stbi_load(resolved.c_str(), &w, &h, &ch, 4); }
+    if (!img) return false;
+
+    int tw = 1, th = 1;
+    while (tw < w && tw < 512) tw <<= 1;
+    while (th < h && th < 512) th <<= 1;
+    if (tw > 512) tw = 512; if (th > 512) th = 512;
+
+    std::vector<uint32_t> resized(tw * th);
+    std::vector<uint8_t>  alpha(tw * th);
+    for (int y = 0; y < th; y++)
+        for (int x = 0; x < tw; x++) {
+            int sx = x * w / tw, sy = y * h / th;
+            unsigned char* p = img + (sy * w + sx) * 4;
+            resized[y*tw+x] = p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24);
+            alpha[y*tw+x]   = p[3];
+        }
+    stbi_image_free(img);
+
+    int nColors = mesh.psvColors > 0 ? mesh.psvColors : 128;
+    if (nColors > 256) nColors = 256;
+
+    // Most-common-first colour reduction over the visible (alpha>=8) pixels.
+    struct CC { uint32_t rgb; int count; };
+    std::vector<CC> hist;
+    for (int i = 0; i < tw*th; i++) {
+        if (alpha[i] < 8) continue;
+        uint32_t rgb = resized[i] & 0x00FFFFFF;
+        bool found = false;
+        for (auto& hc : hist) if (hc.rgb == rgb) { hc.count++; found = true; break; }
+        if (!found) hist.push_back({ rgb, 1 });
+    }
+    std::sort(hist.begin(), hist.end(), [](const CC&a, const CC&b){ return a.count > b.count; });
+    int palCount = (int)hist.size(); if (palCount > nColors) palCount = nColors;
+    uint32_t pal[256] = {};
+    for (int i = 0; i < palCount; i++) pal[i] = hist[i].rgb | 0xFF000000;
+    if (palCount == 0) { pal[0] = 0xFFFFFFFF; palCount = 1; }
+
+    std::vector<uint8_t> indexed(tw*th);
+    for (int i = 0; i < tw*th; i++) {
+        uint32_t px = resized[i] & 0x00FFFFFF;
+        int best = 0, bestD = 0x7FFFFFFF;
+        for (int c = 0; c < palCount; c++) {
+            int dr=(int)(px&0xFF)-(int)(pal[c]&0xFF);
+            int dg=(int)((px>>8)&0xFF)-(int)((pal[c]>>8)&0xFF);
+            int db=(int)((px>>16)&0xFF)-(int)((pal[c]>>16)&0xFF);
+            int d=dr*dr+dg*dg+db*db; if (d<bestD){bestD=d;best=c;}
+        }
+        indexed[i] = (uint8_t)best;
+    }
+
+    mesh.texturePath   = path;
+    mesh.texW = tw; mesh.texH = th;
+    mesh.texturePixels = std::move(indexed);
+    mesh.texAlpha      = std::move(alpha);
+    memcpy(mesh.texturePalette, pal, sizeof(pal));
+    mesh.textured   = true;
+    mesh.texture256 = (nColors > 16);
+    mesh.useSoftAlpha = true;
+    if (mesh.psvColors <= 0) mesh.psvColors = nColors;
+
+    // GL preview: RGB from palette, A from the soft-alpha plane.
+    std::vector<uint32_t> rgba(tw*th);
+    for (int i = 0; i < tw*th; i++) {
+        uint32_t c = mesh.texturePalette[mesh.texturePixels[i]] & 0x00FFFFFF;
+        rgba[i] = c | ((uint32_t)mesh.texAlpha[i] << 24);
+    }
+    if (mesh.glTexID) glDeleteTextures(1, &mesh.glTexID);
+    glGenTextures(1, &mesh.glTexID);
+    glBindTexture(GL_TEXTURE_2D, mesh.glTexID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+}
+
 // Upload one quantized 16-colour texture as a GL texture (3D-tab preview),
 // reconstructing RGBA from the indexed pixels.
 static void UploadOneRigTex(unsigned int& glTexID, const std::vector<uint8_t>& pix,
@@ -7698,6 +7795,16 @@ static bool SaveProject(const std::string& path)
                     sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
             }
         }
+        // Attached models (3D mesh layers) — own block, independent of sub-sprites.
+        if (sp.subModelCount > 0) {
+            fprintf(f, "subModelCount=%d\n", sp.subModelCount);
+            for (int mi = 0; mi < sp.subModelCount; mi++) {
+                const auto& sm = sp.subModels[mi];
+                fprintf(f, "subModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n",
+                    sm.meshIdx, sm.offsetX, sm.offsetY, sm.offsetZ, sm.scale, sm.yaw,
+                    sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0);
+            }
+        }
         // Grind rail path (per mesh object). One header + one line per point.
         if (sp.isGrindRail || sp.railPointCount > 0) {
             fprintf(f, "railPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
@@ -7779,7 +7886,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0, ma.useSoftAlpha ? 1 : 0, ma.psvColors);
         // Manual per-slot texture overrides (extraMaterials). usemtl/.mtl auto-loads
         // on re-import, so only user-replaced slot textures need persisting.
         for (int s = 1; s < ma.matCount(); s++) {
@@ -8213,6 +8320,15 @@ static bool SaveProject(const std::string& path)
                         sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
                 }
             }
+            if (sp.subModelCount > 0) {
+                fprintf(f, "msSubModelCount=%d\n", sp.subModelCount);
+                for (int mi = 0; mi < sp.subModelCount; mi++) {
+                    const auto& sm = sp.subModels[mi];
+                    fprintf(f, "msSubModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n",
+                        sm.meshIdx, sm.offsetX, sm.offsetY, sm.offsetZ, sm.scale, sm.yaw,
+                        sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0);
+                }
+            }
             // Grind rail path (per mesh object) — 3D/Map scenes round-trip here.
             if (sp.isGrindRail || sp.railPointCount > 0) {
                 fprintf(f, "msRailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
@@ -8358,6 +8474,15 @@ static bool SaveProject(const std::string& path)
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
                         sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
+                }
+            }
+            if (sp.subModelCount > 0) {
+                fprintf(f, "m7SubModelCount=%d\n", sp.subModelCount);
+                for (int mi = 0; mi < sp.subModelCount; mi++) {
+                    const auto& sm = sp.subModels[mi];
+                    fprintf(f, "m7SubModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n",
+                        sm.meshIdx, sm.offsetX, sm.offsetY, sm.offsetZ, sm.scale, sm.yaw,
+                        sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0);
                 }
             }
             // Grind rail path (per mesh object) — M7 scenes round-trip here.
@@ -8886,6 +9011,7 @@ static bool LoadProject(const std::string& path)
                         }
                     }
                     sp.subSpriteCount = 0;
+                    sp.subModelCount = 0;
                     sp.cameraSlots.clear();   // following camSlot= lines refill it (no stale carryover on reload)
                     sp.selected = false;
                     // Reset rig link; a following spriteRig= line restores it.
@@ -8900,6 +9026,13 @@ static bool LoadProject(const std::string& path)
                 int cnt = 0;
                 sscanf(line + 15, "%d", &cnt);
                 sSprites[sSpriteCount - 1].subSpriteCount = std::min(cnt, (int)FloorSprite::kMaxSubSprites);
+            }
+            else if (strncmp(line, "subModelCount=", 14) == 0 && sSpriteCount > 0) {
+                int cnt = 0;
+                sscanf(line + 14, "%d", &cnt);
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                sp2.subModelCount = std::min(cnt, (int)FloorSprite::kMaxSubModels);
+                for (int i = 0; i < sp2.subModelCount; i++) sp2.subModels[i].meshIdx = -2;  // pending (filled by subModel= lines)
             }
             else if (strncmp(line, "spriteRig=", 10) == 0 && sSpriteCount > 0) {
                 int rIdx = -1, aIdx = 0, play = 1;
@@ -8939,6 +9072,25 @@ static bool LoadProject(const std::string& path)
                     sub.boneIdx = (m >= 12) ? fBone : -1;
                     sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
                     sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
+                }
+            }
+            else if (strncmp(line, "subModel=", 9) == 0 && sSpriteCount > 0) {
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                int loaded = 0;
+                for (int mi = 0; mi < sp2.subModelCount; mi++)
+                    if (sp2.subModels[mi].meshIdx != -2) loaded++;   // -2 = pending slot
+                if (loaded < sp2.subModelCount) {
+                    auto& sm = sp2.subModels[loaded];
+                    int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0; float yaw = 0.0f, scl = 1.0f;
+                    int m = sscanf(line + 9, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d",
+                        &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide);
+                    sm.scale      = (m >= 5) ? scl : 1.0f;
+                    sm.yaw        = (m >= 6) ? yaw : 0.0f;
+                    sm.grounded   = (m >= 7) ? (fGround != 0) : false;
+                    sm.hidden     = (m >= 8) ? (fHidden != 0) : false;
+                    sm.boneIdx    = (m >= 9) ? fBone : -1;
+                    sm.editorHide = (m >= 10) ? (fEdHide != 0) : false;
+                    if (sm.meshIdx == -2) sm.meshIdx = -1;
                 }
             }
             else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
@@ -9117,10 +9269,10 @@ static bool LoadProject(const std::string& path)
                   continue;
               } }
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0, msoftalpha = 0, mpsvcolors = 0;
             float mdrawdist = 0.0f;
             // Try newest format: ...|texInIwram|textureUseAlpha|texFiltered|removeDoubles
-            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256);
+            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -9129,7 +9281,7 @@ static bool LoadProject(const std::string& path)
                 int pipes = 0;
                 while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
                 if (*p == '|') p++; // skip the empty field's trailing pipe
-                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256);
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors);
                 matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
                 if (m2 > 0) matched++; // account for the texpath slot
             }
@@ -9197,6 +9349,10 @@ static bool LoadProject(const std::string& path)
                     ma.removeDoubles = (mremovedoubles != 0);
                 if (matched >= 25)
                     ma.texture256 = (mtex256 != 0);   // before LoadMeshTexture re-decodes
+                if (matched >= 26)
+                    ma.useSoftAlpha = (msoftalpha != 0);          // attached-model blended alpha
+                if (matched >= 27 && mpsvcolors > 0)
+                    ma.psvColors = mpsvcolors;
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -9204,7 +9360,10 @@ static bool LoadProject(const std::string& path)
                 // Reload texture if textured
                 if (strcmp(mtexpath, "(none)") == 0) mtexpath[0] = '\0';
                 if (ma.textured && mtexpath[0]) {
-                    LoadMeshTexture(std::string(mtexpath), ma);
+                    // Attached-model soft-alpha meshes re-quantize with the sprite-style
+                    // loader (128 colors + per-pixel alpha); others use the standard one.
+                    if (ma.useSoftAlpha) { if (ma.psvColors <= 0) ma.psvColors = 128; LoadModelTextureSoft(ma, std::string(mtexpath)); }
+                    else LoadMeshTexture(std::string(mtexpath), ma);
                     // LoadMeshTexture always uploads NEAREST; restore the saved
                     // filter state so the editor preview matches the toggle.
                     if (ma.texFiltered && ma.glTexID) {
@@ -10271,6 +10430,37 @@ static bool LoadProject(const std::string& path)
                     }
                 }
             }
+            else if (strncmp(line, "msSubModelCount=", 16) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    int cnt = 0; sscanf(line + 16, "%d", &cnt);
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    sp2.subModelCount = std::min(cnt, (int)FloorSprite::kMaxSubModels);
+                    for (int i = 0; i < sp2.subModelCount; i++) sp2.subModels[i].meshIdx = -2;
+                }
+            }
+            else if (strncmp(line, "msSubModel=", 11) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int loaded = 0;
+                    for (int mi = 0; mi < sp2.subModelCount; mi++)
+                        if (sp2.subModels[mi].meshIdx != -2) loaded++;
+                    if (loaded < sp2.subModelCount) {
+                        auto& sm = sp2.subModels[loaded];
+                        int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0; float yaw = 0.0f, scl = 1.0f;
+                        int m = sscanf(line + 11, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d",
+                            &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide);
+                        sm.scale = (m >= 5) ? scl : 1.0f;
+                        sm.yaw = (m >= 6) ? yaw : 0.0f;
+                        sm.grounded = (m >= 7) ? (fGround != 0) : false;
+                        sm.hidden = (m >= 8) ? (fHidden != 0) : false;
+                        sm.boneIdx = (m >= 9) ? fBone : -1;
+                        sm.editorHide = (m >= 10) ? (fEdHide != 0) : false;
+                        if (sm.meshIdx == -2) sm.meshIdx = -1;
+                    }
+                }
+            }
             else if (strncmp(line, "msRailPath=", 11) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
@@ -10744,6 +10934,37 @@ static bool LoadProject(const std::string& path)
                         sub.boneIdx = (m >= 12) ? fBone : -1;
                         sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
                         sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
+                    }
+                }
+            }
+            else if (strncmp(line, "m7SubModelCount=", 16) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    int cnt = 0; sscanf(line + 16, "%d", &cnt);
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    sp2.subModelCount = std::min(cnt, (int)FloorSprite::kMaxSubModels);
+                    for (int i = 0; i < sp2.subModelCount; i++) sp2.subModels[i].meshIdx = -2;
+                }
+            }
+            else if (strncmp(line, "m7SubModel=", 11) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int loaded = 0;
+                    for (int mi = 0; mi < sp2.subModelCount; mi++)
+                        if (sp2.subModels[mi].meshIdx != -2) loaded++;
+                    if (loaded < sp2.subModelCount) {
+                        auto& sm = sp2.subModels[loaded];
+                        int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0; float yaw = 0.0f, scl = 1.0f;
+                        int m = sscanf(line + 11, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d",
+                            &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide);
+                        sm.scale = (m >= 5) ? scl : 1.0f;
+                        sm.yaw = (m >= 6) ? yaw : 0.0f;
+                        sm.grounded = (m >= 7) ? (fGround != 0) : false;
+                        sm.hidden = (m >= 8) ? (fHidden != 0) : false;
+                        sm.boneIdx = (m >= 9) ? fBone : -1;
+                        sm.editorHide = (m >= 10) ? (fEdHide != 0) : false;
+                        if (sm.meshIdx == -2) sm.meshIdx = -1;
                     }
                 }
             }
@@ -16233,6 +16454,93 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 sp.subSpriteCount++;
         }
 
+        // --- Attached Models (3D mesh layers riding the object, e.g. a charge aura) ---
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Attached Models");
+        for (int mi = 0; mi < sp.subModelCount; mi++) {
+            auto& sm = sp.subModels[mi];
+            ImGui::PushID(mi + 9000);
+            const char* mPrev = (sm.meshIdx >= 0 && sm.meshIdx < (int)sMeshAssets.size())
+                ? sMeshAssets[sm.meshIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Mesh##sm", mPrev)) {
+                if (ImGui::Selectable("(none)##smnone", sm.meshIdx < 0)) sm.meshIdx = -1;
+                for (int ai = 0; ai < (int)sMeshAssets.size(); ai++)
+                    if (ImGui::Selectable(sMeshAssets[ai].name.c_str(), sm.meshIdx == ai)) sm.meshIdx = ai;
+                ImGui::EndCombo();
+            }
+#ifdef _WIN32
+            if (ImGui::Button("Import Model (OBJ)...##sm")) {
+                std::string objPath = OpenFileDialog("OBJ Files\0*.obj\0All Files\0*.*\0", "obj");
+                if (!objPath.empty()) {
+                    MeshAsset ma;
+                    if (LoadOBJ(objPath, ma)) {
+                        ma.psvColors = 128; ma.useSoftAlpha = true; ma.lit = false;  // glow aura: unlit, soft alpha
+                        if (ma.textured && !ma.texturePath.empty())  // re-process map_Kd as soft alpha
+                            LoadModelTextureSoft(ma, ma.texturePath);
+                        sm.meshIdx = (int)sMeshAssets.size();
+                        sMeshAssets.push_back(std::move(ma));
+                        sProjectDirty = true;
+                    }
+                }
+            }
+            if (sm.meshIdx >= 0 && sm.meshIdx < (int)sMeshAssets.size()) {
+                MeshAsset& mm = sMeshAssets[sm.meshIdx];
+                ImGui::SameLine();
+                if (ImGui::Button("Texture (PNG)...##sm")) {
+                    std::string tex = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                    if (!tex.empty()) { if (mm.psvColors <= 0) mm.psvColors = 128; LoadModelTextureSoft(mm, tex); sProjectDirty = true; }
+                }
+                int colVals[] = { 16, 32, 64, 128 }; const char* colNames[] = { "16", "32", "64", "128" };
+                int curCol = 3; for (int k = 0; k < 4; k++) if (colVals[k] == mm.psvColors) curCol = k;
+                if (ImGui::Combo("Colors##sm", &curCol, colNames, 4)) {
+                    mm.psvColors = colVals[curCol];
+                    if (!mm.texturePath.empty()) LoadModelTextureSoft(mm, mm.texturePath);
+                    sProjectDirty = true;
+                }
+                if (ImGui::Checkbox("Use Alpha (blended)##sm", &mm.useSoftAlpha)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend the texture's per-pixel alpha (soft/feathered edges) instead of a 1-bit cutout.");
+            }
+#endif
+            ImGui::DragFloat("X##sm", &sm.offsetX, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Y##sm", &sm.offsetY, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Z##sm", &sm.offsetZ, 0.5f, -200.0f, 200.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Local placement offset. When a Bone is set below, X/Y/Z move the model RELATIVE to that bone (it rides the joint + this offset).");
+            ImGui::DragFloat("Scale##sm", &sm.scale, 0.25f, 0.05f, 400.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World-size of the model (not tied to the object's authored scale). A rigged player needs a fairly large value to match its visible size.");
+            ImGui::DragFloat("Yaw##sm", &sm.yaw, 1.0f, -180.0f, 180.0f, "%.0f");
+            ImGui::Checkbox("Grounded##sm", &sm.grounded);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
+            ImGui::Checkbox("Hidden (effect)##sm", &sm.hidden);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible IN-GAME; a Cast Effect node reveals it (for a charge aura, etc.)");
+            ImGui::Checkbox("Hide in editor##sm", &sm.editorHide);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hide this model in the EDITOR preview only (declutter while authoring). Still shows in-game.");
+            // Bone attach (player rig): ride a rig joint; X/Y/Z become bone-relative.
+            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
+                && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
+                const auto& bn = sRiggedMeshAssets[sp.riggedMeshIdx].boneNames;
+                const char* bonePrev = (sm.boneIdx >= 0 && sm.boneIdx < (int)bn.size())
+                    ? bn[sm.boneIdx].c_str() : "(none - anchor to origin)";
+                if (ImGui::BeginCombo("Bone##sm", bonePrev)) {
+                    if (ImGui::Selectable("(none - anchor to origin)##smbnone", sm.boneIdx < 0)) sm.boneIdx = -1;
+                    for (int bi = 0; bi < (int)bn.size(); bi++) {
+                        std::string lbl = bn[bi] + "##smb";
+                        if (ImGui::Selectable(lbl.c_str(), sm.boneIdx == bi)) sm.boneIdx = bi;
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the model rides that joint. X/Y/Z become offsets from the bone. Player rig only for now.");
+            }
+            if (ImGui::SmallButton("Remove##sm")) {
+                for (int j = mi; j < sp.subModelCount - 1; j++) sp.subModels[j] = sp.subModels[j + 1];
+                sp.subModelCount--; mi--;
+            }
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (sp.subModelCount < FloorSprite::kMaxSubModels) {
+            if (ImGui::Button("+ Add Model##addsm")) sp.subModelCount++;
+        }
+
         ImGui::PopItemWidth();
 
         // Color presets
@@ -18209,6 +18517,13 @@ void FrameTick(float dt)
                 // afn_bp_cur_spr_idx (Lock On / Is In View / HUD anchor "self") would
                 // point one sprite off as soon as any sprite has a sub-sprite.
                 std::vector<int> sSpriteToExportIdx(sSpriteCount, -1);
+                // Attached MODELS are collected here and appended AFTER the whole sprite
+                // loop, so they do NOT shift the export positions of top-level sprites.
+                // The editor "sprite index" (afn_npc_inst col 7, AFN_ENEMY_EIDX,
+                // AFN_PLAYER_SPRITE_IDX) is the export-array position — interleaving an
+                // attached model in the middle bumped the enemy's index, so the AI lost
+                // it and the rig just wandered. Deferring keeps those indices stable.
+                std::vector<AfnSpriteExport> deferredAttachedModels;
                 {
                     for (int i = 0; i < sSpriteCount; i++)
                     {
@@ -18305,8 +18620,36 @@ void FrameTick(float dt)
                                 subSe.palIdx = 1;
                             exportSprites.push_back(subSe);
                         }
+                        // Attached MODELS: a parented (optionally bone-driven) mesh
+                        // instance. Reuses the sub-sprite parent/bone/offset plumbing
+                        // but carries meshIdx, so the runtime draws the mesh (not a
+                        // billboard). Meshes export 1:1 with sMeshAssets, so meshIdx
+                        // needs no remap.
+                        for (int smi = 0; smi < sSprites[i].subModelCount; smi++) {
+                            const auto& sm = sSprites[i].subModels[smi];
+                            if (sm.meshIdx < 0 || sm.meshIdx >= (int)sMeshAssets.size()) continue;
+                            AfnSpriteExport mse;
+                            mse.x = sSprites[i].x + sm.offsetX;
+                            mse.y = sSprites[i].y + sm.offsetY;
+                            mse.z = sSprites[i].z + sm.offsetZ;
+                            mse.scale = sm.scale;   // world units (decoupled from the object's tiny rig-space scale)
+                            mse.rotation = sSprites[i].rotation + sm.yaw;
+                            mse.assetIdx = -1;
+                            mse.spriteType = (int)SpriteType::Mesh;
+                            mse.meshIdx = sm.meshIdx;
+                            mse.grounded = sm.grounded;
+                            mse.startHidden = sm.hidden;
+                            mse.parentIdx = parentExportIdx;
+                            mse.offsetX = sm.offsetX;
+                            mse.offsetY = sm.offsetY;
+                            mse.offsetZ = sm.offsetZ;
+                            mse.boneIdx = sm.boneIdx;
+                            deferredAttachedModels.push_back(mse);   // appended after the loop (see decl)
+                        }
                     }
                 }
+                // Append attached models LAST so they don't shift top-level sprite indices.
+                for (auto& dm : deferredAttachedModels) exportSprites.push_back(dm);
                 AfnCameraExport exportCam;
                 exportCam.x = sCamObj.x;
                 exportCam.z = sCamObj.z;
@@ -18510,6 +18853,11 @@ void FrameTick(float dt)
                     me.visible = ma.visible ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.textureHasAlpha = ma.textureUseAlpha ? 1 : 0;
+                    // Attached-model soft (blended) alpha: carry the per-pixel alpha plane.
+                    if (ma.useSoftAlpha && (int)ma.texAlpha.size() == ma.texW * ma.texH && ma.texW > 0) {
+                        me.softAlpha = 1;
+                        me.texAlpha  = ma.texAlpha;
+                    }
                     me.texFiltered = ma.texFiltered ? 1 : 0;
                     me.perspCorrect = ma.perspCorrect ? 1 : 0;
                     me.clampAbove = ma.clampAbove ? 1 : 0;
@@ -23081,7 +23429,7 @@ void FrameTick(float dt)
                 case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
                 case VsNodeType::PlaySound:     desc = "Plays a sound instance. Persist Link >0 keeps it alive across scene changes, sharing music only between scenes that play it with the same link; a different link swaps the held track."; break;
                 case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
-                case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump."; break;
+                case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump. Energy Cost (int, optional): when > 0 the jump only fires if afn_energy >= cost and spends it on launch (0/unwired = free)."; break;
                 case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
                 case VsNodeType::Sprint:        desc = "Sets the player's movement speed (sprint)."; break;
                 case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed whenever this runs. Gate it with On Key Held(key) to bind orbiting to a button (any key, remappable)."; break;
@@ -23229,7 +23577,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetAI:         desc = "Sets the AI behavior mode for a sprite (0=None, 1=Patrol, 2=Chase, 3=Flee)."; break;
                 case VsNodeType::GetAI:         desc = "Outputs the current AI behavior mode of a sprite."; break;
                 case VsNodeType::OnDeath:       desc = "Event: fires when the specified sprite's HP reaches 0."; break;
-                case VsNodeType::OnHit:         desc = "Event: fires when the specified sprite takes damage."; break;
+                case VsNodeType::OnHit:         desc = "Event: fires the frame an object takes damage. Object pin wired = that sprite; unwired = the player or anyone."; break;
                 case VsNodeType::EmitParticle:  desc = "Spawns a particle effect at the given world position."; break;
                 case VsNodeType::SetTint:       desc = "Sets a color tint on a sprite (RGB15)."; break;
                 case VsNodeType::Shake:         desc = "Shakes a specific sprite for N frames."; break;
@@ -24051,9 +24399,18 @@ void FrameTick(float dt)
                     int fallFixed = (int)(fallForce * 256.0f);
                     int smooth = infoNode.paramInt[0];   // Fall Smooth (frames), node slider
                     int riseFloat = infoNode.paramInt[1]; // Rise Float %, node slider
-                    char bodyBuf[896];
+                    auto* ecd = resolveDataIn(infoNode.id, 2);   // Energy Cost pin (0/unwired = free)
+                    int eCost = ecd ? ecd->paramInt[0] : 0;
+                    char jumpLine[176];
+                    if (eCost > 0)
+                        snprintf(jumpLine, sizeof(jumpLine),
+                            "    if (player_on_ground && afn_energy >= %d) { player_vy = %d; afn_energy -= %d; } // jump costs %d energy",
+                            eCost, forceFixed, eCost, eCost);
+                    else
+                        snprintf(jumpLine, sizeof(jumpLine), "    if (player_on_ground) player_vy = %d;", forceFixed);
+                    char bodyBuf[1024];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    if (player_on_ground) player_vy = %d;\n"
+                        "%s\n"
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
                         "    afn_fall_force  = %d; // extra downward accel past the apex (8.8)\n"
                         "    afn_rise_float  = %d; // %% gravity removed WHILE RISING (anime hang)\n"
@@ -24068,7 +24425,7 @@ void FrameTick(float dt)
                         "    //   if (afn_fall_smooth) extra *= ease(descentFrames/afn_fall_smooth);\n"
                         "    //   player_vy -= extra; }\n"
                         "    // clamp to -afn_terminal_vel; player_y += player_vy; land -> vy=0",
-                        forceFixed, fallFixed, riseFloat, smooth);
+                        jumpLine, fallFixed, riseFloat, smooth);
                     setActionFunc(infoNode, "_jump", bodyBuf);
                     break;
                 }
@@ -24808,6 +25165,17 @@ void FrameTick(float dt)
                         "    // damage (one per dash). Pair with Play Sound / a HUD flash for the smack.");
                     break;
                 }
+                case VsNodeType::QuickAttackStarted: {
+                    editorCode = "// Gate: passes on the single frame a Quick Attack dash begins";
+                    setActionFunc(infoNode, "_quick_attack_started",
+                        "    if (afn_qa_started) { /* downstream: whoosh SFX, dash FX */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_qa_started = 1 ONLY on the frame the dash ACTUALLY begins (passed the\n"
+                        "    // cooldown/energy/charge gate) — unlike the raw key press. Drive On Update ->\n"
+                        "    // Quick Attack Started -> Play Sound for a swing-whoosh that never plays on a\n"
+                        "    // blocked press.");
+                    break;
+                }
                 case VsNodeType::IsBlastIncoming: {
                     editorCode = "// Gate: a player Focus Blast is within the enemy's Dodge Range (+ chance)";
                     setActionFunc(infoNode, "_is_blast_incoming",
@@ -25408,6 +25776,29 @@ void FrameTick(float dt)
                         "    afn_energy += <amount>;\n"
                         "    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n"
                         "    // --- Runtime --- e.g. On Update -> Add Energy(1) regenerates over time.");
+                    break;
+                }
+                case VsNodeType::ChargeUp: {
+                    editorCode = "// Hold-to-charge: lock the player still, play the charge pose, reveal aura + fill energy";
+                    setActionFunc(infoNode, "_charge_up",
+                        "    if (player_on_ground) {                     // grounded only - no charging mid-air\n"
+                        "      afn_charging_up = 1;                      // 'charging this frame'\n"
+                        "      afn_energy += <energy/frame>;\n"
+                        "      if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n"
+                        "      afn_charge_clip = <Charge Clip>;          // only if the Charge Clip pin is wired\n"
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_charging_up is reset to 0 each frame BEFORE script_tick, so it\n"
+                        "    // is 1 only on frames On Key Held(D-pad Down) -> Charge Up actually runs.\n"
+                        "    // Right after script_tick, while afn_charging_up the player is LOCKED:\n"
+                        "    //   afn_input_fwd = afn_input_right = 0;        // stand still\n"
+                        "    //   afn_qa_trigger = afn_dodge_trigger = 0;     // no Quick Attack / Dodge\n"
+                        "    //   player_vy = 0;                              // no Jump\n"
+                        "    //   afn_fb_charge_req = afn_fb_fire_req = 0;     // no Focus Blast\n"
+                        "    //   afn_rig_clip = afn_charge_clip;             // play the charge anim (default clip 23)\n"
+                        "    // Then every HIDDEN attached-model mesh instance (the charge aura) is\n"
+                        "    // shown while charging, hidden otherwise:\n"
+                        "    //   for each aura si: afn_sprite_visible[afn_mesh_inst_sprite[si]] = afn_charging_up;");
                     break;
                 }
                 case VsNodeType::SpendEnergy: {
@@ -27083,11 +27474,17 @@ void FrameTick(float dt)
                         "    // Event node: registered with afn_on_death_func; DamageHP invokes when HP transitions to 0");
                     break;
                 case VsNodeType::OnHit:
-                    editorCode = "// Event: fires when damage taken";
+                    editorCode = "// Event: fires the frame an object (or anyone) takes damage";
                     setActionFunc(infoNode, "_on_hit",
-                        "    // triggered by DamageHP\n"
+                        "    // Object pin wired -> if (afn_obj_hit[object]) { ...chain... }\n"
+                        "    // Object pin UNWIRED -> if (afn_any_hit) { ...chain... }  // player OR any object\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Event node: registered with afn_on_hit_func; DamageHP invokes after subtraction");
+                        "    // Before script_tick each frame, a central HP-drop detector compares\n"
+                        "    // every object's hp (and the player's afn_health) to last frame:\n"
+                        "    //   afn_obj_hit[i] = (afn_hp[i] < prev_hp[i]);   // per object\n"
+                        "    //   afn_any_hit    = player lost health || any afn_obj_hit[i];\n"
+                        "    // So it catches EVERY damage source (melee, beams, clash, focus blast),\n"
+                        "    // node-driven or hardcoded. Dispatched via afn_(bp_dispatch_)on_hit().");
                     break;
                 case VsNodeType::EmitParticle: {
                     editorCode = "// Spawn particle at position";
@@ -36289,6 +36686,50 @@ void Render3DViewport()
                     glLineWidth(1.0f);
                 }
                 glPopMatrix();
+                // Attached-model preview: draw each SubModel on its bone (or the object
+                // origin), in WORLD space, ON TOP of the rig so it's always visible while
+                // authoring. Scale is world units (independent of the object's scale).
+                for (int smi = 0; smi < fs.subModelCount; smi++) {
+                    const auto& sm = fs.subModels[smi];
+                    if (sm.editorHide || sm.meshIdx < 0 || sm.meshIdx >= (int)sMeshAssets.size()) continue;
+                    const MeshAsset& am = sMeshAssets[sm.meshIdx];
+                    if (am.vertices.empty()) continue;
+                    float bxw = sx, byw = sy, bzw = sz;
+                    if (sm.boneIdx >= 0 && sm.boneIdx < nb) {
+                        // bone rig-local origin -> world via the object transform (yaw only).
+                        float lx = pose[sm.boneIdx].px * fs.scale;
+                        float ly = pose[sm.boneIdx].py * fs.scale;
+                        float lz = pose[sm.boneIdx].pz * fs.scale;
+                        float yr = (rigYawDeg + rm.yawOffset) * 3.14159265f / 180.0f;
+                        float c = cosf(yr), s = sinf(yr);
+                        bxw = sx + (lx * c + lz * s);
+                        byw = sy + ly;
+                        bzw = sz + (-lx * s + lz * c);
+                    }
+                    glPushMatrix();
+                    glTranslatef(bxw + sm.offsetX, byw + sm.offsetY, bzw + sm.offsetZ);
+                    glRotatef(rigYawDeg + sm.yaw, 0, 1, 0);
+                    glScalef(sm.scale, sm.scale, sm.scale);
+                    glDisable(GL_CULL_FACE); glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
+                    glDisable(GL_DEPTH_TEST);   // always-visible editor preview
+                    bool soft = am.useSoftAlpha;
+                    if (soft) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+                    bool aTex = am.textured && am.glTexID != 0;
+                    if (aTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, am.glTexID); glColor4f(1, 1, 1, 1); }
+                    else { glDisable(GL_TEXTURE_2D); glColor4f(0.8f, 0.9f, 1.0f, 0.85f); }
+                    glBegin(GL_TRIANGLES);
+                    for (size_t t = 0; t + 3 <= am.indices.size(); t += 3)
+                        for (int k = 0; k < 3; k++) { const MeshVertex& v = am.vertices[am.indices[t + k]]; if (aTex) glTexCoord2f(v.u, 1.0f - v.v); glVertex3f(v.px, v.py, v.pz); }
+                    for (size_t q = 0; q + 4 <= am.quadIndices.size(); q += 4) {
+                        const MeshVertex* qv[6] = { &am.vertices[am.quadIndices[q]], &am.vertices[am.quadIndices[q+1]], &am.vertices[am.quadIndices[q+2]], &am.vertices[am.quadIndices[q]], &am.vertices[am.quadIndices[q+2]], &am.vertices[am.quadIndices[q+3]] };
+                        for (int k = 0; k < 6; k++) { const MeshVertex& v = *qv[k]; if (aTex) glTexCoord2f(v.u, 1.0f - v.v); glVertex3f(v.px, v.py, v.pz); }
+                    }
+                    glEnd();
+                    glEnable(GL_DEPTH_TEST);
+                    if (soft) glDisable(GL_BLEND);
+                    glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0);
+                    glPopMatrix();
+                }
                 continue;
             }
         }

@@ -18,6 +18,12 @@ void afn_audio_init(void) {}
 void afn_audio_tick(void) {}
 void afn_play_sound(int id, int link) { (void)id; (void)link; }
 void afn_play_sfx(int s, int g, int f) { (void)s; (void)g; (void)f; }
+int  afn_play_sfx_inst_gain(int i, int g) { (void)i; (void)g; return -1; }
+void afn_stop_sfx_inst(int i) { (void)i; }
+int  afn_sfx_active_inst(int i) { (void)i; return 0; }
+void afn_set_sfx_pitch_inst(int i, int p) { (void)i; (void)p; }
+int  afn_inst_voice_active(int v, int i) { (void)v; (void)i; return 0; }
+void afn_stop_inst_voice(int v, int i) { (void)v; (void)i; }
 void afn_stop_sound(void) {}
 void afn_stop_all(void) {}
 void afn_stop_sfx_sample(int s) { (void)s; }
@@ -111,8 +117,8 @@ static int alloc_voice(void) {
     return best;
 }
 
-static void trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch) {
-    if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
+static int trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch) {
+    if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return -1;
     int baseHz = afn_pcm_rates[smpIdx];
     int hz = note_to_hz(baseHz, note, 60);
 #ifdef AFN_HAS_FINE_FACTOR
@@ -130,7 +136,7 @@ static void trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch) 
     if (vol < 0) vol = 0;
     int loop = afn_pcm_loop[smpIdx];
     int v = alloc_voice();
-    if (v < 0) return;
+    if (v < 0) return -1;
     SndVoice* vc = &snd_voices[v];
     vc->data      = afn_pcm_ptrs[smpIdx];
     vc->is16      = afn_pcm_is16[smpIdx];
@@ -152,28 +158,93 @@ static void trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch) 
     vc->releaseLeft   = 0;
     vc->isSfxLoop     = (durTicks <= 0 && loop) ? 1 : 0;
     vc->playing       = 1;
+    return v;
 }
 
-static void play_sfx_locked(int smpIdx, int gain, int fifo) {
+static int play_sfx_locked(int smpIdx, int gain, int fifo) {
     (void)fifo;
     if (gain <= 0) gain = 127;
     unsigned int active = active_mask();
     if (active == ((1u << snd_voice_count) - 1)) {
         int best = -1, bestAge = -1;
+        // Steal a releasing NON-LOOP voice first, then the oldest non-loop voice —
+        // never cut a looping SFX (e.g. the enemy charge wind-up) to fit a one-shot.
         for (int i = 0; i < snd_voice_count; i++)
-            if (snd_voices[i].releaseLeft > 0 && snd_voices[i].ageFrames > bestAge) { best = i; bestAge = snd_voices[i].ageFrames; }
+            if (!snd_voices[i].isSfxLoop && snd_voices[i].releaseLeft > 0 && snd_voices[i].ageFrames > bestAge) { best = i; bestAge = snd_voices[i].ageFrames; }
         if (best < 0)
             for (int i = 0; i < snd_voice_count; i++)
-                if (snd_voices[i].ageFrames > bestAge) { best = i; bestAge = snd_voices[i].ageFrames; }
+                if (!snd_voices[i].isSfxLoop && snd_voices[i].ageFrames > bestAge) { best = i; bestAge = snd_voices[i].ageFrames; }
+        // NEVER steal a looping SFX (e.g. the enemy charge): if every voice is a
+        // loop, drop THIS one-shot rather than cut the loop. (best stays -1.)
         if (best >= 0) snd_voices[best].playing = 0;
     }
-    trigger_sample(smpIdx, 60, gain, 0, 15);
+    return trigger_sample(smpIdx, 60, gain, 0, 15);
 }
 
 void afn_play_sfx(int smpIdx, int gain, int fifo) {
     lock();
     play_sfx_locked(smpIdx, gain, fifo);
     unlock();
+}
+
+// Play SFX sound INSTANCE `inst` at a custom gain (1..127, 0 = full). Resolves the
+// instance's sample/fifo from the table — used for proximity-attenuated enemy SFX.
+// Returns the voice index it started on (-1 if dropped) so callers can later stop
+// THAT voice specifically (needed when two entities share one looping instance).
+int afn_play_sfx_inst_gain(int inst, int gain) {
+    if (inst < 0 || inst >= AFN_SOUND_INSTANCE_COUNT) return -1;
+    if (!afn_snd_is_sfx[inst]) return -1;
+    lock();
+    int v = play_sfx_locked(afn_snd_sfx_sample[inst], gain, afn_snd_sfx_fifo[inst]);
+    unlock();
+    return v;
+}
+
+// Voice-specific helpers: distinguish two voices of the SAME sample (e.g. the enemy
+// charge vs the player's chargefocus — both instance 4). Operate only on voice `v`
+// and only while it's still that instance's sample (guards against voice reuse).
+int afn_inst_voice_active(int v, int inst) {
+    if (v < 0 || v >= SND_MAX_VOICES || inst < 0 || inst >= AFN_SOUND_INSTANCE_COUNT) return 0;
+    int r;
+    lock();
+    r = (snd_voices[v].playing && snd_voices[v].smpIdx == afn_snd_sfx_sample[inst]) ? 1 : 0;
+    unlock();
+    return r;
+}
+void afn_stop_inst_voice(int v, int inst) {
+    if (v < 0 || v >= SND_MAX_VOICES || inst < 0 || inst >= AFN_SOUND_INSTANCE_COUNT) return;
+    lock();
+    if (snd_voices[v].playing && snd_voices[v].smpIdx == afn_snd_sfx_sample[inst])
+        snd_voices[v].playing = 0;
+    unlock();
+}
+
+// Stop all voices of SFX instance `inst`'s sample — for looping SFX (e.g. the enemy
+// charge wind-up) that must be cut when the action ends.
+void afn_stop_sfx_sample(int smpIdx);   // fwd (defined below)
+void afn_stop_sfx_inst(int inst) {
+    if (inst < 0 || inst >= AFN_SOUND_INSTANCE_COUNT) return;
+    if (!afn_snd_is_sfx[inst]) return;
+    afn_stop_sfx_sample(afn_snd_sfx_sample[inst]);
+}
+
+// Is any voice currently playing SFX instance `inst`'s sample? Used to keep a
+// looping SFX (enemy charge) re-asserted each frame if it ever gets cut.
+int afn_sfx_active(int smpIdx);   // fwd (defined below)
+int afn_sfx_active_inst(int inst) {
+    if (inst < 0 || inst >= AFN_SOUND_INSTANCE_COUNT) return 0;
+    if (!afn_snd_is_sfx[inst]) return 0;
+    return afn_sfx_active(afn_snd_sfx_sample[inst]);
+}
+
+// Pitch an SFX INSTANCE's sample (resolve instance -> sample). The AFN_SND_* defines
+// are instance ids, NOT sample ids — passing them straight to the sample-indexed
+// calls plays the wrong sound once the exporter compacts samples (inst != sample).
+void afn_set_sfx_pitch(int smpIdx, int pitch);   // fwd (defined below)
+void afn_set_sfx_pitch_inst(int inst, int pitch) {
+    if (inst < 0 || inst >= AFN_SOUND_INSTANCE_COUNT) return;
+    if (!afn_snd_is_sfx[inst]) return;
+    afn_set_sfx_pitch(afn_snd_sfx_sample[inst], pitch);
 }
 
 // Start a sequencer (MIDI) instance. Caller holds the lock.
@@ -183,10 +254,11 @@ static void start_seq_locked(int instanceId) {
     snd_seq_tick   = 0;
     snd_seq_next   = 0;
     for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
-    int editorVoices = afn_snd_voices[instanceId];
+    // Always use the FULL voice pool. The mixer already processes all SND_MAX_VOICES
+    // every buffer, so capping to the BGM's editor voice count saved no CPU and only
+    // starved combat SFX — the charge/struggle loops and overlapping player/enemy
+    // attack sounds were stealing each other's voices. (afn_snd_voices is editor-only.)
     snd_voice_count = SND_MAX_VOICES;
-    if (editorVoices > 0 && editorVoices < SND_MAX_VOICES / 2)
-        snd_voice_count = editorVoices;
 }
 
 // Stop the currently-held linked-persistent track (SFX voice or sequencer) and
@@ -334,7 +406,9 @@ void afn_audio_tick(void) {
         SndVoice* vc = &snd_voices[i];
         if (!vc->playing) continue;
         vc->ageFrames++;
-        if (vc->releaseLeft == 0 && vc->smpIdx >= 0 && vc->smpIdx < AFN_SOUND_SAMPLE_COUNT) {
+        if (vc->releaseLeft == 0 && !vc->isSfxLoop && vc->smpIdx >= 0 && vc->smpIdx < AFN_SOUND_SAMPLE_COUNT) {
+            // Looping SFX (enemy charge) hold full volume — never apply the decay
+            // envelope that fades one-shots out over time.
             int decayPct = afn_pcm_decay_pct[vc->smpIdx];
             int decayMin = afn_pcm_decay_min_ms[vc->smpIdx];
             int decayMinF = (decayMin * 60 + 999) / 1000;
@@ -401,7 +475,9 @@ void afn_audio_tick(void) {
             for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
             for (int i = 0; i < SND_MAX_VOICES; i++) {
                 SndVoice* vc = &snd_voices[i];
-                if (!vc->playing || vc->releaseLeft > 0) continue;
+                // Looping SFX (enemy charge, struggle) are NOT part of the BGM
+                // sequence — don't release them when the music loops.
+                if (!vc->playing || vc->releaseLeft > 0 || vc->isSfxLoop) continue;
                 int relFrames = 0;
                 if (vc->smpIdx >= 0 && vc->smpIdx < AFN_SOUND_SAMPLE_COUNT)
                     relFrames = (afn_pcm_release_ms[vc->smpIdx] * 60 + 999) / 1000;

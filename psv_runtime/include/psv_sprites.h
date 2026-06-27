@@ -2,11 +2,12 @@
 #pragma once
 
 #define AFN_HAS_WORLD_ANCHORS 1
-#define AFN_ANCHOR_COUNT 2
+#define AFN_ANCHOR_COUNT 3
 // {parent sprite idx, offX, offY, offZ (world px)}
-static const float afn_anchors[2][4] = {
+static const float afn_anchors[3][4] = {
   { 0, 0.0f, -0.125f, 0.75f },
   { 3, 0.0f, 2.5f, 0.0f },
+  { 0, 0.0f, -2.625f, 0.0f },
 };
 static const unsigned int __attribute__((aligned(16))) afn_spr_f0[16384] = {
   0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,

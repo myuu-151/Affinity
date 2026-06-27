@@ -123,7 +123,7 @@ extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8
 #define ENEMY_QA_MAX          26        // dash frame budget (whiff timeout)
 #define ENEMY_QA_SKID         12        // skid recovery frames
 #define ENEMY_QA_SPEED        34.0f     // dash speed feed (matches the player's QA)
-#define ENEMY_QA_STOP         26.0f     // contact range — deal damage to the player
+#define ENEMY_QA_STOP         14.0f     // contact range — deal damage to the player (tightened from 26: was connecting from too far)
 #define ENEMY_QA_DMG          8         // melee damage
 #define ENEMY_QA_CD           90        // cooldown after a dash
 #define ENEMY_JUMP_VEL        1.5f      // jump-evade launch velocity = player's jump (player_vy 384 / 256),
@@ -136,9 +136,10 @@ extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8
 enum { AI_ROAM = 0, AI_CHASE, AI_STRAFE, AI_CHARGE, AI_FIRE, AI_DODGE, AI_DEAD, AI_BLOCK };
 static int   s_aiTimer = 0, s_aiLoseT = 0, s_aiInited = 0;
 static int   s_aiStrafeDir = 1, s_aiStrafeLeg = 0, s_aiAtkCD = 0, s_aiDodgeCD = 0, s_aiChargeShot = 0;
+static int   s_eChargeVoice = -1;   // the enemy charge SFX's own voice (instance 4 is shared with the player's chargefocus)
 static int   s_efbActive = 0, s_efbCharging = 0, s_efbDmg = 0, s_efbLife = 0;   // enemy projectile
 static float s_efbX, s_efbY, s_efbZ, s_efbDirX = 0, s_efbDirZ = 1, s_efbScale = 0.05f, s_efbSpeed = 0, s_efbHoming = 0;
-static int   s_eDodgeFrames = 0, s_eDodgeTotal = 0, s_eDodgeClip = 24;          // enemy dodge roll
+static int   s_eDodgeFrames = 0, s_eDodgeTotal = 0, s_eDodgeClip = 28;          // enemy dodge roll (28 = DodgeL)
 static float s_eDodgeDX = 0, s_eDodgeDZ = 0;
 // HARDCODED melee-reflex state (enemy Quick Attack + jump-evade).
 static int   s_eqaPhase = 0, s_eqaFrames = 0, s_eqaCD = 0, s_eqaDealt = 0;       // enemy QA dash/skid
@@ -192,6 +193,27 @@ static int s_eBlockFrames = 0;   // enemy block-stance countdown
 #define AFN_SND_CLASH      12    // 'clash' instance — one-shot when the beams meet
 #define AFN_SND_WIN_CLASH  13    // 'win_clash' instance — played when the clash resolves (win or lose)
 #define AFN_SND_MASH       14    // 'mashsound' instance — looping during the struggle, pitched by the balance
+// Enemy combat SFX — the SAME instances the player uses, played proximity-gained so
+// you can hear the enemy's attacks from across the arena (afn_play_sfx_inst_gain).
+#define AFN_SND_QSWEEP     17    // 'quicksweep' — Quick Attack dash whoosh
+#define AFN_SND_SMALLBLAST  6    // 'smallblast' — tap (uncharged) beam launch
+#define AFN_SND_MIDBLAST    7    // 'midblast' — charged beam launch
+#define AFN_SND_BCHARGE     4    // 'charge' — beam charge wind-up
+int  afn_play_sfx_inst_gain(int inst, int gain);   // audio.c — play SFX instance, returns its voice idx
+void afn_stop_sfx_inst(int inst);                  // audio.c — stop a looping SFX instance (all voices)
+int  afn_sfx_active_inst(int inst);                // audio.c — is the instance's sample playing
+void afn_set_sfx_pitch_inst(int inst, int pitch);  // audio.c — pitch an SFX instance's sample
+int  afn_inst_voice_active(int v, int inst);       // audio.c — is voice v still this instance's sample
+void afn_stop_inst_voice(int v, int inst);         // audio.c — stop ONLY voice v (this instance's sample)
+// Distance-attenuated gain (0..127) for enemy combat SFX: full up close, floored so
+// it stays faintly audible across the arena. dist = enemy->player distance (afn_ai_dist).
+static int afn_enemy_sfx_gain(float dist) {
+    const float FAR = 700.0f;
+    float t = 1.0f - dist / FAR;
+    if (t < 0.18f) t = 0.18f;
+    if (t > 1.0f)  t = 1.0f;
+    return (int)(127.0f * t + 0.5f);
+}
 // The results-menu state machine + cursor-blink layer (s_resultState/Timer/
 // CursorLayer) is gone — the BP graph drives it now. See results_tick() below,
 // which is reduced to the per-frame facing upkeep nodes can't express.
@@ -484,10 +506,80 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     glDisableClientState(GL_VERTEX_ARRAY);
 }
 
+// HARDCODED Quick Attack afterimage (player only): faint cyan ghost silhouettes of
+// the rig at recent trail positions, to sell the dash speed. Reuses the CURRENT
+// skinned pose (s_skinned) drawn at past world positions; overwrites s_skinned
+// colors with a flat tint — skin() resets them to white next frame, so no
+// save/restore needed. Untextured, alpha-blended, depth-write off so the trail
+// layers behind the live player. Could become a Quick Attack node tunable later.
+#define PA_TRAIL_N 16
+static float s_paTrail[PA_TRAIL_N][4];   // player x,y,z,yawDeg history (one sample / rendered frame)
+static int   s_paHead = -1, s_paFilled = 0;
+static float s_eaTrail[PA_TRAIL_N][4];   // enemy x,y,z,yawDeg history (Quick Attack afterimage)
+static int   s_eaHead = -1, s_eaFilled = 0;
+extern int afn_qa_active;                // defined later in this TU; forward-declared for the afterimage gate
+
+// tint24 = 0xBBGGRR speed-ghost colour (player cyan, enemy red); alpha 0..255.
+static void draw_rig_afterimage(const AfnRig* R, const float* view,
+                                   float px, float py, float pz, float yawDeg,
+                                   float instScale, const float* upN, int alpha, unsigned int tint24) {
+    float ux = upN ? upN[0] : 0.0f, uy = upN ? upN[1] : 1.0f, uz = upN ? upN[2] : 0.0f;
+    float ul = sqrtf(ux*ux + uy*uy + uz*uz); if (ul > 1e-6f) { ux/=ul; uy/=ul; uz/=ul; }
+    float yr = yawDeg * DEG2RAD + AFN_RIG_YAW_OFFSET + R->yawOff;
+    float ydx = sinf(yr), ydz = cosf(yr);
+    float dd = ydx*ux + ydz*uz;
+    float fx = ydx - ux*dd, fy = -uy*dd, fz = ydz - uz*dd;
+    float fl = sqrtf(fx*fx + fy*fy + fz*fz);
+    if (fl > 1e-6f) { fx/=fl; fy/=fl; fz/=fl; } else { fx=0; fy=0; fz=1; }
+    float rgx = uy*fz - uz*fy, rgy = uz*fx - ux*fz, rgz = ux*fy - uy*fx;
+    float S = R->scale * instScale;
+    float model[16] = {
+        rgx*S, rgy*S, rgz*S, 0,
+        ux*S,  uy*S,  uz*S,  0,
+        fx*S,  fy*S,  fz*S,  0,
+        px,    py,    pz,    1
+    };
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(view); glMultMatrixf(model);
+
+    if (alpha < 0) alpha = 0;
+    if (alpha > 255) alpha = 255;
+    unsigned int col = ((unsigned)alpha << 24) | (tint24 & 0xFFFFFFu);  // 0xAABBGGRR
+    for (int vi = 0; vi < R->verts; vi++) s_skinned[vi].color = col;
+
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    if (R->cull == 2) glDisable(GL_CULL_FACE);
+    else { glEnable(GL_CULL_FACE); glFrontFace(R->cull == 1 ? GL_CW : GL_CCW); }
+
+    AfnRigVertex* v = s_skinned;
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glColorPointer (4, GL_UNSIGNED_BYTE, sizeof(AfnRigVertex), &v->color);
+    glVertexPointer(3, GL_FLOAT,         sizeof(AfnRigVertex), &v->x);
+    for (int g = 0; g < R->mats; g++) {
+        int ic = R->idxcount[g];
+        if (ic > 0) glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, R->idx[g]);
+    }
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+}
+
 // Skin + draw the player and every NPC for this frame.
 static void rigs_render(const float* view, float playerX, float playerY, float playerZ,
                         float playerYaw, const float* floorN) {
     const AfnRig* PR = &afn_rigs[AFN_PLAYER_RIG_SLOT];
+    // Record this frame's player pose into the afterimage trail ring.
+    s_paHead = (s_paHead + 1) % PA_TRAIL_N;
+    s_paTrail[s_paHead][0] = playerX; s_paTrail[s_paHead][1] = playerY;
+    s_paTrail[s_paHead][2] = playerZ; s_paTrail[s_paHead][3] = playerYaw;
+    if (s_paFilled < PA_TRAIL_N) s_paFilled++;
     if (s_playerClipHold) {
         // HoldSkelClip on the player: force the held clip, ignore the normal clip selector.
         if (s_pclip != s_playerHoldClip) { s_pclip = s_playerHoldClip; s_pframe = 0.0f; }
@@ -505,6 +597,20 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
     s_drawingPlayer = 1;   // HARDCODED: snapshot ONLY the player's bones (enemy shares the rig)
     rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE, floorN);
     s_drawingPlayer = 0;
+
+    // Quick Attack afterimage: cyan ghost trail behind the dashing player. Drawn
+    // far/old -> near/recent so the brighter recent ghosts overlay the faint ones.
+    if (afn_qa_active) {
+        static const int paBack[6] = { 12, 10, 8, 6, 4, 2 };  // frames back
+        for (int k = 0; k < 6; k++) {
+            if (paBack[k] >= s_paFilled) continue;
+            int gi = (s_paHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
+            int a = 18 + (k + 1) * 13;   // old/far fainter -> recent/near brighter (~31..96)
+            draw_rig_afterimage(PR, view, s_paTrail[gi][0], s_paTrail[gi][1],
+                                s_paTrail[gi][2], s_paTrail[gi][3],
+                                AFN_PLAYER_SCALE, floorN, a, 0x00FFDC96u);   // light cyan
+        }
+    }
 
     // SetSkelAnim: set the matching NPC's clip override (by editor sprite index).
     // Needs the 8-wide afn_npc_inst (editor index in col 7) from the new export.
@@ -558,6 +664,28 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
 #endif
         rig_draw(R, s_rigTex[slot], view, s_npcX[i], s_npcY[i], s_npcZ[i], s_npcYaw[i], N[4], s_npcFloorN[i]);
         s_cacheEnemyBones = 0;
+#ifdef AFN_HAS_SPRITE_IDX
+        // Enemy Quick Attack afterimage: red ghost trail behind the dashing enemy.
+        // Record its pose each frame; draw ghosts while its melee dash/skid runs
+        // (s_eqaPhase != 0). Reuses the enemy's just-skinned pose (s_skinned).
+        if ((int)N[7] == AFN_ENEMY_EIDX) {
+            s_eaHead = (s_eaHead + 1) % PA_TRAIL_N;
+            s_eaTrail[s_eaHead][0] = s_npcX[i]; s_eaTrail[s_eaHead][1] = s_npcY[i];
+            s_eaTrail[s_eaHead][2] = s_npcZ[i]; s_eaTrail[s_eaHead][3] = s_npcYaw[i];
+            if (s_eaFilled < PA_TRAIL_N) s_eaFilled++;
+            if (s_eqaPhase != 0) {
+                static const int paBack[6] = { 12, 10, 8, 6, 4, 2 };
+                for (int k = 0; k < 6; k++) {
+                    if (paBack[k] >= s_eaFilled) continue;
+                    int gi = (s_eaHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
+                    int a = 18 + (k + 1) * 13;
+                    draw_rig_afterimage(R, view, s_eaTrail[gi][0], s_eaTrail[gi][1],
+                                        s_eaTrail[gi][2], s_eaTrail[gi][3],
+                                        N[4], s_npcFloorN[i], a, 0x00FFFFFFu);   // white
+                }
+            }
+        }
+#endif
     }
 }
 #endif // AFN_HAS_PLAYER_RIG
@@ -634,7 +762,7 @@ static void draw_mesh(int mi)
     // exporter's cullMode (back/front/none) is intentionally ignored here.
     glDisable(GL_CULL_FACE);
 
-    if (m->texHasAlpha) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    if (m->texHasAlpha || m->blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     else glDisable(GL_BLEND);
 
     const AfnVertex* v = m->verts;
@@ -1255,7 +1383,8 @@ enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT
        // Analog directions, reported separately from the d-pad so a node can bind
        // each stick independently (left stick != d-pad).
        KEY_LSTICK_UP=4096,    KEY_LSTICK_DOWN=8192,    KEY_LSTICK_LEFT=16384,   KEY_LSTICK_RIGHT=32768,
-       KEY_RSTICK_UP=65536,   KEY_RSTICK_DOWN=131072,  KEY_RSTICK_LEFT=262144,  KEY_RSTICK_RIGHT=524288 };
+       KEY_RSTICK_UP=65536,   KEY_RSTICK_DOWN=131072,  KEY_RSTICK_LEFT=262144,  KEY_RSTICK_RIGHT=524288,
+       KEY_L3=1048576,        KEY_R3=2097152 };   // stick clicks (external/PSTV controller only)
 unsigned afn_keys_held=0, afn_keys_pressed=0, afn_keys_released=0;
 // Per-direction analog trip thresholds on the 0..127 axis range, ordered
 // LU,LD,LL,LR,RU,RD,RL,RR. 48 = default; a Key node's Sensitivity slider
@@ -1299,6 +1428,8 @@ static void input_update(const SceCtrlData* pad) {
     if (b & SCE_CTRL_TRIANGLE) k|=KEY_Y;
     if (b & SCE_CTRL_LTRIGGER) k|=KEY_L;
     if (b & SCE_CTRL_RTRIGGER) k|=KEY_R;
+    if (b & SCE_CTRL_L3)       k|=KEY_L3;   // stick clicks — external/PSTV controller
+    if (b & SCE_CTRL_R3)       k|=KEY_R3;
     if (b & SCE_CTRL_START)    k|=KEY_START;
     if (b & SCE_CTRL_SELECT)   k|=KEY_SELECT;
     if (b & SCE_CTRL_UP)       k|=KEY_UP;
@@ -1508,6 +1639,7 @@ int afn_dodge_cd = 0;      // spam-gate lockout countdown; the node only fires w
 // contact frame.
 int afn_qa_trigger = 0, afn_qa_phase = 0;   // phase: 0 idle, 1 dash, 2 skid
 int afn_qa_frames = 0, afn_qa_active = 0, afn_qa_hit = 0, afn_qa_tgt = -1;
+int afn_qa_started = 0;   // 1 only on the frame the player's QA dash actually begins (Quick Attack Started gate)
 int afn_qa_speed = 90, afn_qa_range = 14, afn_qa_dmg = 12;          // speed (*0.08 px/f), contact range (px), damage
 int afn_qa_max = 28, afn_qa_skid = 12, afn_qa_punch = 20, afn_qa_cd = 0;  // dash budget, skid frames, cam punch %, cooldown
 int afn_qa_clip_lunge = -1, afn_qa_clip_skid = -1, afn_qa_clip_idle = -1; // rig clips for each phase
@@ -1548,7 +1680,14 @@ int   afn_fb_fire_timer = 0;          // Is Firing gate: frames remaining in the
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
+// On Hit event flags (per frame): afn_obj_hit[i]=1 when object i lost HP this
+// frame; afn_any_hit=1 when the player OR any object took damage. Computed by a
+// central HP-drop detector before script_tick (catches every damage source:
+// melee, beams, clash nodes, focus blast) and read by the On Hit dispatcher.
+int afn_obj_hit[NUM_SPRITES]={0}, afn_any_hit=0;
 int afn_energy=0, afn_energy_max=100;   // player energy resource (node-driven: Add/Spend/Set/SetMax Energy)
+int afn_charging_up=0;                   // ChargeUp node sets =1 each frame it runs; reset pre-tick, drives the charge aura
+int afn_charge_clip=23;                  // rig clip held while charging (44-anim r8 default = "charge"; ChargeUp's Charge Clip pin overrides, name-resolved)
 int afn_health=100, afn_health_max=100; // player health resource (node-driven: Damage/Heal/Set/SetMax Health)
 int afn_stop_links[16]={0};
 
@@ -1758,7 +1897,11 @@ void afn_ai_sense(void) {
     if (s_aiDodgeCD > 0) s_aiDodgeCD--;
     if (afn_ai_state != AI_CHARGE) s_efbCharging = 0;   // never leave a charge orb hanging
 
-    if (afn_ai_state != AI_BLOCK) afn_ai_blocking = 0;   // only the BLOCK state keeps the guard up
+    if (afn_ai_state != AI_BLOCK) { afn_ai_blocking = 0; s_eBlockFrames = 0; }   // only the BLOCK state keeps the guard up
+    // A dodge/block interrupted by a state change (or the beam clash) must not leave
+    // its frame counter stuck > 0: afn_ai_blast_incoming gates on s_eDodgeFrames /
+    // s_eBlockFrames, so a stuck value would PERMANENTLY stop the enemy dodging.
+    if (afn_ai_state != AI_DODGE) s_eDodgeFrames = 0;
 
     // Death: at 0 HP go DEAD (the enemy BP's Hold Skel Clip + Orbit Cam runs the
     // KO cinematic; the die-clip hold is s_npcClipHold). Cancel a charging orb but
@@ -1796,14 +1939,14 @@ void afn_ai_sense(void) {
 void afn_ai_roam(void) {
     int i = afn_ai_slot; if (i < 0) return;
 #ifdef AFN_HAS_NAVMESH
-    s_npcClip[i] = s_npcNavMoving[i] ? 32 : 26;   // 32 = Move (was 30; lunge/skid insert at 30/31 shifted it +2)
+    s_npcClip[i] = s_npcNavMoving[i] ? 36 : 30;   // Move : Idle (44-anim glTF: +atk_phs variants, +charge)
 #endif
 }
 
 // CHASE: close toward the player; set afn_ai_reached at the strafe radius.
 void afn_ai_chase(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 32;   // 32 = Move (was 30; shifted +2 by lunge/skid insertion)
+    s_npcClip[i] = 36;   // 36 = Move (44-anim glTF)
     float px = (float)player_x, pz = (float)player_z;
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
     float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : 1.0f, sp = afn_ai_movespd_m * 0.001f;
@@ -1815,11 +1958,10 @@ void afn_ai_chase(void) {
 // STRAFE: orbit the player at the preferred distance (8-direction clip).
 void afn_ai_strafe(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    // 8-dir strafe walk clips. Indices corrected for the lunge(30)/skid(31) insertion
-    // that shifted every clip >= "Move" up by +2 (Move 30->32, strafeL 31->33,
-    // strafeLD 32->34, strafeLDFW 33->35, strafeR 34->36, strafeRD 35->37,
-    // strafeRDFW 36->38; backpeddle 18 unchanged). Same direction order as before.
-    static const int eStrafe[8] = { 32,35,33,37,18,34,36,38 };
+    // 8-dir strafe walk clips. 44-anim glTF map (atk_phs variants shift +3, "charge"
+    // at 23 shifts the rest +1 more): Move 36, strafeL 37, strafeLD 38, strafeLDFW 39,
+    // strafeR 40, strafeRD 41, strafeRDFW 42, backpeddle 21. Same direction order.
+    static const int eStrafe[8] = { 36,39,37,41,21,38,40,42 };
     if (--s_aiStrafeLeg <= 0) { s_aiStrafeDir = ai_chance(0.5f) ? 1 : -1; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
     float ey = s_npcYaw[i] * DEG2RAD;
     float efx = sinf(ey), efz = cosf(ey), erx = cosf(ey), erz = -sinf(ey);
@@ -1870,23 +2012,23 @@ int afn_ai_blast_block(void) {
     return ai_chance(afn_ai_block_prob * 0.01f) ? 1 : 0;
 }
 
-// BLOCK begin: raise the guard (Block clip 19, shared rig) for a short window.
+// BLOCK begin: raise the guard (Block clip 22, shared rig) for a short window.
 void afn_ai_block_begin(void) {
     int i = afn_ai_slot; if (i < 0) return;
     s_eBlockFrames = 24; afn_ai_blocking = 1; afn_ai_block_done = 0;
-    s_npcClip[i] = 19;
+    s_npcClip[i] = 22;
 }
 
 // BLOCK step: hold the guard + clip; set afn_ai_block_done when the window ends.
 void afn_ai_block_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    afn_ai_blocking = 1; s_npcClip[i] = 19;
+    afn_ai_blocking = 1; s_npcClip[i] = 22;
     afn_ai_block_done = (--s_eBlockFrames <= 0) ? 1 : 0;
 }
 
 // DODGE begin: set up the side-roll (called once on the dodge-ready edge). Mirrors
 // the PLAYER's dodge: same committed side burst, same dodge clips (Dodge node's
-// afn_dodge_clip_l/r, fallback to the rig's DodgeL/R 24/25) — but L/R swapped, since
+// afn_dodge_clip_l/r, fallback to the rig's DodgeL/R 28/29) — but L/R swapped, since
 // the enemy faces the player so its screen-left/right is mirrored.
 void afn_ai_dodge_begin(void) {
     int i = afn_ai_slot; if (i < 0) return;
@@ -1895,9 +2037,9 @@ void afn_ai_dodge_begin(void) {
     float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : 1.0f, fx = dx/pl, fz = dz/pl, rx = fz, rz = -fx;
     int side = ai_chance(0.5f) ? 1 : -1;
     s_eDodgeDX = rx * side; s_eDodgeDZ = rz * side;
-    int clipL = afn_dodge_clip_l > 0 ? afn_dodge_clip_l : 24;   // DodgeL
-    int clipR = afn_dodge_clip_r > 0 ? afn_dodge_clip_r : 25;   // DodgeR
-    s_eDodgeClip = side > 0 ? clipL : clipR;                    // swapped vs the player
+    int clipL = afn_dodge_clip_l > 0 ? afn_dodge_clip_l : 28;   // DodgeL
+    int clipR = afn_dodge_clip_r > 0 ? afn_dodge_clip_r : 29;   // DodgeR
+    s_eDodgeClip = side > 0 ? clipR : clipL;                    // L/R clips flipped (enemy faces the player)
     s_eDodgeFrames = s_eDodgeTotal = ENEMY_DODGE_FRAMES; s_aiDodgeCD = ENEMY_DODGE_CD; afn_ai_dodge_done = 0;
 }
 
@@ -1930,10 +2072,11 @@ void afn_ai_dodge_step(void) {
 // the node BP has moved it (so it overrides position/clip while active). Two parts:
 //   1) Jump-evade — when the player's Quick Attack is dashing straight at this enemy
 //      (afn_qa_phase==1, afn_qa_tgt==eidx), roll once on the dash's rising edge to hop
-//      (s_npcVY launch; the per-NPC gravity integrator arcs + lands it). Clips 27/28.
-//   2) Quick Attack — occasional dash-in melee mirroring the player's: lunge (30) at
-//      ENEMY_QA_SPEED toward the player, contact damage to afn_health within QA_STOP,
-//      then a decelerating skid (31). Suppresses BP motion by overwriting X/Z/Yaw/clip.
+//      (s_npcVY launch; the per-NPC gravity integrator arcs + lands it). Clips 31/32.
+//   2) Quick Attack — occasional dash-in melee mirroring the player's: lunge (34) at
+//      ENEMY_QA_SPEED toward the player, contact damage to afn_health within QA_STOP.
+//      On CONNECT the dash ends on the hit; only a WHIFF plays the decelerating skid
+//      (35) recovery. Suppresses BP motion by overwriting X/Z/Yaw/clip.
 // To migrate: expose the tunables as node pins + a SetAiState(QuickAttack/Jump) path.
 static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
     if (afn_ai_state == AI_DEAD) { s_eqaPhase = 0; s_ePrevPlayerQA = 0; return; }
@@ -1941,8 +2084,11 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
     // --- Jump-evade ---------------------------------------------------------
     int playerDashAtMe = (afn_qa_phase == 1 && afn_qa_tgt == eidx);
     if (s_eJumpCD > 0) s_eJumpCD--;
+    // ALWAYS jump-evade a player Quick Attack (no chance roll). Works mid-charge too:
+    // the condition doesn't gate on the charge state, and the gravity integrator below
+    // arcs the launch regardless of what the enemy is doing.
     if (playerDashAtMe && !s_ePrevPlayerQA && s_npcGround[i] && s_eqaPhase == 0
-        && s_eDodgeFrames == 0 && s_eJumpCD == 0 && ai_chance(ENEMY_JUMP_CHANCE)) {
+        && s_eDodgeFrames == 0 && s_eJumpCD == 0) {
         s_npcVY[i] = ENEMY_JUMP_VEL; s_npcGround[i] = 0; s_eJumpCD = ENEMY_JUMP_CD;
     }
     s_ePrevPlayerQA = playerDashAtMe;
@@ -1958,6 +2104,7 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
             s_eqaDirX = dx/d; s_eqaDirZ = dz/d;
             s_eqaYaw = atan2f(s_eqaDirX, s_eqaDirZ) * (180.0f/3.14159265f);
             s_eqaPhase = 1; s_eqaFrames = ENEMY_QA_MAX; s_eqaDealt = 0;
+            afn_play_sfx_inst_gain(AFN_SND_QSWEEP, afn_enemy_sfx_gain(afn_ai_dist));   // dash whoosh (same as player)
         }
     }
     if (s_eqaPhase == 1) {
@@ -1965,44 +2112,62 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
         int ramp = 4; { float t = (float)(ENEMY_QA_MAX - s_eqaFrames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; sp *= t*t; }
         float ix = s_eqaDirX*sp, iz = s_eqaDirZ*sp; int sub = (int)(sp/3.0f) + 1;
         for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
-        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 30;   // lunge
+        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 34;   // lunge
         if (!s_eqaDealt) {
             float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
-            if (dx*dx + dz*dz <= ENEMY_QA_STOP*ENEMY_QA_STOP) {
+            // Grounded only — the player can JUMP over the enemy's Quick Attack, the
+            // same way the enemy jump-evades the player's (the dash whiffs underneath).
+            if (player_on_ground && dx*dx + dz*dz <= ENEMY_QA_STOP*ENEMY_QA_STOP) {
                 int dmg = afn_player_blocking ? (ENEMY_QA_DMG * afn_block_pct) / 100 : ENEMY_QA_DMG;
                 afn_health -= dmg; if (afn_health < 0) afn_health = 0;
-                s_eqaDealt = 1; s_eqaPhase = 2; s_eqaFrames = ENEMY_QA_SKID;
+                // CONNECT: end the dash on the hit — no skid (skid is the overshoot
+                // recovery, only for a whiff). Stops it sliding INTO the player.
+                s_eqaDealt = 1; s_eqaPhase = 0; s_eqaCD = ENEMY_QA_CD;
             }
         }
-        if (s_eqaPhase == 1 && --s_eqaFrames <= 0) { s_eqaPhase = 2; s_eqaFrames = ENEMY_QA_SKID; }   // whiff -> skid
+        if (s_eqaPhase == 1 && --s_eqaFrames <= 0) { s_eqaPhase = 2; s_eqaFrames = ENEMY_QA_SKID; }   // WHIFF -> skid recovery
     } else if (s_eqaPhase == 2) {
         float dec = (ENEMY_QA_SKID > 0) ? (float)s_eqaFrames / (float)ENEMY_QA_SKID : 0.0f;
         float sp = ENEMY_QA_SPEED * 0.08f * dec * 0.5f;
         float ix = s_eqaDirX*sp, iz = s_eqaDirZ*sp; int sub = (int)(sp/3.0f) + 1;
         for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
-        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 31;   // skid
+        s_npcYaw[i] = s_eqaYaw; s_npcClip[i] = 35;   // skid
         if (--s_eqaFrames <= 0) { s_eqaPhase = 0; s_eqaCD = ENEMY_QA_CD; }
     }
-    // Airborne (jump-evade) clip when not mid-QA: rising = jump (27), falling = jump_fall (28).
-    if (s_eqaPhase == 0 && !s_npcGround[i]) s_npcClip[i] = (s_npcVY[i] > 0.0f) ? 27 : 28;
+    // Airborne (jump-evade) clip when not mid-QA: rising = jump (31), falling = jump_fall (32).
+    if (s_eqaPhase == 0 && !s_npcGround[i]) s_npcClip[i] = (s_npcVY[i] > 0.0f) ? 31 : 32;
 }
 
 // CHARGE begin: roll charge-vs-tap, start the wind-up (called once on entry).
 void afn_ai_charge_begin(void) {
     s_aiChargeShot = ai_chance(afn_ai_chargeprob * 0.01f);
-    s_aiTimer = s_aiChargeShot ? ENEMY_CHARGE_WINDUP : ENEMY_TAP_WINDUP;
-    s_efbScale = ENEMY_TAP_SCALE; s_efbCharging = 1; afn_ai_charge_done = 0;
+    // Same charge time as the player: full charge takes afn_fb_max frames (Focus Blast).
+    s_aiTimer = s_aiChargeShot ? afn_fb_max : ENEMY_TAP_WINDUP;
+    s_efbScale = 0.05f; s_efbCharging = 1; afn_ai_charge_done = 0;   // seed small; charge_step grows it
+    // Charge wind-up SFX — track OUR voice so stopping it can't cut the player's
+    // chargefocus (same shared instance/sample).
+    if (s_aiChargeShot) s_eChargeVoice = afn_play_sfx_inst_gain(AFN_SND_BCHARGE, afn_enemy_sfx_gain(afn_ai_dist));
 }
 
 // CHARGE step: hold the charge pose, grow the orb at the muzzle; set
 // afn_ai_charge_done when the wind-up elapses (the FireBeam node then launches).
 void afn_ai_charge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 1; s_efbCharging = 1;
+    s_npcClip[i] = 4; s_efbCharging = 1;   // 4 = atk_spc_chg (charge pose)
+    // Keep OUR charge voice alive — if it was cut, restart it. Check our specific
+    // voice (not any sample-4 voice) so the player's chargefocus doesn't fool it.
+    if (s_aiChargeShot && !afn_inst_voice_active(s_eChargeVoice, AFN_SND_BCHARGE))
+        s_eChargeVoice = afn_play_sfx_inst_gain(AFN_SND_BCHARGE, afn_enemy_sfx_gain(afn_ai_dist));
     float mx, my, mz; enemy_muzzle(i, &mx, &my, &mz);
     s_efbX = mx; s_efbY = my; s_efbZ = mz;
+    // Grow the orb LINEARLY across the whole wind-up (like the player's level-based
+    // growth), so the charge visibly fills instead of snapping to full in a few
+    // frames (old exp lerp). frac = 0..1 over the wind-up.
     float tgt = s_aiChargeShot ? ENEMY_CHG_SCALE : ENEMY_TAP_SCALE;
-    s_efbScale += (tgt - s_efbScale) * 0.2f;
+    int total = s_aiChargeShot ? afn_fb_max : ENEMY_TAP_WINDUP;   // match player charge time
+    float frac = total > 0 ? (1.0f - (float)s_aiTimer / (float)total) : 1.0f;
+    if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
+    s_efbScale = 0.05f + (tgt - 0.05f) * frac;
     afn_ai_charge_done = (--s_aiTimer <= 0) ? 1 : 0;
 }
 
@@ -2017,13 +2182,17 @@ void afn_ai_fire_beam(void) {
     if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = afn_ai_chg_speed_t / 10.0f; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; s_ebBeamFull = 1; }
     else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = afn_ai_tap_speed_t / 10.0f; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; s_ebBeamFull = 0; }
     s_efbActive = 1; s_efbCharging = 0; s_efbLife = ENEMY_SHOT_LIFE;
+    // Charged shot always charges to FULL, so it plays the big 'shoot' SFX (what the
+    // player plays at >=95% charge), not midblast. Tap shots stay smallblast.
+    afn_play_sfx_inst_gain(s_aiChargeShot ? AFN_SND_SHOOT : AFN_SND_SMALLBLAST,
+                           afn_enemy_sfx_gain(afn_ai_dist));   // beam launch SFX (same as player)
     s_aiAtkCD = afn_ai_atkcd; s_aiTimer = ENEMY_FIRE_RECOVER;
 }
 
 // FIRE recover: hold the launch clip; set afn_ai_fire_done when recovery elapses.
 void afn_ai_fire_recover(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    s_npcClip[i] = 16;
+    s_npcClip[i] = 19;   // 19 = atk_spc_lnc (launch)
     afn_ai_fire_done = (--s_aiTimer <= 0) ? 1 : 0;
 }
 // HUD anim layer state — node-driven (PlayHudAnim resets+activates,
@@ -2108,6 +2277,10 @@ static void script_tick(void) {
     afn_bp_dispatch_key_released();
     afn_bp_dispatch_key_held();
     afn_bp_dispatch_key_pressed();
+    // On Hit: fires for objects/player that took damage (flags computed by the
+    // HP-drop detector just before this call). Last so it sees this frame's flags.
+    afn_emitted_script_on_hit();
+    afn_bp_dispatch_on_hit();
 }
 static int script_present(void) { return 1; }
 #else
@@ -2892,8 +3065,8 @@ void afn_clash_ai_step(void) {
     }
     if (afn_clash_balance < 0.0f) afn_clash_balance = 0.0f;
     if (afn_clash_balance > 1.0f) afn_clash_balance = 1.0f;
-    if (!afn_sfx_active(AFN_SND_MASH)) afn_play_sfx(AFN_SND_MASH, 0, 0);
-    afn_set_sfx_pitch(AFN_SND_MASH, 50 + (int)(afn_clash_balance * 100.0f));
+    if (!afn_sfx_active_inst(AFN_SND_MASH)) afn_play_sfx_inst_gain(AFN_SND_MASH, 0);
+    afn_set_sfx_pitch_inst(AFN_SND_MASH, 50 + (int)(afn_clash_balance * 100.0f));
 }
 #endif
 
@@ -3029,7 +3202,48 @@ int main(void)
         // graph (script_tick) overrides afn_input_fwd/right, afn_move_speed,
         // orbit_angle and afn_rig_clip. The movement/camera below only READ them.
         input_update(&pad);
+        // On Hit detector: flag the player / any object that LOST hp since last
+        // frame, so the On Hit node fires for every damage source (node or
+        // hardcoded combat). Read by the On Hit dispatcher inside script_tick().
+        {
+            static int s_hitInit = 0, s_prevHealth = 0, s_prevHp[NUM_SPRITES];
+            if (!s_hitInit) { s_prevHealth = afn_health; for (int i = 0; i < NUM_SPRITES; i++) s_prevHp[i] = afn_hp[i]; s_hitInit = 1; }
+            afn_any_hit = 0;
+            if (afn_health < s_prevHealth) afn_any_hit = 1;
+            s_prevHealth = afn_health;
+            for (int i = 0; i < NUM_SPRITES; i++) {
+                afn_obj_hit[i] = (afn_hp[i] < s_prevHp[i]) ? 1 : 0;
+                if (afn_obj_hit[i]) afn_any_hit = 1;
+                s_prevHp[i] = afn_hp[i];
+            }
+        }
+        afn_charging_up = 0;   // ChargeUp node re-asserts this each frame it runs (held)
         script_tick();
+        // Charge aura: every HIDDEN attached-model mesh instance is shown while a
+        // ChargeUp node ran this frame (button held), hidden otherwise.
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_SPRITE_START_HIDDEN)
+        for (int csi = 0; csi < afn_sprite_count; csi++) {
+            int ceix = afn_mesh_inst_sprite[csi];
+            if (ceix >= 0 && ceix < NUM_SPRITES && afn_sprite_start_hidden[ceix])
+                afn_sprite_visible[ceix] = afn_charging_up ? 1 : 0;
+        }
+#endif
+#ifdef AFN_HAS_PLAYER_RIG
+        // Charging locks the player down: stand still, no other actions, hold the
+        // charge pose. afn_charging_up is set by the ChargeUp node (D-pad Down held);
+        // we cancel everything the node graph queued THIS frame before the movement/
+        // action blocks below consume it, so the button does nothing but charge.
+        if (afn_charging_up) {
+            afn_input_fwd = 0; afn_input_right = 0;        // stand still (kills movement + IsMoving + strafe anim)
+            afn_qa_trigger = 0; afn_dodge_trigger = 0;     // no Quick Attack / Dodge
+            player_vy = 0;                                 // no Jump this frame
+            afn_fb_charge_req = 0; afn_fb_fire_req = 0;     // no Focus Blast charge/fire
+            if (afn_charge_clip >= 0) afn_rig_clip = afn_charge_clip;   // play the charge anim
+        }
+        // No blocking in the air: the Block node sets afn_player_blocking (and it
+        // persists across frames), so force it off whenever the player is airborne.
+        if (!player_on_ground) afn_player_blocking = 0;
+#endif
         afn_audio_tick();   // 60 Hz sequencer clock (envelopes / note scheduling)
 
         // ChangeScene Delay pin: hold the current scene, then kick off the
@@ -3095,8 +3309,8 @@ int main(void)
 #if defined(AFN_HAS_HUD) && defined(AFN_HAS_SPRITE_IDX)
             afn_hud_visible[AFN_CLASH_ELEM] = 0; afn_hud_visible[AFN_MASH_ELEM] = 0;
             clash_set_layers(0);
-            afn_stop_sfx_sample(AFN_SND_STRUGGLE);   // never leave the struggle/mash loops ringing across a swap
-            afn_stop_sfx_sample(AFN_SND_MASH);
+            afn_stop_sfx_inst(AFN_SND_STRUGGLE);   // never leave the struggle/mash loops ringing across a swap
+            afn_stop_sfx_inst(AFN_SND_MASH);
 #endif
 #endif
             // Re-run the entered scene's blueprint OnStart hooks (ShowHUD, music,
@@ -3646,6 +3860,7 @@ int main(void)
         // hands the rig back. Normal movement is suppressed while phase != 0.
 #if defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
         afn_qa_hit = 0;   // 1 only on the frame contact lands (Quick Attack Hit gate)
+        afn_qa_started = 0;   // 1 only on the frame the dash begins (Quick Attack Started gate)
         if (afn_qa_trigger && afn_qa_phase == 0 && afn_dodge_frames <= 0 && !afn_player_frozen) {
             float dirx = 0.0f, dirz = 1.0f; int haveDir = 0;
             if (afn_qa_tgt >= 0) {
@@ -3661,7 +3876,7 @@ int main(void)
             s_qaDirX = dirx; s_qaDirZ = dirz;
             s_qaYaw  = atan2f(dirx, dirz) * (180.0f/3.14159265f);   // face the lunge
             afn_qa_phase = 1; afn_qa_frames = afn_qa_max; s_qaTotal = afn_qa_max;
-            s_qaDealt = 0; afn_qa_active = 1;
+            s_qaDealt = 0; afn_qa_active = 1; afn_qa_started = 1;   // dash begins this frame
         }
         afn_qa_trigger = 0;
         if (afn_qa_phase == 1 && !afn_player_frozen) {
@@ -3802,7 +4017,11 @@ int main(void)
                 // HARDCODED melee reflex (enemy only): runs after the BP moved the NPC
                 // and before gravity, so the QA dash overrides motion and a jump-evade's
                 // s_npcVY launch gets integrated this frame. See afn_ai_melee_reflex.
-                if (eidx == AFN_ENEMY_EIDX) afn_ai_melee_reflex(i, eidx, playerX, playerZ);
+                // Suppressed during the beam-clash struggle (clash backdrop visible) —
+                // the enemy is locked in the side-view mash, so it must NOT Quick-Attack
+                // / damage the player mid-clash (that was killing the player mid-struggle).
+                if (eidx == AFN_ENEMY_EIDX && !afn_hud_visible[AFN_CLASH_ELEM])
+                    afn_ai_melee_reflex(i, eidx, playerX, playerZ);
 
 #ifdef AFN_HAS_NAVMESH
                 // Navigation (editor NPC Navigation section): walk the Detour
@@ -4285,17 +4504,45 @@ int main(void)
             if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
 #endif
             const AfnSpriteInst* sp = &afn_sprites[si];
+            float mx = sp->x, my = sp->y, mz = sp->z;
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+            // Attached MODEL: ride the parent's LIVE transform + offset. These arrays
+            // are PARALLEL TO afn_sprites (indexed by the mesh-instance si) — NOT the
+            // billboard afn_spr_* arrays (different index space; mixing them re-anchored
+            // the static level mesh to a phantom parent -> floor/camera went haywire).
+            if (afn_mesh_inst_parent[si] >= 0) {
+                int found = 0;
+                for (int n = 0; n < AFN_NPC_COUNT; n++)
+                    if ((int)afn_npc_inst[n][7] == afn_mesh_inst_parent[si]) {
+                        mx = s_npcX[n] + afn_mesh_inst_poff[si][0];
+                        my = s_npcY[n] + afn_mesh_inst_poff[si][1];
+                        mz = s_npcZ[n] + afn_mesh_inst_poff[si][2];
+                        found = 1; break;
+                    }
+                if (!found) { mx = playerX + afn_mesh_inst_poff[si][0]; my = playerY + afn_mesh_inst_poff[si][1]; mz = playerZ + afn_mesh_inst_poff[si][2]; }
+            }
+            // Bone-driven: ride the player rig joint cached during rig_draw.
+            if (afn_mesh_inst_bone[si] >= 0) {
+                int b = afn_mesh_inst_bone[si];
+                mx = s_player_bone_world[b][0] + afn_mesh_inst_poff[si][0];
+                my = s_player_bone_world[b][1] + afn_mesh_inst_poff[si][1];
+                mz = s_player_bone_world[b][2] + afn_mesh_inst_poff[si][2];
+            }
+#endif
             // 128 units ~= one PSP D16 depth quantum (2^-16 ~= 128 float-depth
             // ULPs near z=1) — the PSP proves that step is invisible yet big
             // enough to separate these faces.
             glPolygonOffset(0.0f, (float)((si + 1) * 128));   // later instances sit a hair deeper
             glLoadMatrixf(view);
-            glTranslatef(sp->x, sp->y, sp->z);
+            glTranslatef(mx, my, mz);
             if (sp->rotZ != 0.0f) glRotatef(sp->rotZ, 0,0,1);
             if (sp->rotX != 0.0f) glRotatef(sp->rotX, 1,0,0);
             if (sp->rotY != 0.0f) glRotatef(sp->rotY, 0,1,0);
             glScalef(sp->scale, sp->scale, sp->scale);
+            int blended = afn_meshes[mi].blend;   // attached-model soft alpha
+            if (blended) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
             draw_mesh(mi);
+            if (blended) { glDepthMask(GL_TRUE); glDisable(GL_BLEND); }
         }
         glPolygonOffset(0.0f, 0.0f);
         glDisable(GL_POLYGON_OFFSET_FILL);
@@ -4310,6 +4557,11 @@ int main(void)
         billboards_render(view, camAngle, ex, ez);   // camera-facing animated/directional sprites
 #endif
 #ifdef AFN_HAS_PLAYER_RIG
+        // Cut the looping charge wind-up SFX the instant the enemy stops charging
+        // (fired, interrupted, died) — detect the s_efbCharging 1->0 edge.
+        { static int s_prevEfbCharging = 0;
+          if (s_prevEfbCharging && !s_efbCharging) { afn_stop_inst_voice(s_eChargeVoice, AFN_SND_BCHARGE); s_eChargeVoice = -1; }
+          s_prevEfbCharging = s_efbCharging; }
         enemy_orb_render(view);   // HARDCODED: enemy projectile orb (charge spot / in flight)
 #endif
 

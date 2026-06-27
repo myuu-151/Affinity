@@ -192,6 +192,9 @@ struct AfnMeshExport
     uint16_t texPalette[256] = {}; // RGB15 palette (16 or 256 entries used)
     int texture256 = 0;           // 1 = 256-colour (GL_RGB256, 8bpp), 0 = 16-colour (GL_RGB16, 4bpp)
     int textureHasAlpha = 0;      // 1 = palette[0] is transparent (NDS COLOR0_TRANSPARENT)
+    int softAlpha = 0;            // 1 = attached-model blended alpha: emit per-pixel alpha (texAlpha)
+                                  // into the texture's A channel + draw the mesh GL_BLEND (PSV)
+    std::vector<uint8_t> texAlpha;// per-pixel alpha plane (texW*texH) when softAlpha
     int texFiltered = 0;          // 1 = NDS export pre-blurs the texture (software smoothing; DS has no HW filter)
     int perspCorrect = 0;         // 1=perspective-corrected texture mapping
     int texInIwram = 0;           // 1 = copy texture into IWRAM cache at boot
@@ -552,6 +555,8 @@ enum class AfnScriptNodeType : int {
     QuickAttack,     // action: dash-in melee lunge toward the lock target (or forward) + contact damage + skid
     IsDashing,       // gate: passes while a Quick Attack dash/skid is in progress (phase != 0)
     QuickAttackHit,  // gate: passes on the single frame a Quick Attack contact lands
+    ChargeUp,        // action: hold-to-charge — reveal player's hidden attached effect + fill energy
+    QuickAttackStarted, // gate: passes on the single frame a Quick Attack dash actually begins
     COUNT
 };
 

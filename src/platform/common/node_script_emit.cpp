@@ -94,7 +94,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                                           "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT",
                                           "KEY_X","KEY_Y",
                                           "KEY_LSTICK_UP","KEY_LSTICK_DOWN","KEY_LSTICK_LEFT","KEY_LSTICK_RIGHT",
-                                          "KEY_RSTICK_UP","KEY_RSTICK_DOWN","KEY_RSTICK_LEFT","KEY_RSTICK_RIGHT" };
+                                          "KEY_RSTICK_UP","KEY_RSTICK_DOWN","KEY_RSTICK_LEFT","KEY_RSTICK_RIGHT",
+                                          "KEY_L3","KEY_R3" };
             return (k >= 0 && k < 20) ? keys[k] : "KEY_A";
         };
 
@@ -184,7 +185,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                     et != AfnScriptNodeType::OnKeyPressed &&
                     et != AfnScriptNodeType::OnKeyReleased &&
                     et != AfnScriptNodeType::OnCollision &&
-                    et != AfnScriptNodeType::OnCollision2D)
+                    et != AfnScriptNodeType::OnCollision2D &&
+                    et != AfnScriptNodeType::OnHit)
                     continue;
                 Chain ch; ch.event = &n;
                 std::vector<int> frontier = findExecOuts(n.id, 0);
@@ -248,7 +250,16 @@ void EmitNodeScriptBodies(std::ostream& f,
             case AfnScriptNodeType::Jump: {
                 auto* d = findDataIn(a->id, 0);
                 float force = d ? resolveFloat(d) : 2.0f;
-                f << "    if (player_on_ground) player_vy = " << (int)(force * 256.0f) << ";\n";
+                int vy = (int)(force * 256.0f);
+                // Energy Cost pin (2): 0/unwired = free. Otherwise the jump only
+                // fires when afn_energy >= cost, and spends it on launch.
+                auto* ec = findDataIn(a->id, 2);
+                int cost = ec ? resolveInt(ec) : 0;
+                if (cost > 0)
+                    f << "    if (player_on_ground && afn_energy >= " << cost << ") { player_vy = " << vy
+                      << "; afn_energy -= " << cost << "; }\n";
+                else
+                    f << "    if (player_on_ground) player_vy = " << vy << ";\n";
                 // Anime-jump shaping (PSV): Fall Force pin = extra downward accel
                 // past the apex; node sliders paramInt[1]=Rise Float % (gravity
                 // removed while rising) and paramInt[0]=Fall Smooth (ease-in
@@ -610,6 +621,19 @@ void EmitNodeScriptBodies(std::ostream& f,
             case AfnScriptNodeType::AddEnergy: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
                 f << "    afn_energy += " << v << "; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
+                break;
+            }
+            case AfnScriptNodeType::ChargeUp: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
+                // Grounded only — no charging mid-air (gates the aura/lock/energy).
+                f << "    if (player_on_ground) {\n";
+                f << "        afn_charging_up = 1;\n";
+                f << "        afn_energy += " << v << "; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
+                // Optional Charge Clip pin (wire a Skel Anim node) overrides the
+                // runtime default so the held pose is name-resolved (no glTF drift).
+                auto* dc = findDataIn(a->id, 1);
+                if (dc) f << "        afn_charge_clip = " << resolveInt(dc) << ";\n";
+                f << "    }\n";
                 break;
             }
             case AfnScriptNodeType::SpendEnergy: {
@@ -1650,6 +1674,12 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
+            if (a->type == AfnScriptNodeType::QuickAttackStarted) {
+                f << "    if (afn_qa_started) {\n";       // the single frame the dash begins
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
             if (a->type == AfnScriptNodeType::IsAiFlag) {
                 // Flag selector (wired Int): 0=lose_ready 1=dodge_ready 2=can_fire
                 // 3=charge_done 4=dodge_done 5=fire_done 6=reached.
@@ -1813,6 +1843,22 @@ void EmitNodeScriptBodies(std::ostream& f,
                     } else {
                         emitChain(c);
                     }
+                } else if (evType == AfnScriptNodeType::OnHit) {
+                    // Fires when a hit landed this frame. Object pin wired -> that
+                    // object's per-frame hit flag (AttachedSprite = self instance);
+                    // unwired -> afn_any_hit (the player OR any object took damage).
+                    auto* od = findDataIn(c.event->id, 0);
+                    if (od) {
+                        std::string obj = (od->type == AfnScriptNodeType::AttachedSprite)
+                            ? std::string("afn_bp_cur_spr_idx") : std::to_string(resolveInt(od));
+                        f << "    if ((" << obj << ") >= 0 && (" << obj << ") < NUM_SPRITES && afn_obj_hit[" << obj << "]) {\n";
+                        emitChain(c);
+                        f << "    }\n";
+                    } else {
+                        f << "    if (afn_any_hit) {\n";
+                        emitChain(c);
+                        f << "    }\n";
+                    }
                 } else {
                     emitChain(c);
                 }
@@ -1862,6 +1908,7 @@ void EmitNodeScriptBodies(std::ostream& f,
         emitDispatcher("afn_emitted_script_key_released", AfnScriptNodeType::OnKeyReleased,  "key_released");
         emitDispatcher("afn_emitted_script_collision",    AfnScriptNodeType::OnCollision,    nullptr);
         emitDispatcher("afn_emitted_script_collision2d",  AfnScriptNodeType::OnCollision2D,  nullptr);
+        emitDispatcher("afn_emitted_script_on_hit",       AfnScriptNodeType::OnHit,          nullptr);
 
         // Blueprint event handlers — one set of named functions per blueprint.
         // Per-instance state (current sprite/tm-obj) lives in afn_bp_cur_*.
@@ -1883,6 +1930,8 @@ void EmitNodeScriptBodies(std::ostream& f,
             emitDispatcher(fn, AfnScriptNodeType::OnCollision, nullptr);
             snprintf(fn, sizeof(fn), "afn_bp%zu_collision2d",  bi);
             emitDispatcher(fn, AfnScriptNodeType::OnCollision2D, nullptr);
+            snprintf(fn, sizeof(fn), "afn_bp%zu_on_hit",       bi);
+            emitDispatcher(fn, AfnScriptNodeType::OnHit, nullptr);
         }
         curScript = &script;  // restore so any later helpers behave
 
@@ -1952,6 +2001,8 @@ void EmitNodeScriptBodies(std::ostream& f,
         // tm_object the player just walked into (set by mode0 movement).
         emitBpDispatcher("afn_bp_dispatch_collision2d",  "collision2d",
                          "(int)afn_bp_instances[i][2] == afn_collided_tm_obj", true);
+        // On Hit: per-instance; the handler itself gates on the object's hit flag.
+        emitBpDispatcher("afn_bp_dispatch_on_hit",       "on_hit",       nullptr, true);
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";
@@ -1963,6 +2014,7 @@ void EmitNodeScriptBodies(std::ostream& f,
         f << "static inline void afn_emitted_script_key_released(void) {}\n";
         f << "static inline void afn_emitted_script_collision(void)    {}\n";
         f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+        f << "static inline void afn_emitted_script_on_hit(void)       {}\n";
         f << "static inline void afn_bp_dispatch_start(void)           {}\n";
         f << "static inline void afn_bp_dispatch_update(void)          {}\n";
         f << "static inline void afn_bp_dispatch_key_held(void)        {}\n";
@@ -1970,6 +2022,7 @@ void EmitNodeScriptBodies(std::ostream& f,
         f << "static inline void afn_bp_dispatch_key_released(void)    {}\n";
         f << "static inline void afn_bp_dispatch_collision(void)       {}\n";
         f << "static inline void afn_bp_dispatch_collision2d(void)     {}\n";
+        f << "static inline void afn_bp_dispatch_on_hit(void)          {}\n";
     }
 }
 
