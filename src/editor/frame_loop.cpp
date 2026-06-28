@@ -22700,6 +22700,20 @@ void FrameTick(float dt)
         // Clip to canvas
         dl->PushClipRect(canvasOrig, ImVec2(canvasOrig.x + canvasSize.x, canvasOrig.y + canvasSize.y), true);
 
+        // Recover corrupt (NaN/inf) node + annotation coordinates. A single node
+        // or annotation with a non-finite position renders as a screen-spanning
+        // glowing beam, because NaN bypasses every cull/clamp (NaN compared with
+        // anything is false). Reset to the origin so it becomes visible + usable
+        // again instead of poisoning the whole canvas. (`v == v` is false for NaN.)
+        auto vsBadF = [](float v){ return !(v == v) || fabsf(v) > 1e7f; };
+        for (auto& n : sVsNodes) { if (vsBadF(n.x) || vsBadF(n.y)) { n.x = 0; n.y = 0; } }
+        for (auto& a : sVsAnnotations) {
+            if (vsBadF(a.x) || vsBadF(a.y)) { a.x = 0; a.y = 0; }
+            if (vsBadF(a.w) || a.w <= 0) a.w = 200;
+            if (vsBadF(a.h) || a.h <= 0) a.h = 120;
+        }
+
+
         // Grid
         float gridStep = 32.0f * zoom;
         float offX = fmodf(sVsPanX * zoom, gridStep);
@@ -22711,6 +22725,25 @@ void FrameTick(float dt)
             dl->AddLine(ImVec2(canvasOrig.x, canvasOrig.y + gy),
                         ImVec2(canvasOrig.x + canvasSize.x, canvasOrig.y + gy), 0xFF1A1A1E);
 
+        // Bound every emitted draw coordinate to a small margin around the canvas.
+        // ImGui builds anti-aliased fill/stroke geometry BEFORE clipping, so a
+        // primitive whose corners land at extreme coordinates (a far-off-screen or
+        // oversized node/wire/annotation at min/max zoom) produces degenerate
+        // normals that smear across the whole window as glowing beams. Clamping
+        // every emitted point to viewport±margin keeps on-screen primitives
+        // pixel-identical while taming the off-screen ones. Margin is kept small so
+        // a clamped off-screen primitive barely pokes past the edge (no long beam).
+        const float kVsDrawMargin = 256.0f;
+        const float vsClMinX = canvasOrig.x - kVsDrawMargin, vsClMinY = canvasOrig.y - kVsDrawMargin;
+        const float vsClMaxX = canvasOrig.x + canvasSize.x + kVsDrawMargin, vsClMaxY = canvasOrig.y + canvasSize.y + kVsDrawMargin;
+        auto vsClamp = [&](ImVec2 p) -> ImVec2 {
+            float x = (p.x == p.x) ? p.x : canvasOrig.x;   // NaN -> canvas origin
+            float y = (p.y == p.y) ? p.y : canvasOrig.y;   // (NaN == NaN is false)
+            x = x < vsClMinX ? vsClMinX : (x > vsClMaxX ? vsClMaxX : x);
+            y = y < vsClMinY ? vsClMinY : (y > vsClMaxY ? vsClMaxY : y);
+            return ImVec2(x, y);
+        };
+
         // Draw annotations (behind everything)
         for (int ai = 0; ai < (int)sVsAnnotations.size(); ai++) {
             auto& ann = sVsAnnotations[ai];
@@ -22721,6 +22754,13 @@ void FrameTick(float dt)
             float headerH = 22.0f * zoom;
             ImVec2 aMin(ax, ay);
             ImVec2 aMax(ax + aw, ay + ah);
+            // Cull fully-off-screen annotations; clamp the corners of any that
+            // remain so a huge/far one can't smear (same pre-clip-AA issue as nodes).
+            if (aMax.x < canvasOrig.x || aMin.x > canvasOrig.x + canvasSize.x ||
+                aMax.y < canvasOrig.y || aMin.y > canvasOrig.y + canvasSize.y)
+                continue;
+            aMin = vsClamp(aMin); aMax = vsClamp(aMax);
+            ax = aMin.x; ay = aMin.y;
             // Body fill
             dl->AddRectFilled(aMin, aMax, ann.color, 4.0f * zoom);
             // Header bar
@@ -22780,20 +22820,6 @@ void FrameTick(float dt)
             sVsLinkSurgeRevT.clear();
         }
 
-        // Bound every emitted draw coordinate to a margin around the canvas.
-        // ImGui builds anti-aliased fill/stroke geometry BEFORE clipping, so a
-        // primitive whose corners land at extreme coordinates (far off-screen
-        // nodes/wires at high zoom) produces degenerate normals that smear across
-        // the whole window. Clamping each point to viewport±margin keeps on-screen
-        // primitives pixel-identical while taming the off-screen ones.
-        const float kVsDrawMargin = 2000.0f;
-        const float vsClMinX = canvasOrig.x - kVsDrawMargin, vsClMinY = canvasOrig.y - kVsDrawMargin;
-        const float vsClMaxX = canvasOrig.x + canvasSize.x + kVsDrawMargin, vsClMaxY = canvasOrig.y + canvasSize.y + kVsDrawMargin;
-        auto vsClamp = [&](ImVec2 p) -> ImVec2 {
-            return ImVec2(p.x < vsClMinX ? vsClMinX : (p.x > vsClMaxX ? vsClMaxX : p.x),
-                          p.y < vsClMinY ? vsClMinY : (p.y > vsClMaxY ? vsClMaxY : p.y));
-        };
-
         // Draw links (bezier curves) — resolve pins to current editing level
         auto bezEval = [](ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d, float u) -> ImVec2 {
             float v = 1.0f - u;
@@ -22812,14 +22838,26 @@ void FrameTick(float dt)
             if (sVsNodes[fi].groupId != sVsEditingGroup || sVsNodes[ti].groupId != sVsEditingGroup) continue;
             ImVec2 p1 = VsPinPos(sVsNodes[fi], fromP.pinType, fromP.pinIdx, canvasOrig, zoom);
             ImVec2 p2 = VsPinPos(sVsNodes[ti], toP.pinType, toP.pinIdx, canvasOrig, zoom);
+            // Cull wires that reach off the visible canvas (tight bound, ~one
+            // node-width margin so edge nodes' wires still show). A generous
+            // margin let wires to just-off-screen nodes draw a faint sub-pixel
+            // stub across the empty canvas when panned/zoomed out; a node-width
+            // bound keeps only wires between genuinely-visible nodes. Also skips
+            // non-finite endpoints.
+            const float wireMargin = kVsNodeW * zoom + 8.0f;
+            auto vsOff = [&](ImVec2 p){
+                return !(p.x == p.x) || !(p.y == p.y) ||
+                       p.x < canvasOrig.x - wireMargin || p.x > canvasOrig.x + canvasSize.x + wireMargin ||
+                       p.y < canvasOrig.y - wireMargin || p.y > canvasOrig.y + canvasSize.y + wireMargin;
+            };
+            if (vsOff(p1) || vsOff(p2)) continue;
             float dx = std::max(50.0f * zoom, fabsf(p2.x - p1.x) * 0.5f);
             ImVec2 cp1(p1.x + dx, p1.y), cp2(p2.x - dx, p2.y);
-            // Bound all four control points so a wire to a far-off-screen node
-            // can't smear (on-screen wires are well within the margin = no change).
-            p1 = vsClamp(p1); p2 = vsClamp(p2); cp1 = vsClamp(cp1); cp2 = vsClamp(cp2);
             bool isExec = (lk.from.pinType == 0);
             ImU32 wireCol = isExec ? 0xFFFFFFFF : 0xFF44CCAA;
-            dl->AddBezierCubic(p1, cp1, cp2, p2, wireCol, 2.0f * zoom);
+            // Floor the thickness at ~1px: at min zoom 2*zoom = 0.2px renders as a
+            // faint sub-pixel AA smear (looked like a glitchy beam), not a line.
+            dl->AddBezierCubic(p1, cp1, cp2, p2, wireCol, std::max(1.0f, 2.0f * zoom));
 
             // Draw blue traveling surge (forward: from → to)
             auto surgeIt = sVsLinkSurgeT.find(li);

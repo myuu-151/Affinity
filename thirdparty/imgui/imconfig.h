@@ -118,7 +118,12 @@
 // Your renderer backend will need to support it (most example renderer backends support both 16/32-bit indices).
 // Another way to allow large meshes while keeping 16-bit indices is to handle ImDrawCmd::VtxOffset in your renderer.
 // Read about ImGuiBackendFlags_RendererHasVtxOffset for details.
-//#define ImDrawIdx unsigned int
+// Affinity: ENABLED. Large blueprints (hundreds of nodes + text) exceed 64K
+// vertices in the node-canvas draw list when zoomed out; with 16-bit indices the
+// OpenGL2 backend (no VtxOffset support) wraps indices past 65535 -> garbage
+// triangles that render as smeared beams/combs. 32-bit indices remove the cap;
+// the OpenGL2 backend already picks GL_UNSIGNED_INT based on sizeof(ImDrawIdx).
+#define ImDrawIdx unsigned int
 
 //---- Override ImDrawCallback signature (will need to modify renderer backends accordingly)
 //struct ImDrawList;
