@@ -32,8 +32,14 @@ models/
 nds_runtime/
 psp_runtime/
 
-# Generated PSV data headers — huge texture/audio arrays (60-80 MB each) that
-# are regenerated on every editor export. Tracking them churned the repo and
-# OOM'd pushes. Kept on disk for local builds; regenerate by exporting.
+# Generated PSV data headers — baked output of the loaded project (meshes,
+# rig, sprites, HUD, audio, node logic). Regenerated on every editor export.
+# Tracking them churned the repo, OOM'd pushes, and shipped project IP
+# (pokemon_arena assets) into the public tree. Kept on disk for local builds;
+# regenerate by exporting from the editor.
 psv_runtime/include/psv_hud.h
 psv_runtime/include/psv_sound.h
+psv_runtime/include/psv_mapdata.h
+psv_runtime/include/psv_rig.h
+psv_runtime/include/psv_sprites.h
+psv_runtime/include/psv_script.h
