@@ -22780,6 +22780,20 @@ void FrameTick(float dt)
             sVsLinkSurgeRevT.clear();
         }
 
+        // Bound every emitted draw coordinate to a margin around the canvas.
+        // ImGui builds anti-aliased fill/stroke geometry BEFORE clipping, so a
+        // primitive whose corners land at extreme coordinates (far off-screen
+        // nodes/wires at high zoom) produces degenerate normals that smear across
+        // the whole window. Clamping each point to viewport±margin keeps on-screen
+        // primitives pixel-identical while taming the off-screen ones.
+        const float kVsDrawMargin = 2000.0f;
+        const float vsClMinX = canvasOrig.x - kVsDrawMargin, vsClMinY = canvasOrig.y - kVsDrawMargin;
+        const float vsClMaxX = canvasOrig.x + canvasSize.x + kVsDrawMargin, vsClMaxY = canvasOrig.y + canvasSize.y + kVsDrawMargin;
+        auto vsClamp = [&](ImVec2 p) -> ImVec2 {
+            return ImVec2(p.x < vsClMinX ? vsClMinX : (p.x > vsClMaxX ? vsClMaxX : p.x),
+                          p.y < vsClMinY ? vsClMinY : (p.y > vsClMaxY ? vsClMaxY : p.y));
+        };
+
         // Draw links (bezier curves) — resolve pins to current editing level
         auto bezEval = [](ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d, float u) -> ImVec2 {
             float v = 1.0f - u;
@@ -22800,6 +22814,9 @@ void FrameTick(float dt)
             ImVec2 p2 = VsPinPos(sVsNodes[ti], toP.pinType, toP.pinIdx, canvasOrig, zoom);
             float dx = std::max(50.0f * zoom, fabsf(p2.x - p1.x) * 0.5f);
             ImVec2 cp1(p1.x + dx, p1.y), cp2(p2.x - dx, p2.y);
+            // Bound all four control points so a wire to a far-off-screen node
+            // can't smear (on-screen wires are well within the margin = no change).
+            p1 = vsClamp(p1); p2 = vsClamp(p2); cp1 = vsClamp(cp1); cp2 = vsClamp(cp2);
             bool isExec = (lk.from.pinType == 0);
             ImU32 wireCol = isExec ? 0xFFFFFFFF : 0xFF44CCAA;
             dl->AddBezierCubic(p1, cp1, cp2, p2, wireCol, 2.0f * zoom);
@@ -22876,6 +22893,16 @@ void FrameTick(float dt)
 
             ImVec2 nMin(nx, ny);
             ImVec2 nMax(nx + nw, ny + nh);
+
+            // Cull nodes fully outside the visible canvas. At high zoom an
+            // off-screen node's screen rect reaches extreme coordinates where
+            // ImGui's pre-clip rounded-rect AA geometry degenerates into smears.
+            // (Partially-visible nodes stay within ~one node-size of the viewport,
+            // so their coords never get extreme — only fully-off nodes do.)
+            if (nMax.x < canvasOrig.x || nMin.x > canvasOrig.x + canvasSize.x ||
+                nMax.y < canvasOrig.y || nMin.y > canvasOrig.y + canvasSize.y)
+                continue;
+
             bool isSel = (ni == sVsSelected) || n.selected;
 
             // Node body
