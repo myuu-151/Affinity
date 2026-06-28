@@ -1447,6 +1447,9 @@ int afn_input_fwd = 0, afn_input_right = 0;   // camera-space move intent (256 =
 int afn_stick_8way = 0;                       // 8-Way Stick node: snap move vector to 45 deg octants
 int afn_move_speed = 0, afn_speed_prio = 0;   // node-set speed (0 = use walk default)
 int afn_player_frozen = 0;
+int afn_enemy_frozen = 0;                     // freeze the enemy AI (movement + decisions);
+                                              // Play Camera Anim's "Freeze Enemy" pin sets it
+                                              // for a cutscene, cleared when the cut ends.
 int afn_face_lock = 0;                        // MovePlayer "Consistent Facing": keep
                                               // rig yaw while moving (strafe/moonwalk)
 int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
@@ -1999,6 +2002,7 @@ void afn_ai_sense(void) {
     int i = afn_ai_slot; if (i < 0) return;
     int eidx = AFN_ENEMY_EIDX;
     if (!s_aiInited) { afn_hp[eidx] = ENEMY_HP_MAX; afn_sprite_visible[eidx] = 1; afn_ai_state = AI_ROAM; s_aiInited = 1; }
+    if (afn_enemy_frozen) { s_npcClip[i] = afn_aic_idle; return; }   // cutscene freeze (Play Camera Anim): hold idle, no decisions
 #if defined(AFN_HAS_HUD) && defined(AFN_HAS_SPRITE_IDX)
     if (afn_hud_visible[AFN_CLASH_ELEM]) return;   // beam clash owns the enemy — freeze the AI
 #endif
@@ -2047,6 +2051,7 @@ void afn_ai_sense(void) {
 // ROAM: nav drives motion; just pick walk/idle clip.
 void afn_ai_roam(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
 #ifdef AFN_HAS_NAVMESH
     s_npcClip[i] = s_npcNavMoving[i] ? afn_aic_move : afn_aic_idle;   // Move : Idle (name-resolved via AI Clips)
 #endif
@@ -2055,6 +2060,7 @@ void afn_ai_roam(void) {
 // CHASE: close toward the player; set afn_ai_reached at the strafe radius.
 void afn_ai_chase(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
     s_npcClip[i] = afn_aic_move;   // Move (name-resolved via AI Clips)
     float px = (float)player_x, pz = (float)player_z;
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
@@ -2067,6 +2073,7 @@ void afn_ai_chase(void) {
 // STRAFE: orbit the player at the preferred distance (8-direction clip).
 void afn_ai_strafe(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
     // 8-dir strafe walk clips. 44-anim glTF map (atk_phs variants shift +3, "charge"
     // at 23 shifts the rest +1 more): Move 36, strafeL 37, strafeLD 38, strafeLDFW 39,
     // strafeR 40, strafeRD 41, strafeRDFW 42, backpeddle 21. Same direction order.
@@ -2160,6 +2167,7 @@ void afn_ai_dodge_begin(void) {
 // tunnel through a wall.
 void afn_ai_dodge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
     if (s_eDodgeFrames > 0) {
         int total = s_eDodgeTotal, frames = s_eDodgeFrames;
         int ramp = afn_ait_dodge_ramp    >= 0 ? afn_ait_dodge_ramp    : (afn_dodge_ramp  > 0 ? afn_dodge_ramp  : 6);
@@ -2256,6 +2264,7 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
 // player mid-clash. Replaces the old hardcoded call in the NPC update loop.
 void afn_ai_quick_attack(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
     if (afn_hud_visible[AFN_CLASH_ELEM]) return;
     afn_ai_melee_reflex(i, AFN_ENEMY_EIDX, (float)player_x, (float)player_z);
 }
@@ -2275,6 +2284,7 @@ void afn_ai_charge_begin(void) {
 // afn_ai_charge_done when the wind-up elapses (the FireBeam node then launches).
 void afn_ai_charge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
     s_npcClip[i] = afn_aic_charge; s_efbCharging = 1;   // atk_spc_chg (charge pose)
     // Keep OUR charge voice alive — if it was cut, restart it. Check our specific
     // voice (not any sample-4 voice) so the player's chargefocus doesn't fool it.
@@ -2296,6 +2306,7 @@ void afn_ai_charge_step(void) {
 // FIRE: launch the projectile from the muzzle toward the player; start recovery.
 void afn_ai_fire_beam(void) {
     int i = afn_ai_slot; if (i < 0) return;
+    if (afn_enemy_frozen) return;   // cutscene freeze
     float px = (float)player_x, pz = (float)player_z;
     float mx, my, mz; enemy_muzzle(i, &mx, &my, &mz);
     float ddx = px - mx, ddz = pz - mz, dl = sqrtf(ddx*ddx + ddz*ddz); if (dl < 1e-3f) dl = 1.0f;
@@ -4609,7 +4620,7 @@ int main(void)
             if (afn_cam_cut_fframe >= (float)last) {
                 if (afn_cam_cut_loop) { while (last > 0 && afn_cam_cut_fframe >= (float)last) afn_cam_cut_fframe -= (float)last; }
                 else { afn_cam_cut_fframe = (float)last; afn_cam_cut_done = 1;
-                       if (!afn_cam_cut_hold) { afn_cam_cut_active = 0; afn_player_frozen = 0; } }
+                       if (!afn_cam_cut_hold) { afn_cam_cut_active = 0; afn_player_frozen = 0; afn_enemy_frozen = 0; } }
             }
             afn_cam_cut_frame = (int)afn_cam_cut_fframe;
             float cex, cey, cez, cfx, cfy, cfz;

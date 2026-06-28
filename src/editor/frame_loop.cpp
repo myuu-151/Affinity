@@ -1314,7 +1314,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Ai Quick Attack", 0xFFAA5566, 1, 1, 12, 0, {"Dash Range", "Trigger /1000", "Dash Speed", "Contact Range", "Damage", "Cooldown", "Jump Vel x100", "Jump % (unused)", "Jump Cooldown", "Whoosh SFX", "Trail Alpha", "Trail Length"}, {}, {} },
     { "AI Timing",       0xFF55AA66, 1, 1, 10, 0, {"De-Aggro Frames", "Strafe Leg", "Yaw Ease x100", "Tap Windup", "Fire Recover", "Dodge Frames", "Dodge Cooldown", "Dodge Speed (-1=player)", "Dodge Ramp (-1=player)", "Dodge Falloff (-1=player)"}, {}, {} },
     { "AI Clips",        0xFF55AA66, 1, 1, 16, 0, {"Move", "Idle", "Strafe L", "Strafe LD", "Strafe LDFW", "Strafe R", "Strafe RD", "Strafe RDFW", "Backpeddle", "Block", "Charge Pose", "Launch", "Lunge", "Skid", "Jump", "Jump Fall"}, {}, {} },
-    { "Play Camera Anim",0xFF3355AA, 1, 1, 4, 0, {"Anim (int)", "Freeze Player (int)", "Loop (int)", "Hold Last (int)"}, {}, {} },
+    { "Play Camera Anim",0xFF3355AA, 1, 1, 5, 0, {"Anim (int)", "Freeze Player (int)", "Loop (int)", "Hold Last (int)", "Freeze Enemy (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1620,7 +1620,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::QuickAttackStarted: desc = "Gate: passes on the SINGLE frame a Quick Attack dash ACTUALLY begins (after the cooldown/energy/charge gate, unlike the raw key press). Drive On Update -> Quick Attack Started -> Play Sound for a swing-whoosh that never fires on a blocked press."; break;
     case VsNodeType::AiQuickAttack: desc = "Enemy AI melee reflex (run every frame from the enemy's On Update, AFTER its movement/state nodes so it can override pose + position). Two behaviours: (1) Quick Attack — when the player is within Dash Range and off cooldown, it rolls Trigger /1000 per frame to dash in at Dash Speed, dealing Damage on contact within Contact Range (a connect ends the dash; only a whiff plays the skid). (2) Jump-evade — ALWAYS hops a player Quick Attack dashing straight at it (Jump Vel x100 launch, same gravity arc as the player), even mid-charge. Auto-suppressed during the beam-clash struggle. Jump % is reserved (unused) for a future chance-gated evade. Tunables match the old #defines: Dash Range 70, Trigger 12/1000, Dash Speed 34, Contact Range 14, Damage 8, Cooldown 90, Jump Vel 150 (=1.5), Jump Cooldown 40. Whoosh SFX = the dash sound instance (proximity-gained), default 17 ('quicksweep'). Trail Alpha (afterimage peak alpha, default 96; 0 = off) and Trail Length (white ghost count 0-6, default 6)."; break;
     case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
-    case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player unfreezes. Anim = which path (0 for now). Drive from On Start or any event."; break;
+    case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::ChargeUp: desc = "Hold-to-charge. While this runs each frame, it REVEALS the player's hidden attached effect models (the charge aura) and adds Energy/Frame to the Energy meter (clamped to max). The aura auto-hides the frame you stop running it. Drive it from On Key Held(Circle) so holding the button charges; release hides the aura and stops filling. Give the aura mesh 'Hidden (effect)' so it stays invisible until charging."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
@@ -25684,6 +25684,7 @@ void FrameTick(float dt)
                         "    afn_cam_cut_active = 1; afn_cam_cut_timer = 0; afn_cam_cut_frame = 0; afn_cam_cut_fframe = 0.0f; afn_cam_cut_done = 0;\n"
                         "    afn_cam_cut_loop = <Loop>; afn_cam_cut_hold = <Hold Last>;\n"
                         "    if (<Freeze Player>) afn_player_frozen = 1;\n"
+                        "    if (<Freeze Enemy>) afn_enemy_frozen = 1;\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c camera block) ---\n"
                         "    // Each frame while active: advance the float playhead afn_cam_cut_fframe by\n"
@@ -25691,7 +25692,9 @@ void FrameTick(float dt)
                         "    // so each keyframe's per-segment Speed multiplier warps that leg's playback\n"
                         "    // rate; then sample the Catmull-Rom eye + smoothstep yaw/pitch and feed it\n"
                         "    // straight into look_at, bypassing the orbit. At the end: loop, or hold the\n"
-                        "    // last frame, or clear active (+ unfreeze) so the follow-cam eases back.");
+                        "    // last frame, or clear active (+ unfreeze player+enemy) so play resumes.\n"
+                        "    // Freeze Enemy: afn_enemy_frozen gates afn_ai_sense/roam/chase/strafe +\n"
+                        "    // dodge/quick-attack/charge/fire — the enemy holds idle until the cut ends.");
                     break;
                 }
                 case VsNodeType::IsBlastIncoming: {
