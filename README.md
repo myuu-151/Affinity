@@ -43,6 +43,11 @@ build\Release\AffinityEditor.exe
 
 ## Build for PS Vita
 
+<details>
+<summary><b>Click to expand</b> — VitaSDK toolchain, export → build, and running in Vita3K.</summary>
+
+<br>
+
 PS Vita packaging uses **VitaSDK**, invoked through the **devkitPro MSYS2** shell (CMake + make).
 
 **Toolchain** — install **VitaSDK** to `C:\vitasdk` by following **[vitasdk.org](https://vitasdk.org/)** (the `vdpm` bootstrap). The editor expects `VITASDK=/c/vitasdk`.
@@ -79,6 +84,8 @@ export PATH="$VITASDK/bin:$PATH"
 cd psv_runtime && mkdir -p build && cd build
 cmake .. && make
 ```
+
+</details>
 
 </details>
 
