@@ -14,30 +14,6 @@
 
 ---
 
-## Features
-
-| | |
-|---|---|
-| **Software 3D Renderer** | Flat-shaded and textured polygon rasterizer with ARM ASM inner loops |
-| **OBJ Mesh Import** | Load .obj files with per-mesh culling, draw distance, LOD, and texture mapping |
-| **Perspective Texturing** | Optional perspective-correct texturing with automatic mesh subdivision |
-| **Live Viewport** | Real-time perspective preview of the 3D scene |
-| **Tilemap Editor** | Draggable grid with sprite tile painting, object placement, and save/load |
-| **Visual Script Nodes** | Event-driven node graph for game logic — key input, movement, animation, branching |
-| **Blueprint Scripts** | Reusable script assets with per-instance parameters, attachable to objects and scenes |
-| **Local AI Assistant** | Offline LLM (llama.cpp) that knows your node catalog — ask how to set things up, or have it generate node graphs and insert them into a blueprint |
-| **Collision System** | Pre-baked world-space collision with adaptive spatial grid, wall slide, barycentric floor height, and gravity |
-| **OAM Sprites** | 8-directional animated sprites with LOD, running alongside 3D meshes |
-| **MIDI Sound Engine** | DMA FIFO audio with SF2/DLS instruments, ARM ASM mixer, pitch bend, vibrato, and per-instance tuning |
-| **SFX System** | Import WAV samples with waveform editor, trim, amplify, and one-shot playback via script nodes |
-| **Delta Time** | Decouple game speed from framerate — consistent gameplay at any FPS |
-| **Animated Skybox** | Panoramic sky with smooth scrolling and optional frame animation |
-| **One-Click Build** | Package a PS Vita `.vpk` directly from the editor |
-| **Blender-style Tools** | G to grab, S to scale, X/Y/Z axis constraints with visual guides |
-| **Mode 7 Floor** | HBlank affine floor rendering for non-mesh projects |
-
----
-
 ## Getting Started
 
 ### Prerequisites
