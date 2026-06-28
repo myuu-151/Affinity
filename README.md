@@ -79,7 +79,19 @@ psv_runtime/build/affinity_psv.vpk
 
 Install it on a real Vita with **VitaShell**, or run it in **Vita3K**.
 
-> **Vita3K:** install `libshacccg.suprx` into `ur0:/data/` (Vita3K can't compile shaders without it). The runtime already builds with the Vita3K-support flags enabled.
+### Run in Vita3K
+
+The runtime is already built with the Vita3K-support flags enabled, so the `.vpk` runs in the emulator — **but Vita3K needs the PS Vita shader compiler library `libshacccg.suprx` first**, or every game (including this one) fails to render with a shader/`gxm` error.
+
+1. **Get `libshacccg.suprx`.** It's a Sony firmware module, so it isn't redistributable — dump it from your **own** PS Vita. The easiest way is the **[FAGDec](https://github.com/CelesteBlue-dev/PSVita-RE-tools)** tool (or Vita3K's own **[Shader compiler guide](https://vita3k.org/quickstart.html)**), which extracts `libshacccg.suprx` from your console's firmware.
+2. **Drop it here** (create the `data` folder if it doesn't exist):
+
+   ```
+   C:\Users\<you>\AppData\Roaming\Vita3K\Vita3K\ur0\data\libshacccg.suprx
+   ```
+
+   > On Vita3K this `ur0:/data/` lives under `%APPDATA%\Vita3K\Vita3K\ur0\data\`. The file is ~1.7 MB. Restart Vita3K after adding it.
+3. **Install the game** — in Vita3K, drag `affinity_psv.vpk` onto the window (or **File ▸ Install .vpk**), then launch it from the app list.
 
 <details>
 <summary><b>Manual build</b></summary>
