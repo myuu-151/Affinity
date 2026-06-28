@@ -902,6 +902,7 @@ enum class VsNodeType : int {
     AiQuickAttack,   // action (enemy AI): per-frame melee reflex — dash-in Quick Attack + jump-evade
     EnemyAiTiming,   // action (enemy AI): set the remaining decision/timing knobs (de-aggro, strafe leg, etc.)
     AiClips,         // action (enemy AI): set the enemy anim clip indices (name-resolved -> drift-proof)
+    PlayCameraAnim,  // action: take over the camera + play the player's keyframed cutscene path
     COUNT
 };
 
@@ -1313,6 +1314,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Ai Quick Attack", 0xFFAA5566, 1, 1, 12, 0, {"Dash Range", "Trigger /1000", "Dash Speed", "Contact Range", "Damage", "Cooldown", "Jump Vel x100", "Jump % (unused)", "Jump Cooldown", "Whoosh SFX", "Trail Alpha", "Trail Length"}, {}, {} },
     { "AI Timing",       0xFF55AA66, 1, 1, 10, 0, {"De-Aggro Frames", "Strafe Leg", "Yaw Ease x100", "Tap Windup", "Fire Recover", "Dodge Frames", "Dodge Cooldown", "Dodge Speed (-1=player)", "Dodge Ramp (-1=player)", "Dodge Falloff (-1=player)"}, {}, {} },
     { "AI Clips",        0xFF55AA66, 1, 1, 16, 0, {"Move", "Idle", "Strafe L", "Strafe LD", "Strafe LDFW", "Strafe R", "Strafe RD", "Strafe RDFW", "Backpeddle", "Block", "Charge Pose", "Launch", "Lunge", "Skid", "Jump", "Jump Fall"}, {}, {} },
+    { "Play Camera Anim",0xFF3355AA, 1, 1, 4, 0, {"Anim (int)", "Freeze Player (int)", "Loop (int)", "Hold Last (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1618,6 +1620,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::QuickAttackStarted: desc = "Gate: passes on the SINGLE frame a Quick Attack dash ACTUALLY begins (after the cooldown/energy/charge gate, unlike the raw key press). Drive On Update -> Quick Attack Started -> Play Sound for a swing-whoosh that never fires on a blocked press."; break;
     case VsNodeType::AiQuickAttack: desc = "Enemy AI melee reflex (run every frame from the enemy's On Update, AFTER its movement/state nodes so it can override pose + position). Two behaviours: (1) Quick Attack — when the player is within Dash Range and off cooldown, it rolls Trigger /1000 per frame to dash in at Dash Speed, dealing Damage on contact within Contact Range (a connect ends the dash; only a whiff plays the skid). (2) Jump-evade — ALWAYS hops a player Quick Attack dashing straight at it (Jump Vel x100 launch, same gravity arc as the player), even mid-charge. Auto-suppressed during the beam-clash struggle. Jump % is reserved (unused) for a future chance-gated evade. Tunables match the old #defines: Dash Range 70, Trigger 12/1000, Dash Speed 34, Contact Range 14, Damage 8, Cooldown 90, Jump Vel 150 (=1.5), Jump Cooldown 40. Whoosh SFX = the dash sound instance (proximity-gained), default 17 ('quicksweep'). Trail Alpha (afterimage peak alpha, default 96; 0 = off) and Trail Length (white ghost count 0-6, default 6)."; break;
     case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
+    case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player unfreezes. Anim = which path (0 for now). Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::ChargeUp: desc = "Hold-to-charge. While this runs each frame, it REVEALS the player's hidden attached effect models (the charge aura) and adds Energy/Frame to the Energy meter (clamped to max). The aura auto-hides the frame you stop running it. Drive it from On Key Held(Circle) so holding the button charges; release hides the aura and stops filling. Give the aura mesh 'Hidden (effect)' so it stays invisible until charging."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
@@ -5938,6 +5941,11 @@ static float Scaled(float base);   // UI-scale helper, defined with the UI globa
 // Mode 4 object properties panel and the 3D tab's Placed glTF panel, so the
 // nav layer is editable wherever the NPC is being worked on. Returns true if
 // anything changed (caller sets sProjectDirty).
+// Forward-declared (defined later) so the rigged-mesh properties panel can house the
+// camera-slot presets editor directly under the Collision section, instead of a
+// separate floating window.
+static void DrawCameraPresetsChunk(FloorSprite& sp);
+static void DrawCameraAnimChunk(FloorSprite& sp);
 static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset>& rigAssets)
 {
     bool dirty = false;
@@ -6135,6 +6143,12 @@ static bool  s3DGrabIsRailPoint = false; // current G grab moves a rail point, n
 static float s3DRailGrabOrig[3] = { 0, 0, 0 };          // primary point's pre-grab pos
 static std::vector<s3DGrabSnap> s3DRailGrabOrigs;       // all selected points' pre-grab pos (idx = point index)
 static bool  s3DRailVertexSnap  = false; // while grabbing a rail point, snap it to the mesh vertex nearest the cursor
+// Camera-keyframe authoring (player's cameraAnim) — mirrors the rail-point selection/grab.
+static int   s3DSelCamKf        = -1;   // PRIMARY selected camera-keyframe index (-1 = none)
+static std::vector<int> s3DSelCamKfs;   // ALL selected cam-kf indices (shift-click multi-select)
+static bool  s3DGrabIsCamKf     = false; // current G grab moves a camera-keyframe eye
+static int   s3DCamKfSprite     = -1;   // player sprite whose cam-kf eyes are being grabbed
+static std::vector<s3DGrabSnap> s3DCamKfGrabOrigs;  // pre-grab eye positions (idx = keyframe index)
 static bool  s3DWireframe       = false; // 3D tab: render placed meshes as wireframe
 static bool  s3DHideVertexColors = false; // 3D tab: stop showing painted vertex colors (view only; export unaffected)
 
@@ -6172,6 +6186,15 @@ static float s3DSunShadow = 0.6f;                  // shadow darkness 0..1
 static bool  s3DSunGizmo = false;                  // draw the sun direction line this frame
 static float s3DSunLx = 0.0f, s3DSunLy = 1.0f, s3DSunLz = 0.0f; // computed unit dir toward the sun
 static bool  s3DSelRailContains(int pt) { for (int p : s3DSelRailPts) if (p == pt) return true; return false; }
+static bool  s3DSelCamKfContains(int k) { for (int p : s3DSelCamKfs) if (p == k) return true; return false; }
+// The player's currently-edited camera animation (clamps the selection index).
+// Returns nullptr if the player has no animations. Each player can hold several
+// named paths (intro/victory/...); the Play Camera Anim node picks one by index.
+static CameraAnim* curCamAnim(FloorSprite& sp) {
+    if (sp.cameraAnims.empty()) return nullptr;
+    if (sp.cameraAnimSel < 0 || sp.cameraAnimSel >= (int)sp.cameraAnims.size()) sp.cameraAnimSel = 0;
+    return &sp.cameraAnims[sp.cameraAnimSel];
+}
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
 // own anchor on the chosen axis. Stored angles feed sp.rotation /
@@ -7793,6 +7816,13 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                     cs.name.empty() ? "Camera" : cs.name.c_str(),
                     cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
+        // Keyframed camera animations (cutscenes): one camAnim= per path, then its camKf= keyframes.
+        for (const auto& anim : sp.cameraAnims) {
+            fprintf(f, "camAnim=%s|%d\n", anim.name[0] ? anim.name : "Anim", anim.fps);
+            for (const auto& kf : anim.keyframes)
+                fprintf(f, "camKf=%d|%.4f|%.4f|%.4f|%.6f|%.6f|%.4f|%d|%.4f\n",
+                        kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed);
+        }
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -8318,6 +8348,13 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
                         cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
+            // Keyframed camera animations (cutscenes), per scene sprite.
+            for (const auto& anim : sp.cameraAnims) {
+                fprintf(f, "msCamAnim=%s|%d\n", anim.name[0] ? anim.name : "Anim", anim.fps);
+                for (const auto& kf : anim.keyframes)
+                    fprintf(f, "msCamKf=%d|%.4f|%.4f|%.4f|%.6f|%.6f|%.4f|%d|%.4f\n",
+                            kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed);
+            }
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -9022,6 +9059,7 @@ static bool LoadProject(const std::string& path)
                     sp.subSpriteCount = 0;
                     sp.subModelCount = 0;
                     sp.cameraSlots.clear();   // following camSlot= lines refill it (no stale carryover on reload)
+                    sp.cameraAnims.clear(); sp.cameraAnimSel = 0;   // camAnim=/camKf= refill
                     sp.selected = false;
                     // Reset rig link; a following spriteRig= line restores it.
                     sp.riggedMeshIdx = -1;
@@ -9058,6 +9096,21 @@ static bool LoadProject(const std::string& path)
                     CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
                     cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly; cs.lockAware = (cla != 0.0f); cs.hOffset = cho; cs.depthOffset = cdo; cs.lookPitch = clp; cs.vOffset = cvo;
                     sSprites[sSpriteCount - 1].cameraSlots.push_back(cs);
+                }
+            }
+            else if (strncmp(line, "camAnim=", 8) == 0 && sSpriteCount > 0) {
+                CameraAnim anim; char nm[32] = {}; int fps = 30;
+                if (sscanf(line + 8, "%31[^|]|%d", nm, &fps) >= 1) { snprintf(anim.name, sizeof(anim.name), "%s", nm[0] ? nm : "Anim"); anim.fps = fps; }
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                if ((int)sp2.cameraAnims.size() < FloorSprite::kMaxCameraAnims) sp2.cameraAnims.push_back(anim);
+            }
+            else if (strncmp(line, "camKf=", 6) == 0 && sSpriteCount > 0) {
+                CameraKeyframe kf; int fr = 0, ip = 2; float spd = 1.0f;
+                if (sscanf(line + 6, "%d|%f|%f|%f|%f|%f|%f|%d|%f", &fr, &kf.ex, &kf.ey, &kf.ez, &kf.yaw, &kf.pitch, &kf.fov, &ip, &spd) >= 4) {
+                    kf.frame = fr; kf.interp = ip; kf.speed = (spd > 0.0001f) ? spd : 1.0f;
+                    FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                    if (!sp2.cameraAnims.empty() && (int)sp2.cameraAnims.back().keyframes.size() < FloorSprite::kMaxCameraKeyframes)
+                        sp2.cameraAnims.back().keyframes.push_back(kf);   // append to the current animation
                 }
             }
             else if (strncmp(line, "subSprite=", 10) == 0 && sSpriteCount > 0) {
@@ -10404,6 +10457,27 @@ static bool LoadProject(const std::string& path)
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
                         cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp; cs.lookYaw = cly; cs.lockAware = (cla != 0.0f); cs.hOffset = cho; cs.depthOffset = cdo; cs.lookPitch = clp; cs.vOffset = cvo;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
+                    }
+                }
+            }
+            else if (strncmp(line, "msCamAnim=", 10) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    CameraAnim anim; char nm[32] = {}; int fps = 30;
+                    if (sscanf(line + 10, "%31[^|]|%d", nm, &fps) >= 1) { snprintf(anim.name, sizeof(anim.name), "%s", nm[0] ? nm : "Anim"); anim.fps = fps; }
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    if ((int)sp2.cameraAnims.size() < FloorSprite::kMaxCameraAnims) sp2.cameraAnims.push_back(anim);
+                }
+            }
+            else if (strncmp(line, "msCamKf=", 8) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    CameraKeyframe kf; int fr = 0, ip = 2; float spd = 1.0f;
+                    if (sscanf(line + 8, "%d|%f|%f|%f|%f|%f|%f|%d|%f", &fr, &kf.ex, &kf.ey, &kf.ez, &kf.yaw, &kf.pitch, &kf.fov, &ip, &spd) >= 4) {
+                        kf.frame = fr; kf.interp = ip; kf.speed = (spd > 0.0001f) ? spd : 1.0f;
+                        FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                        if (!sp2.cameraAnims.empty() && (int)sp2.cameraAnims.back().keyframes.size() < FloorSprite::kMaxCameraKeyframes)
+                            sp2.cameraAnims.back().keyframes.push_back(kf);
                     }
                 }
             }
@@ -11835,6 +11909,59 @@ static void DrawColorBox(ImDrawList* dl, ImVec2 pos, ImVec2 size, uint32_t col, 
 // Helper: get scaled size based on current UI scale
 static float Scaled(float base) { return base * sUiScale; }
 
+// Sample a keyframed camera path at a (fractional) frame -> eye position + look
+// forward vector + fov. Catmull-Rom on the eye path; angle-unwrapped, smoothstep-eased
+// yaw/pitch (never Catmull-Rom on angles — risks ±PI overshoot). The per-keyframe
+// `interp` is the mode used LEAVING that keyframe. This is mirrored line-for-line by
+// afn_cam_anim_sample() in the PSV runtime, so both stay in sync. Returns false if empty.
+static bool SampleCameraAnim(const std::vector<CameraKeyframe>& kf, float frame,
+                             float eye[3], float fwd[3], float* fovOut)
+{
+    int n = (int)kf.size();
+    if (n == 0) return false;
+    auto fwdFrom = [](float yaw, float pitch, float* o){ float cp = cosf(pitch); o[0]=sinf(yaw)*cp; o[1]=sinf(pitch); o[2]=cosf(yaw)*cp; };
+    if (n == 1) { eye[0]=kf[0].ex; eye[1]=kf[0].ey; eye[2]=kf[0].ez; fwdFrom(kf[0].yaw,kf[0].pitch,fwd); if (fovOut) *fovOut=kf[0].fov; return true; }
+    int i = 0;
+    if (frame <= (float)kf[0].frame) i = 0;
+    else if (frame >= (float)kf[n-1].frame) i = n-2;
+    else { while (i < n-2 && frame >= (float)kf[i+1].frame) i++; }
+    const CameraKeyframe& A = kf[i]; const CameraKeyframe& B = kf[i+1];
+    float span = (float)(B.frame - A.frame);
+    float t = span > 0.0f ? (frame - (float)A.frame) / span : 0.0f;
+    if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+    int mode = A.interp;
+    if (mode == 0) t = 0.0f;                                   // Constant: hold A
+    float te = (mode == 2) ? t*t*(3.0f-2.0f*t) : t;           // smoothstep for Smooth
+    if (mode == 2) {                                          // Catmull-Rom eye
+        const CameraKeyframe& P0 = kf[i>0 ? i-1 : i];
+        const CameraKeyframe& P3 = kf[(i+2)<n ? i+2 : i+1];
+        float u = te, u2 = u*u, u3 = u2*u;
+        auto cr = [&](float a,float b,float c,float d){ return 0.5f*((2.0f*b) + (-a+c)*u + (2.0f*a-5.0f*b+4.0f*c-d)*u2 + (-a+3.0f*b-3.0f*c+d)*u3); };
+        eye[0]=cr(P0.ex,A.ex,B.ex,P3.ex); eye[1]=cr(P0.ey,A.ey,B.ey,P3.ey); eye[2]=cr(P0.ez,A.ez,B.ez,P3.ez);
+    } else {
+        eye[0]=A.ex+(B.ex-A.ex)*te; eye[1]=A.ey+(B.ey-A.ey)*te; eye[2]=A.ez+(B.ez-A.ez)*te;
+    }
+    float dyaw = B.yaw - A.yaw;
+    while (dyaw >  3.14159265f) dyaw -= 6.28318531f;
+    while (dyaw < -3.14159265f) dyaw += 6.28318531f;
+    fwdFrom(A.yaw + dyaw*te, A.pitch + (B.pitch-A.pitch)*te, fwd);
+    if (fovOut) *fovOut = A.fov + (B.fov-A.fov)*te;
+    return true;
+}
+
+// Per-keyframe speed: playback-rate multiplier of the SEGMENT starting at the
+// keyframe `frame` currently sits in (mirrors the runtime afn_cam_seg_speed).
+static float CameraSegSpeed(const std::vector<CameraKeyframe>& kf, float frame) {
+    int n = (int)kf.size();
+    if (n < 1) return 1.0f;
+    int i = 0;
+    if (frame <= (float)kf[0].frame) i = 0;
+    else if (frame >= (float)kf[n-1].frame) i = (n >= 2) ? n-2 : 0;
+    else { while (i < n-2 && frame >= (float)kf[i+1].frame) i++; }
+    float s = kf[i].speed;
+    return (s > 0.0001f) ? s : 1.0f;
+}
+
 // ---- 3D View rendering ----
 static void Draw3DView(ImVec2 pos, ImVec2 size)
 {
@@ -12370,6 +12497,47 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 s3DSelRailPts.clear();   // clicked empty space → drop rail selection
             }
         }
+        // ---- Camera-keyframe pick (player cameraAnim) ----
+        // Same GL-matching projection as the rail pick. Runs only if no rail was hit;
+        // suppresses the mesh pick (sets railHit) on a hit. Shift toggles multi-select.
+        if (!railHit) {
+            CameraAnim* pca = nullptr;
+            for (int i = 0; i < sSpriteCount; i++)
+                if (sSprites[i].type == SpriteType::Player) { CameraAnim* c = curCamAnim(sSprites[i]); if (c && !c->keyframes.empty()) { pca = c; break; } }
+            if (pca) {
+                std::vector<CameraKeyframe>& kfs = pca->keyframes;
+                float pcx = s3DTargetX + s3DOrbitDist*cosf(s3DOrbitPitch)*sinf(s3DOrbitYaw);
+                float pcy = s3DTargetY + s3DOrbitDist*sinf(s3DOrbitPitch);
+                float pcz = s3DTargetZ + s3DOrbitDist*cosf(s3DOrbitPitch)*cosf(s3DOrbitYaw);
+                float pfx = s3DTargetX-pcx, pfy = s3DTargetY-pcy, pfz = s3DTargetZ-pcz;
+                { float l=sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if(l>0){pfx/=l;pfy/=l;pfz/=l;} }
+                float psx=-pfz, psy=0.0f, psz=pfx; { float l=sqrtf(psx*psx+psz*psz); if(l>0){psx/=l;psz/=l;} }
+                float pux=psy*pfz-psz*pfy, puy=psz*pfx-psx*pfz, puz=psx*pfy-psy*pfx;
+                float pTanH=tanf(45.0f*3.14159265f/360.0f), pAsp=vpAreaW/size.y;
+                auto camToScreen = [&](float wx,float wy,float wz,float& sx_,float& sy_)->bool{
+                    float ex=wx-pcx,ey=wy-pcy,ez=wz-pcz; float vz=-(pfx*ex+pfy*ey+pfz*ez); if(vz>=-0.01f)return false;
+                    float vx=psx*ex+psy*ey+psz*ez, vy=pux*ex+puy*ey+puz*ez;
+                    sx_=pos.x+((vx/(-vz))/(pTanH*pAsp)+1.0f)*0.5f*vpAreaW;
+                    sy_=pos.y+(1.0f-(vy/(-vz))/pTanH)*0.5f*size.y; return true;
+                };
+                float bestPx = 22.0f; int bestK = -1;
+                for (int k = 0; k < (int)kfs.size(); k++) {
+                    float sx_, sy_; if (!camToScreen(kfs[k].ex, kfs[k].ey, kfs[k].ez, sx_, sy_)) continue;
+                    float d = sqrtf((sx_-mpos.x)*(sx_-mpos.x) + (sy_-mpos.y)*(sy_-mpos.y));
+                    if (d < bestPx) { bestPx = d; bestK = k; }
+                }
+                if (bestK >= 0) {
+                    railHit = true; s3DSelCamKf = bestK;
+                    if (railPickShift) {
+                        auto it = std::find(s3DSelCamKfs.begin(), s3DSelCamKfs.end(), bestK);
+                        if (it != s3DSelCamKfs.end()) { s3DSelCamKfs.erase(it); s3DSelCamKf = s3DSelCamKfs.empty()?-1:s3DSelCamKfs.back(); }
+                        else s3DSelCamKfs.push_back(bestK);
+                    } else { s3DSelCamKfs.clear(); s3DSelCamKfs.push_back(bestK); }
+                } else if (!railPickShift) {
+                    s3DSelCamKf = -1; s3DSelCamKfs.clear();
+                }
+            }
+        }
         for (int i = 0; !railHit && i < sSpriteCount; i++)
         {
             const FloorSprite& sp = sSprites[i];
@@ -12583,7 +12751,27 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
         {
             // A selected rail point takes priority: G grabs just that point.
-            if (s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
+            CameraAnim* grabCa = nullptr;
+            if (s3DSelCamKf >= 0) {
+                s3DCamKfSprite = -1;
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].type == SpriteType::Player) { CameraAnim* c = curCamAnim(sSprites[i]); if (c && !c->keyframes.empty()) { s3DCamKfSprite = i; grabCa = c; break; } }
+            }
+            if (grabCa)
+            {
+                // Grab the selected camera keyframe eye(s) of the player's current animation.
+                std::vector<CameraKeyframe>& kfs = grabCa->keyframes;
+                s3DCamKfGrabOrigs.clear();
+                if (s3DSelCamKfs.empty()) s3DSelCamKfs.push_back(s3DSelCamKf);
+                for (int k : s3DSelCamKfs) {
+                    if (k < 0 || k >= (int)kfs.size()) continue;
+                    const CameraKeyframe& kf = kfs[k];
+                    s3DCamKfGrabOrigs.push_back({ k, kf.ex, kf.ey, kf.ez });
+                }
+                s3DGrabIsCamKf = true; s3DGrabIsRailPoint = false;
+                s3DGrabMode = true; s3DGrabAxis = 0; s3DGrabStartMouse = mpos;
+            }
+            else if (s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
                 && s3DSelRailPoint >= 0 && s3DSelRailPoint < sSprites[s3DSelRailSprite].railPointCount)
             {
                 const auto& p = sSprites[s3DSelRailSprite].railPath[s3DSelRailPoint];
@@ -12701,7 +12889,14 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 return nullptr;
             };
             auto resetAnchor = [&]() {
-                if (s3DGrabIsRailPoint) {
+                if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
+                    CameraAnim* ca = curCamAnim(sSprites[s3DCamKfSprite]);
+                    if (ca) for (auto& g : s3DCamKfGrabOrigs)
+                        if (g.idx >= 0 && g.idx < (int)ca->keyframes.size()) {
+                            auto& kf = ca->keyframes[g.idx];
+                            kf.ex = g.x; kf.ey = g.y; kf.ez = g.z;
+                        }
+                } else if (s3DGrabIsRailPoint) {
                     for (auto& g : s3DRailGrabOrigs)
                         if (g.idx >= 0 && g.idx < sSprites[s3DSelRailSprite].railPointCount) {
                             auto& rp = sSprites[s3DSelRailSprite].railPath[g.idx];
@@ -12749,7 +12944,14 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 dx = ( dpx * right_x + dpy * fwd_x) * scale;
                 dz = ( dpx * right_z + dpy * fwd_z) * scale;
             }
-            if (s3DGrabIsRailPoint) {
+            if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
+                CameraAnim* ca = curCamAnim(sSprites[s3DCamKfSprite]);
+                if (ca) for (auto& g : s3DCamKfGrabOrigs)
+                    if (g.idx >= 0 && g.idx < (int)ca->keyframes.size()) {
+                        auto& kf = ca->keyframes[g.idx];
+                        kf.ex = g.x + dx; kf.ey = g.y + dy; kf.ez = g.z + dz;
+                    }
+            } else if (s3DGrabIsRailPoint) {
                 (void)railPt;
                 for (auto& g : s3DRailGrabOrigs)
                     if (g.idx >= 0 && g.idx < sSprites[s3DSelRailSprite].railPointCount) {
@@ -12817,10 +13019,18 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 s3DGrabMode = false;
                 s3DGrabIsRailPoint = false;
+                s3DGrabIsCamKf = false;
                 sProjectDirty = true;
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                if (auto* p = railPt()) {
+                if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
+                    CameraAnim* ca = curCamAnim(sSprites[s3DCamKfSprite]);
+                    if (ca) for (auto& g : s3DCamKfGrabOrigs)
+                        if (g.idx >= 0 && g.idx < (int)ca->keyframes.size()) {
+                            auto& kf = ca->keyframes[g.idx];
+                            kf.ex = g.x; kf.ey = g.y; kf.ez = g.z;
+                        }
+                } else if (auto* p = railPt()) {
                     p->x = s3DRailGrabOrig[0]; p->y = s3DRailGrabOrig[1]; p->z = s3DRailGrabOrig[2];
                 } else {
                     for (auto& g : s3DGrabOrig) {
@@ -12831,6 +13041,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 s3DGrabMode = false;
                 s3DGrabIsRailPoint = false;
+                s3DGrabIsCamKf = false;
             }
         }
     }
@@ -12949,6 +13160,13 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             rdl->PopClipRect();
         }
     }
+
+    // ---- Camera animation path overlay (player's keyframed cutscene path) ----
+    // NOTE: the path lines, keyframe dots and look gizmos are drawn in GL inside
+    // Render3DViewport() (search "Camera animation path"), NOT here. The 3D scene
+    // composites OVER ImGui (main.cpp: Render3DViewport runs after the ImGui draw
+    // data), so an ImGui draw-list overlay in the viewport is painted over and
+    // hidden — the same reason the vertex-paint brush ring is drawn in GL.
 
     // Overlay info text
     ImGui::SetCursorPos(ImVec2(8, 8));
@@ -13800,6 +14018,13 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                     sProjectDirty = true;
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset the box to wrap the model's bind-pose bounds.");
+            }
+            // ---- Player camera presets — housed directly under Collision (was a
+            // separate floating window over the 3D view). The live gizmo still renders
+            // in this tab's GL viewport.
+            if (sp.type == SpriteType::Player) {
+                DrawCameraPresetsChunk(sp);
+                DrawCameraAnimChunk(sp);   // keyframed cutscene camera path
             }
         }
 
@@ -15839,6 +16064,147 @@ static void DrawCameraPresetsChunk(FloorSprite& sp)
         ncs.name = nm;
         sp.cameraSlots.push_back(ncs);
         sProjectDirty = true;
+    }
+}
+
+// Keyframed camera path (cutscene) editor — Player only. Capture the viewport camera
+// pose into keyframes, edit them here + in the 3D viewport, preview the fly-through.
+static void DrawCameraAnimChunk(FloorSprite& sp)
+{
+    static bool  previewing = false, playing = false;
+    static float previewFrame = 0.0f;
+    static float savedYaw = 0, savedPitch = 0, savedDist = 0, savedTX = 0, savedTY = 0, savedTZ = 0;
+    static bool  savedValid = false;
+
+    // Capture the current viewport orbit camera as eye + look direction.
+    auto captureEyeLook = [&](float& ex, float& ey, float& ez, float& yaw, float& pitch) {
+        float cp = cosf(s3DOrbitPitch), spch = sinf(s3DOrbitPitch);
+        ex = s3DTargetX + s3DOrbitDist * cp * sinf(s3DOrbitYaw);
+        ey = s3DTargetY + s3DOrbitDist * spch;
+        ez = s3DTargetZ + s3DOrbitDist * cp * cosf(s3DOrbitYaw);
+        float fx = s3DTargetX - ex, fy = s3DTargetY - ey, fz = s3DTargetZ - ez;
+        float fl = sqrtf(fx*fx + fy*fy + fz*fz); if (fl < 1e-4f) fl = 1.0f; fx/=fl; fy/=fl; fz/=fl;
+        yaw = atan2f(fx, fz); pitch = asinf(fy);
+    };
+
+    auto restorePreview = [&]() { if (savedValid) { s3DOrbitYaw=savedYaw; s3DOrbitPitch=savedPitch; s3DOrbitDist=savedDist; s3DTargetX=savedTX; s3DTargetY=savedTY; s3DTargetZ=savedTZ; savedValid=false; } previewing = false; playing = false; };
+
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.65f, 0.95f, 0.8f, 1.0f), "Camera Animations (cutscenes)");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keyframed camera paths for cutscenes (e.g. intro / victory / failure). Add or pick an animation below, then aim the viewport and 'Add Keyframe from Camera'.\nEdit eye points in the 3D viewport (right-click pick, G move). Play one in-game with the Play Camera Anim node (its Anim pin = the index shown).");
+
+    // ---- Animation list: add / select / rename / delete ----
+    if (ImGui::Button("+ Add Animation##caa")) {
+        if ((int)sp.cameraAnims.size() < FloorSprite::kMaxCameraAnims) {
+            CameraAnim a; snprintf(a.name, sizeof(a.name), "Anim %d", (int)sp.cameraAnims.size());
+            sp.cameraAnims.push_back(a);
+            sp.cameraAnimSel = (int)sp.cameraAnims.size() - 1;
+            s3DSelCamKf = -1; s3DSelCamKfs.clear(); restorePreview();
+            sProjectDirty = true;
+        }
+    }
+    if (sp.cameraAnims.empty()) { ImGui::TextDisabled("(no animations — add one)"); return; }
+    if (sp.cameraAnimSel < 0 || sp.cameraAnimSel >= (int)sp.cameraAnims.size()) sp.cameraAnimSel = 0;
+    {
+        int n = (int)sp.cameraAnims.size();
+        char names[FloorSprite::kMaxCameraAnims][40]; const char* items[FloorSprite::kMaxCameraAnims];
+        for (int i = 0; i < n; i++) { snprintf(names[i], sizeof(names[i]), "%d: %s", i, sp.cameraAnims[i].name); items[i] = names[i]; }
+        if (ImGui::Combo("Animation##caasel", &sp.cameraAnimSel, items, n)) { s3DSelCamKf = -1; s3DSelCamKfs.clear(); restorePreview(); }
+    }
+    CameraAnim& ca = sp.cameraAnims[sp.cameraAnimSel];
+    { char nb[32]; snprintf(nb, sizeof(nb), "%s", ca.name); if (ImGui::InputText("Name##caaname", nb, sizeof(nb))) { snprintf(ca.name, sizeof(ca.name), "%s", nb); sProjectDirty = true; } }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Delete##caadel")) {
+        sp.cameraAnims.erase(sp.cameraAnims.begin() + sp.cameraAnimSel);
+        if (sp.cameraAnimSel >= (int)sp.cameraAnims.size()) sp.cameraAnimSel = (int)sp.cameraAnims.size() - 1;
+        s3DSelCamKf = -1; s3DSelCamKfs.clear(); restorePreview();
+        sProjectDirty = true;
+        return;   // `ca` is now dangling
+    }
+
+    if (ImGui::Button("+ Add Keyframe from Camera##cak")) {
+        if ((int)ca.keyframes.size() < FloorSprite::kMaxCameraKeyframes) {
+            CameraKeyframe kf;
+            captureEyeLook(kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch);
+            kf.frame = ca.keyframes.empty() ? 0 : ca.keyframes.back().frame + ca.fps;  // +1s
+            ca.keyframes.push_back(kf);
+            sProjectDirty = true;
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Capture the current viewport camera position + angle as a new keyframe (1 second after the last).");
+
+    if (ImGui::DragInt("Path FPS##cakfps", &ca.fps, 1, 1, 60)) { if (ca.fps < 1) ca.fps = 1; if (ca.fps > 60) ca.fps = 60; sProjectDirty = true; }
+    if (ca.keyframes.empty()) { ImGui::TextDisabled("(no keyframes yet — aim + add)"); return; }
+
+    int lastFrame = ca.keyframes.back().frame;
+    for (int ci = 0; ci < (int)ca.keyframes.size(); ci++) {
+        CameraKeyframe& kf = ca.keyframes[ci];
+        ImGui::PushID(41000 + ci);
+        char hdr[64]; snprintf(hdr, sizeof(hdr), "Keyframe %d  (f%d)###cak", ci, kf.frame);
+        bool sel = (ci == s3DSelCamKf);
+        if (sel) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
+        bool open = ImGui::TreeNode(hdr);
+        if (sel) ImGui::PopStyleColor();
+        if (open) {
+            if (ImGui::DragInt("Frame##cakf", &kf.frame, 1, 0, 1000000)) { if (kf.frame < 0) kf.frame = 0; sProjectDirty = true; }
+            if (ImGui::DragFloat3("Eye##cake", &kf.ex, 0.5f)) sProjectDirty = true;
+            if (ImGui::SliderAngle("Yaw##caky", &kf.yaw, -180.0f, 180.0f)) sProjectDirty = true;
+            if (ImGui::SliderAngle("Pitch##cakp", &kf.pitch, -89.0f, 89.0f)) sProjectDirty = true;
+            const char* im[] = { "Constant", "Linear", "Smooth" };
+            if (ImGui::Combo("Interp##caki", &kf.interp, im, 3)) sProjectDirty = true;
+            bool isLast = (ci == (int)ca.keyframes.size() - 1);
+            ImGui::BeginDisabled(isLast);
+            if (ImGui::DragFloat("Speed##caksp", &kf.speed, 0.01f, 0.05f, 10.0f, "%.2fx")) { if (kf.speed < 0.05f) kf.speed = 0.05f; sProjectDirty = true; }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(isLast
+                ? "Speed has no effect on the last keyframe (no segment follows it)."
+                : "Playback-rate multiplier for the leg from this keyframe to the next.\n2.0 = twice as fast, 0.5 = half speed. Frame numbers are unchanged.");
+            if (ImGui::SmallButton("Set from Camera##cakset")) { captureEyeLook(kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch); sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-snapshot this keyframe from the current viewport camera.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove##cakrm")) {
+                ca.keyframes.erase(ca.keyframes.begin() + ci);
+                s3DSelCamKf = -1; s3DSelCamKfs.clear();
+                sProjectDirty = true;
+                ImGui::TreePop(); ImGui::PopID();
+                break;
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+
+    // ---- Preview fly-through (drives the viewport orbit camera) ----
+    ImGui::Separator();
+    bool toggled = ImGui::Checkbox("Preview path##cakprev", &previewing);
+    if (toggled) {
+        if (previewing) {
+            savedYaw = s3DOrbitYaw; savedPitch = s3DOrbitPitch; savedDist = s3DOrbitDist;
+            savedTX = s3DTargetX; savedTY = s3DTargetY; savedTZ = s3DTargetZ; savedValid = true;
+            previewFrame = 0.0f; playing = false;
+        } else if (savedValid) {
+            s3DOrbitYaw = savedYaw; s3DOrbitPitch = savedPitch; s3DOrbitDist = savedDist;
+            s3DTargetX = savedTX; s3DTargetY = savedTY; s3DTargetZ = savedTZ; savedValid = false;
+        }
+    }
+    if (previewing) {
+        ImGui::SameLine();
+        if (ImGui::Button(playing ? "Pause##cakpl" : "Play##cakpl")) playing = !playing;
+        int sf = (int)previewFrame;
+        if (ImGui::SliderInt("Frame##cakscrub", &sf, 0, lastFrame > 0 ? lastFrame : 1)) { previewFrame = (float)sf; playing = false; }
+        if (playing) {
+            previewFrame += ImGui::GetIO().DeltaTime * (float)ca.fps * CameraSegSpeed(ca.keyframes, previewFrame);
+            if (previewFrame >= (float)lastFrame) { previewFrame = (float)lastFrame; playing = false; }
+        }
+        // Drive the orbit camera so the viewport shows the sampled shot (eye + look fwd).
+        float eye[3], fwd[3], fov;
+        if (SampleCameraAnim(ca.keyframes, previewFrame, eye, fwd, &fov)) {
+            float D = s3DOrbitDist; if (D < 1.0f) D = 50.0f;
+            s3DTargetX = eye[0] + fwd[0]*D; s3DTargetY = eye[1] + fwd[1]*D; s3DTargetZ = eye[2] + fwd[2]*D;
+            s3DOrbitYaw = atan2f(-fwd[0], -fwd[2]);
+            float p = asinf(-fwd[1]); if (p > 1.5f) p = 1.5f; if (p < -1.5f) p = -1.5f;
+            s3DOrbitPitch = p;
+        }
     }
 }
 
@@ -18671,6 +19037,13 @@ void FrameTick(float dt)
                     if (fsCam.type != SpriteType::Player) continue;
                     for (const auto& cs : fsCam.cameraSlots)
                         exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset });
+                    // Keyframed camera animations (cutscenes) — copy as-is (eye stays world space).
+                    for (const auto& anim : fsCam.cameraAnims) {
+                        AfnCameraExport::CamAnimExp ea; snprintf(ea.name, sizeof(ea.name), "%s", anim.name); ea.fps = anim.fps;
+                        for (const auto& kf : anim.keyframes)
+                            ea.keyframes.push_back({ kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed });
+                        exportCam.camAnims.push_back(ea);
+                    }
                     break;
                 }
                 exportCam.walkSpeed = sCamObj.walkSpeed;
@@ -22234,20 +22607,9 @@ void FrameTick(float dt)
     else if (sActiveTab == EditorTab::ThreeD)
     {
         Draw3DView(ImVec2(vp->WorkPos.x, bodyY), ImVec2(totalW, bodyH));
-        // Camera-slot editor for the selected Player, floating over the 3D view so
-        // Yaw/Pitch/Distance/Height can be dialed in while watching the live gizmo
-        // (the gizmo renders here, in this tab's GL viewport).
-        if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
-            && sSprites[sSelectedSprite].type == SpriteType::Player)
-        {
-            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + totalW - Scaled(290), bodyY + Scaled(12)), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(Scaled(278), 0.0f), ImGuiCond_FirstUseEver);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.11f, 0.11f, 0.14f, 0.94f));
-            if (ImGui::Begin("Camera Slots##meshtabcam"))
-                DrawCameraPresetsChunk(sSprites[sSelectedSprite]);
-            ImGui::End();
-            ImGui::PopStyleColor();
-        }
+        // Camera-slot presets are now housed INLINE under the rigged-mesh Collision
+        // section (the DrawCameraPresetsChunk call in the mesh properties panel), not a
+        // floating window. The live gizmo still renders here in the tab's GL viewport.
     }
     else if (sActiveTab == EditorTab::Events)
     {
@@ -25247,6 +25609,24 @@ void FrameTick(float dt)
                         "    //   Attack reflex uses afn_aic_lunge/skid/jump/jumpfall.\n"
                         "    // Codegen: an UNWIRED pin emits resolveClipName(\"<name>\", <fallback>) at export;\n"
                         "    //   a wired Skeletal Animation node overrides that clip.");
+                    break;
+                }
+                case VsNodeType::PlayCameraAnim: {
+                    editorCode = "// Take over the camera + play the player's keyframed cutscene path";
+                    setActionFunc(infoNode, "_play_camera_anim",
+                        "#ifdef AFN_HAS_CAM_ANIM\n"
+                        "    afn_cam_cut_anim = <Anim>;   // which path (0-based, matches the Meshes-tab list)\n"
+                        "    afn_cam_cut_active = 1; afn_cam_cut_timer = 0; afn_cam_cut_frame = 0; afn_cam_cut_fframe = 0.0f; afn_cam_cut_done = 0;\n"
+                        "    afn_cam_cut_loop = <Loop>; afn_cam_cut_hold = <Hold Last>;\n"
+                        "    if (<Freeze Player>) afn_player_frozen = 1;\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c camera block) ---\n"
+                        "    // Each frame while active: advance the float playhead afn_cam_cut_fframe by\n"
+                        "    //   (AFN_CAM_ANIM_STEP/AFN_CAM_ANIM_SPEED) * afn_cam_seg_speed(frame)\n"
+                        "    // so each keyframe's per-segment Speed multiplier warps that leg's playback\n"
+                        "    // rate; then sample the Catmull-Rom eye + smoothstep yaw/pitch and feed it\n"
+                        "    // straight into look_at, bypassing the orbit. At the end: loop, or hold the\n"
+                        "    // last frame, or clear active (+ unfreeze) so the follow-cam eases back.");
                     break;
                 }
                 case VsNodeType::IsBlastIncoming: {
@@ -36773,8 +37153,9 @@ void Render3DViewport()
                 }
                 glPopMatrix();
                 // Attached-model preview: draw each SubModel on its bone (or the object
-                // origin), in WORLD space, ON TOP of the rig so it's always visible while
-                // authoring. Scale is world units (independent of the object's scale).
+                // origin), in WORLD space, depth-tested against the rig so it's correctly
+                // occluded (no stenciling through). Scale is world units (independent of
+                // the object's scale).
                 for (int smi = 0; smi < fs.subModelCount; smi++) {
                     const auto& sm = fs.subModels[smi];
                     if (sm.editorHide || sm.meshIdx < 0 || sm.meshIdx >= (int)sMeshAssets.size()) continue;
@@ -36797,9 +37178,11 @@ void Render3DViewport()
                     glRotatef(rigYawDeg + sm.yaw, 0, 1, 0);
                     glScalef(sm.scale, sm.scale, sm.scale);
                     glDisable(GL_CULL_FACE); glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
-                    glDisable(GL_DEPTH_TEST);   // always-visible editor preview
+                    glEnable(GL_DEPTH_TEST);    // occlude against the rig — no stenciling through the model
                     bool soft = am.useSoftAlpha;
-                    if (soft) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+                    // A soft-alpha aura is depth-TESTED (so the model hides it) but doesn't
+                    // WRITE depth, so the translucent layer can't self-occlude / hide what's behind it.
+                    if (soft) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
                     bool aTex = am.textured && am.glTexID != 0;
                     if (aTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, am.glTexID); glColor4f(1, 1, 1, 1); }
                     else { glDisable(GL_TEXTURE_2D); glColor4f(0.8f, 0.9f, 1.0f, 0.85f); }
@@ -36811,8 +37194,7 @@ void Render3DViewport()
                         for (int k = 0; k < 6; k++) { const MeshVertex& v = *qv[k]; if (aTex) glTexCoord2f(v.u, 1.0f - v.v); glVertex3f(v.px, v.py, v.pz); }
                     }
                     glEnd();
-                    glEnable(GL_DEPTH_TEST);
-                    if (soft) glDisable(GL_BLEND);
+                    if (soft) { glDisable(GL_BLEND); glDepthMask(GL_TRUE); }
                     glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0);
                     glPopMatrix();
                 }
@@ -36888,6 +37270,80 @@ void Render3DViewport()
         glBegin(GL_POINTS);
         glVertex3f(sx, sy + h + 2.0f, sz);
         glEnd();
+    }
+
+    // ---- Camera animation path (player's keyframed cutscene path) ----
+    // Drawn here (AFTER all sprite/mesh geometry, alongside the camera-slot gizmos)
+    // and in GL — the 3D scene composites OVER ImGui, so a draw-list overlay would be
+    // hidden, and drawing before the meshes would let them paint over the path. Depth
+    // test off => the gizmo always reads. Keyframe eyes are in editor-world coords
+    // (same space as sprites), so they go straight into glVertex3f: a smooth
+    // Catmull-Rom eye path, a 3D crosshair per keyframe (gold = selected), and a
+    // short red look-gizmo showing each keyframe's aim direction.
+    {
+        CameraAnim* pca = nullptr;
+        for (int i = 0; i < sSpriteCount; i++)
+            if (sSprites[i].type == SpriteType::Player) {
+                CameraAnim* c = curCamAnim(sSprites[i]);
+                if (c && !c->keyframes.empty()) { pca = c; break; }
+            }
+        if (pca) {
+            std::vector<CameraKeyframe>& kfs = pca->keyframes;
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_TEXTURE_2D);
+
+            // Smooth eye path: sample the same Catmull-Rom curve the runtime flies.
+            if (kfs.size() >= 2) {
+                int f0 = kfs.front().frame, f1 = kfs.back().frame;
+                if (f1 < f0) f1 = f0;
+                int steps = (f1 - f0) > 0 ? (f1 - f0) * 2 : 1;   // ~2 samples/frame
+                if (steps > 600) steps = 600;
+                glColor4f(0.45f, 1.0f, 0.78f, 0.95f);            // teal path
+                glLineWidth(2.5f);
+                glBegin(GL_LINE_STRIP);
+                for (int s = 0; s <= steps; s++) {
+                    float fr = f0 + (f1 - f0) * (float)s / (float)steps;
+                    float eye[3], fwd[3], fov;
+                    if (SampleCameraAnim(kfs, fr, eye, fwd, &fov))
+                        glVertex3f(eye[0], eye[1], eye[2]);
+                }
+                glEnd();
+            }
+
+            // Per-keyframe look gizmos (eye -> eye + look*24).
+            glLineWidth(1.5f);
+            glColor4f(1.0f, 0.45f, 0.45f, 0.9f);
+            glBegin(GL_LINES);
+            for (const CameraKeyframe& kf : kfs) {
+                float cp = cosf(kf.pitch);
+                glVertex3f(kf.ex, kf.ey, kf.ez);
+                glVertex3f(kf.ex + sinf(kf.yaw)*cp*24.0f,
+                           kf.ey + sinf(kf.pitch)*24.0f,
+                           kf.ez + cosf(kf.yaw)*cp*24.0f);
+            }
+            glEnd();
+
+            // Keyframe markers: 3D crosshairs (selected = gold, else teal).
+            glLineWidth(2.5f);
+            glBegin(GL_LINES);
+            for (int k = 0; k < (int)kfs.size(); k++) {
+                const CameraKeyframe& kf = kfs[k];
+                bool sel = (k == s3DSelCamKf) || s3DSelCamKfContains(k);
+                if (sel) glColor4f(1.0f, 0.85f, 0.25f, 1.0f);
+                else     glColor4f(0.45f, 1.0f, 0.78f, 1.0f);
+                float r = sel ? 12.0f : 8.0f;
+                glVertex3f(kf.ex - r, kf.ey, kf.ez); glVertex3f(kf.ex + r, kf.ey, kf.ez);
+                glVertex3f(kf.ex, kf.ey - r, kf.ez); glVertex3f(kf.ex, kf.ey + r, kf.ez);
+                glVertex3f(kf.ex, kf.ey, kf.ez - r); glVertex3f(kf.ex, kf.ey, kf.ez + r);
+            }
+            glEnd();
+
+            glLineWidth(1.0f);
+            glEnable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+        }
     }
 
     // ---- Camera slot helpers (selected Player) ----

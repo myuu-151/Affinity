@@ -1365,6 +1365,77 @@ static float rail_nearest(int rail, float px, float pz, float* outD2) {
 }
 #endif // AFN_HAS_RAIL_PATH
 
+#ifdef AFN_HAS_CAM_ANIM
+// Sample the keyframed camera path (cutscene) at a fractional frame -> eye + look
+// forward vector. Catmull-Rom eye; angle-unwrapped, smoothstep-eased yaw/pitch. This
+// is the line-for-line mirror of the editor's SampleCameraAnim() so the in-game
+// cutscene matches the Meshes-tab preview. Per-keyframe `interp` is the mode LEAVING it.
+static void afn_cam_anim_sample(int anim, float frame, float* ex, float* ey, float* ez,
+                                float* fx, float* fy, float* fz) {
+    if (anim < 0 || anim >= AFN_CAM_ANIM_COUNT) anim = 0;
+    const AfnCamKf* K = &afn_cam_anim_kf[afn_cam_anim_start[anim]];   // this animation's keyframes
+    int n = afn_cam_anim_count[anim];
+    if (n < 1) { *ex=*ey=*ez=0.0f; *fx=0.0f; *fy=0.0f; *fz=1.0f; return; }
+    if (n < 2) {
+        const AfnCamKf* A = &K[0];
+        float cp = cosf(A->pitch);
+        *ex = A->ex; *ey = A->ey; *ez = A->ez;
+        *fx = sinf(A->yaw)*cp; *fy = sinf(A->pitch); *fz = cosf(A->yaw)*cp;
+        return;
+    }
+    int i = 0;
+    if (frame <= (float)K[0].frame) i = 0;
+    else if (frame >= (float)K[n-1].frame) i = n-2;
+    else { while (i < n-2 && frame >= (float)K[i+1].frame) i++; }
+    const AfnCamKf* A = &K[i];
+    const AfnCamKf* B = &K[i+1];
+    float span = (float)(B->frame - A->frame);
+    float t = span > 0.0f ? (frame - (float)A->frame)/span : 0.0f;
+    if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+    int mode = A->interp;
+    if (mode == 0) t = 0.0f;
+    float te = (mode == 2) ? t*t*(3.0f-2.0f*t) : t;
+    if (mode == 2) {
+        const AfnCamKf* P0 = &K[i>0 ? i-1 : i];
+        const AfnCamKf* P3 = &K[(i+2)<n ? i+2 : i+1];
+        float u = te, u2 = u*u, u3 = u2*u;
+        #define AFN_CRV(a,b,c,d) (0.5f*((2.0f*(b)) + (-(a)+(c))*u + (2.0f*(a)-5.0f*(b)+4.0f*(c)-(d))*u2 + (-(a)+3.0f*(b)-3.0f*(c)+(d))*u3))
+        *ex = AFN_CRV(P0->ex,A->ex,B->ex,P3->ex); *ey = AFN_CRV(P0->ey,A->ey,B->ey,P3->ey); *ez = AFN_CRV(P0->ez,A->ez,B->ez,P3->ez);
+        #undef AFN_CRV
+    } else {
+        *ex = A->ex + (B->ex-A->ex)*te; *ey = A->ey + (B->ey-A->ey)*te; *ez = A->ez + (B->ez-A->ez)*te;
+    }
+    float dyaw = B->yaw - A->yaw;
+    while (dyaw >  3.14159265f) dyaw -= 6.28318531f;
+    while (dyaw < -3.14159265f) dyaw += 6.28318531f;
+    float yaw = A->yaw + dyaw*te;
+    float pit = A->pitch + (B->pitch - A->pitch)*te;
+    float cp = cosf(pit);
+    *fx = sinf(yaw)*cp; *fy = sinf(pit); *fz = cosf(yaw)*cp;
+}
+// Per-keyframe speed: the playback-rate multiplier of the SEGMENT starting at the
+// keyframe that `frame` currently sits in (returns 1.0 outside a valid segment).
+static float afn_cam_seg_speed(int anim, float frame) {
+    if (anim < 0 || anim >= AFN_CAM_ANIM_COUNT) anim = 0;
+    const AfnCamKf* K = &afn_cam_anim_kf[afn_cam_anim_start[anim]];
+    int n = afn_cam_anim_count[anim];
+    if (n < 1) return 1.0f;
+    int i = 0;
+    if (frame <= (float)K[0].frame) i = 0;
+    else if (frame >= (float)K[n-1].frame) i = (n >= 2) ? n-2 : 0;
+    else { while (i < n-2 && frame >= (float)K[i+1].frame) i++; }
+    float s = K[i].speed;
+    return (s > 0.0001f) ? s : 1.0f;
+}
+// Cutscene playback state (Play Camera Anim node sets active + params; the camera
+// block ticks the path while active and feeds the eye/look straight into look_at).
+// afn_cam_cut_fframe is the fractional playhead (frames); per-segment speed warps
+// how fast it advances. afn_cam_cut_frame mirrors it as an int for legacy resets.
+int afn_cam_cut_active = 0, afn_cam_cut_anim = 0, afn_cam_cut_timer = 0, afn_cam_cut_frame = 0;
+int afn_cam_cut_loop = 0, afn_cam_cut_hold = 0, afn_cam_cut_done = 0;
+float afn_cam_cut_fframe = 0.0f;
+#endif // AFN_HAS_CAM_ANIM
+
 // ---------------------------------------------------------------------------
 // Input + node-script variable layer. Behaviour is node-driven, per the engine
 // convention: the emitted script (psv_script.h) sets these each frame and the
@@ -4522,6 +4593,37 @@ int main(void)
         // V Offset: slide the eye AND look point up/down in world Y by the same amount,
         // so the whole shot translates vertically without tilting the aim.
         float ofy = s_camVOffset;
+#ifdef AFN_HAS_CAM_ANIM
+        // Cutscene takeover (Play Camera Anim node): advance the path playhead, then
+        // feed the scripted eye + look straight into look_at, bypassing the orbit.
+        if (afn_cam_cut_active) {
+            int an = afn_cam_cut_anim; if (an < 0 || an >= AFN_CAM_ANIM_COUNT) an = 0;
+            int cnt = afn_cam_anim_count[an];
+            int last = cnt > 0 ? afn_cam_anim_kf[afn_cam_anim_start[an] + cnt - 1].frame : 0;
+            // Base frames-per-tick from the path fps (step/speed), warped by the
+            // current segment's per-keyframe speed multiplier.
+            float fpt = (afn_cam_anim_speed[an] > 0)
+                        ? ((float)afn_cam_anim_step[an] / (float)afn_cam_anim_speed[an]) : 1.0f;
+            fpt *= afn_cam_seg_speed(an, afn_cam_cut_fframe);
+            afn_cam_cut_fframe += fpt;
+            if (afn_cam_cut_fframe >= (float)last) {
+                if (afn_cam_cut_loop) { while (last > 0 && afn_cam_cut_fframe >= (float)last) afn_cam_cut_fframe -= (float)last; }
+                else { afn_cam_cut_fframe = (float)last; afn_cam_cut_done = 1;
+                       if (!afn_cam_cut_hold) { afn_cam_cut_active = 0; afn_player_frozen = 0; } }
+            }
+            afn_cam_cut_frame = (int)afn_cam_cut_fframe;
+            float cex, cey, cez, cfx, cfy, cfz;
+            afn_cam_anim_sample(an, afn_cam_cut_fframe, &cex, &cey, &cez, &cfx, &cfy, &cfz);
+            ex = cex; ey = cey; ez = cez;
+            fwdVX = cfx; fwdVY = cfy; fwdVZ = cfz;
+            ofx = ofy = ofz = 0.0f;
+            // Seed the eased follow-cam statics so when the cut ENDS the camera glides
+            // back from the cutscene's final pose instead of snapping.
+            s_camEyeX = cex; s_camEyeZ = cez;
+            if (effDist > 1.0f) { float ph = (cey - targetY) / effDist; if (ph < -1.0f) ph = -1.0f; if (ph > 1.0f) ph = 1.0f; s_camPosPitch = asinf(ph); }
+            g_camEyeX = ex; g_camEyeZ = ez;
+        }
+#endif
         look_at(view, ex+ofx, ey+ofy, ez+ofz, ex+ofx + fwdVX, ey+ofy + fwdVY, ez+ofz + fwdVZ, 0.0f, 1.0f, 0.0f);
 #ifdef AFN_HAS_HUD
         memcpy(s_hudSceneView, view, sizeof(s_hudSceneView));   // for world-anchored HUD elements

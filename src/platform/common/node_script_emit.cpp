@@ -1230,6 +1230,18 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << "; afn_aic_jump = " << clip(14,"jump",31) << "; afn_aic_jumpfall = " << clip(15,"jump_fall",32) << ";\n";
                 break;
             }
+            case AfnScriptNodeType::PlayCameraAnim: {
+                // Take over the camera + play the keyframed cutscene path. The runtime
+                // ticks + samples it while active and feeds look_at directly.
+                auto* an = findDataIn(a->id, 0); auto* fz = findDataIn(a->id, 1); auto* lp = findDataIn(a->id, 2); auto* hd = findDataIn(a->id, 3);
+                f << "#ifdef AFN_HAS_CAM_ANIM\n";
+                f << "    afn_cam_cut_anim = " << (an ? resolveInt(an) : 0) << ";\n";
+                f << "    afn_cam_cut_active = 1; afn_cam_cut_timer = 0; afn_cam_cut_frame = 0; afn_cam_cut_fframe = 0.0f; afn_cam_cut_done = 0;\n";
+                f << "    afn_cam_cut_loop = " << (lp ? resolveInt(lp) : 0) << "; afn_cam_cut_hold = " << (hd ? resolveInt(hd) : 0) << ";\n";
+                if (fz) f << "    if (" << resolveInt(fz) << ") afn_player_frozen = 1;\n";
+                f << "#endif\n";
+                break;
+            }
             case AfnScriptNodeType::AiBlockBegin:  f << "    afn_ai_block_begin();\n"; break;
             case AfnScriptNodeType::AiBlockStep:   f << "    afn_ai_block_step();\n"; break;
             case AfnScriptNodeType::SetBlock: {

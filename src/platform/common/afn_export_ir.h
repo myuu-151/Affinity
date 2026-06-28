@@ -161,6 +161,12 @@ struct AfnCameraExport
     // Runtime slot 0 = the scene default above; these are slots 1..N.
     struct CamSlot { float angle = 0.0f, horizon = 60.0f, distance = 0.0f, height = 14.0f, orbitPitch = 0.0f, lookYaw = 0.0f, lockAware = 0.0f, hOffset = 0.0f, depthOffset = 0.0f, lookPitch = 0.0f, vOffset = 0.0f; };
     std::vector<CamSlot> camSlots;
+    // Keyframed camera animations (cutscenes) from the player. eye in WORLD/rail space;
+    // yaw/pitch = look direction (radians); interp 0=Const,1=Lin,2=Smooth. The Play
+    // Camera Anim node selects one path by index (Anim pin).
+    struct CamKf { int frame = 0; float ex = 0, ey = 0, ez = 0, yaw = 0, pitch = 0, fov = 45; int interp = 2; float speed = 1.0f; };
+    struct CamAnimExp { char name[32] = "Anim"; int fps = 30; std::vector<CamKf> keyframes; };
+    std::vector<CamAnimExp> camAnims;
 };
 
 // Mesh asset for GBA export
@@ -560,6 +566,7 @@ enum class AfnScriptNodeType : int {
     AiQuickAttack,   // action (enemy AI): per-frame melee reflex — dash-in Quick Attack + jump-evade
     EnemyAiTiming,   // action (enemy AI): set the remaining decision/timing knobs (de-aggro, strafe leg, etc.)
     AiClips,         // action (enemy AI): set the enemy anim clip indices (name-resolved -> drift-proof)
+    PlayCameraAnim,  // action: take over the camera + play the player's keyframed cutscene path
     COUNT
 };
 

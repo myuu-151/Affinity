@@ -359,6 +359,39 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
     // SetCamera node will drive it once script_glue is ported.
     f << "static int afn_active_camera = 0;\n";
 
+    // ---- Camera animation (keyframed cutscene path, played by the Play Camera Anim
+    // node). eye -> world space (WX/WY), same as the player/rail; yaw/pitch are look-
+    // direction radians (unaffected by the position scale/offset). speed/step derive
+    // playback fps like the HUD anim layers.
+    {
+        int nanim = (int)camera.camAnims.size();
+        int total = 0; for (const auto& a : camera.camAnims) total += (int)a.keyframes.size();
+        if (nanim > 0 && total > 0) {
+            f << "#define AFN_HAS_CAM_ANIM 1\n";
+            f << "#define AFN_CAM_ANIM_COUNT " << nanim << "\n";   // the Play Camera Anim node's Anim pin indexes this
+            f << "typedef struct { short frame; float ex,ey,ez,yaw,pitch,fov; unsigned char interp; float speed; } AfnCamKf;\n";
+            f << "static const AfnCamKf afn_cam_anim_kf[" << total << "] = {\n";
+            for (const auto& a : camera.camAnims)
+                for (const auto& kf : a.keyframes)
+                    f << "    { " << kf.frame << ", " << Flt(WX(kf.ex)) << ", " << Flt(WY(kf.ey)) << ", " << Flt(WX(kf.ez))
+                      << ", " << Flt(kf.yaw) << ", " << Flt(kf.pitch) << ", " << Flt(kf.fov) << ", " << (kf.interp & 0xFF)
+                      << ", " << Flt(kf.speed > 0.0001f ? kf.speed : 1.0f) << " },\n";
+            f << "};\n";
+            f << "static const int afn_cam_anim_start[" << nanim << "] = {";
+            { int run = 0; for (const auto& a : camera.camAnims) { f << run << ","; run += (int)a.keyframes.size(); } }
+            f << "};\n";
+            f << "static const int afn_cam_anim_count[" << nanim << "] = {";
+            for (const auto& a : camera.camAnims) f << (int)a.keyframes.size() << ",";
+            f << "};\n";
+            f << "static const short afn_cam_anim_speed[" << nanim << "] = {";
+            for (const auto& a : camera.camAnims) { int fps = a.fps>0?a.fps:30; int sp=(int)((60.0f/fps)+0.5f); if(sp<1)sp=1; f << sp << ","; }
+            f << "};\n";
+            f << "static const short afn_cam_anim_step[" << nanim << "] = {";
+            for (const auto& a : camera.camAnims) { int fps = a.fps>0?a.fps:30; int st=(int)((fps/60.0f)+0.5f); if(st<1)st=1; f << st << ","; }
+            f << "};\n";
+        }
+    }
+
     f.close();
     return true;
 }

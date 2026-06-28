@@ -409,6 +409,32 @@ struct CameraSlot
                                   // moves vertically without tilting. + = up. PSV.
 };
 
+// One shot in a keyframed camera path (cutscene). Snapshotted from the editor's
+// 3D viewport camera ("Add Keyframe from Camera"), then editable in the viewport.
+// eye = world position; yaw/pitch = the LOOK direction in radians, stored as
+// atan2(f.x,f.z)/asin(f.y) from f = normalize(target - eye) so they stay valid
+// after the eye point is moved (decoupled from any orbit target).
+struct CameraKeyframe
+{
+    int   frame  = 0;            // timeline position (ticks @ the path's authored fps)
+    float ex = 0.0f, ey = 0.0f, ez = 0.0f;  // eye world position (editor units)
+    float yaw    = 0.0f;         // look yaw, radians
+    float pitch  = 0.0f;         // look pitch, radians
+    float fov    = 45.0f;        // field of view, degrees (reserved; 0 = scene default)
+    int   interp = 2;            // 0 = Constant, 1 = Linear, 2 = Smooth (Catmull-Rom eye + eased angles)
+    float speed  = 1.0f;         // playback-rate multiplier for the SEGMENT starting at this keyframe
+                                 // (2 = that leg plays twice as fast; unused on the last keyframe)
+};
+
+// A named keyframed camera path (one cutscene, e.g. "intro" / "victory" / "failure").
+// A player can hold several; the Play Camera Anim node picks one by index (Anim pin).
+struct CameraAnim
+{
+    char name[32] = "Camera Anim";
+    int  fps = 30;                       // playback fps (speed/step derivation like HUD layers)
+    std::vector<CameraKeyframe> keyframes;
+};
+
 struct FloorSprite
 {
     float x = 0.0f;          // world X
@@ -532,6 +558,14 @@ struct FloorSprite
     // (type == Player). Runtime slot 0 = scene default; these are slots 1..N a
     // SetCamera node switches to. See CameraSlot.
     std::vector<CameraSlot> cameraSlots;
+
+    // Keyframed camera path for cutscenes. Player object only. Authored in the
+    // Meshes tab (Add Keyframe from Camera) + editable in the 3D viewport; played
+    // by the Play Camera Anim node. One path per player (v1).
+    static constexpr int kMaxCameraKeyframes = 64;
+    static constexpr int kMaxCameraAnims = 16;
+    std::vector<CameraAnim> cameraAnims;   // named cutscene paths (intro/victory/...)
+    int cameraAnimSel = 0;                 // editor: which animation is being edited (not exported)
 };
 
 static constexpr int kMaxFloorSprites = 256; // supports up to 256 objects per scene, nearest 32 rendered via OAM
