@@ -98,6 +98,11 @@ cmake .. && make
 
 ## Local AI Assistant
 
+<details>
+<summary><b>Click to expand</b> — offline LLM assistant: setup, models, instruction vs. reasoning, and GPU acceleration.</summary>
+
+<br>
+
 A built-in chat assistant (**View ▸ Assistant**) powered by a **local** LLM via embedded [llama.cpp](https://github.com/ggml-org/llama.cpp) — it runs entirely on your machine, **no internet, no API keys, nothing leaves your PC**.
 
 It's grounded in the editor's actual node catalog (every node, its type, and its pins), so it can:
@@ -163,6 +168,8 @@ Vulkan works on any modern GPU (NVIDIA/AMD/Intel) and needs no CUDA Toolkit — 
    ```
 
 To confirm offload is working, load a model with **GPU 100%** set and watch dedicated VRAM rise in Task Manager (or `nvidia-smi`) — a 14B should put ~10–11 GB on the card.
+
+</details>
 
 ---
 
