@@ -1271,14 +1271,16 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // ribbon (jitter, bow, camera-facing strip) is pure-code in afn_beam_render.
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
                 auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
-                auto* d6=findDataIn(a->id,6);
+                auto* d6=findDataIn(a->id,6); auto* d7=findDataIn(a->id,7); auto* d8=findDataIn(a->id,8);
                 f << "    afn_beam_range = " << (d0?resolveInt(d0):80) << ";\n";
                 f << "    afn_beam_width = " << (d1?resolveInt(d1):40) << " / 100.0f;\n";
-                f << "    afn_beam_bow = " << (d2?resolveInt(d2):1400) << " / 100.0f;\n";   // arch height off the floor
+                f << "    afn_beam_bow = " << (d2?resolveInt(d2):3500) << " / 100.0f;\n";   // arch height off the floor
                 f << "    afn_beam_jitter = " << (d3?resolveInt(d3):250) << " / 100.0f;\n";
                 f << "    afn_beam_segs = " << (d4?resolveInt(d4):14) << ";\n";
                 f << "    afn_beam_life = " << (d5?resolveInt(d5):12) << ";\n";
                 f << "    afn_beam_bounces = " << (d6?resolveInt(d6):3) << ";   // arches across the floor\n";
+                f << "    afn_beam_decay = " << (d7?resolveInt(d7):78) << " / 100.0f;   // each bounce lower\n";
+                f << "    afn_beam_pulse = " << (d8?resolveInt(d8):18) << " / 1000.0f;  // bounce-ball travel speed\n";
                 f << "    afn_beam_spawn = 1;   // cast THIS frame\n";
                 break;
             }

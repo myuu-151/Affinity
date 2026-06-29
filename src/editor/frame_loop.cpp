@@ -1324,7 +1324,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "AI Dodge Clips",  0xFF55AA66, 1, 1, 6, 0, {"Chg Dodge L", "Chg Dodge R", "Dodge L", "Dodge R", "Dodge FW", "Dodge BWD"}, {}, {} },
     { "Lock Player Functions", 0xFF4488CC, 1, 1, 0, 0, {}, {}, {} },
     { "Spawn Particles",  0xFFCC6644, 1, 1, 7, 0, {"Sprite", "Count", "Speed x100", "Spread 0-100", "Life (frames)", "Size x100", "Gravity x1000"}, {}, {} },
-    { "Lightning Beam",   0xFF66AAFF, 1, 1, 7, 0, {"Range", "Width x100", "Arch x100", "Jitter x100", "Segments", "Life (frames)", "Bounces"}, {}, {} },
+    { "Lightning Beam",   0xFF66AAFF, 1, 1, 9, 0, {"Range", "Width x100", "Arch x100", "Jitter x100", "Segments", "Life (frames)", "Bounces", "Decay x100", "Pulse x1000"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1633,7 +1633,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
     case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Player Clip = wire a Skeletal Animation node to force the player rig onto that clip (e.g. a 'winner' pose) for the WHOLE cutscene — it overrides the idle/move state machine until the path ends, then normal animation resumes; leave unwired for no override. Cry Sound = wire a Sound Instance index to play once at the cutscene start (e.g. a Pokémon cry); unwired = silent. Snap Player (1) = teleport the player to the scene-START pose the camera path was authored around (and clear lock-on/tank facing) at cut start, so a cutscene triggered MID-FIGHT (e.g. the victory cam) frames the player correctly instead of animating at the authored spot while the player is elsewhere; leave 0/unwired if the player is already in place (e.g. the intro). Snap X / Snap Z (int, world units) = an explicit snap spot instead of the scene spawn (wire BOTH; Y stays at spawn ground); leave unwired to snap to spawn. Face Angle (int, degrees 0-359) = the facing to hold for the whole cut instead of the scene-default heading; leave unwired for the default. Snap X/Z + Face Angle only apply when Snap Player is on. Freeze Input (1) = mask ALL buttons while the path is animating so no ability/lock-on/charge/dodge/movement fires during the shot — pair with Freeze Player; it auto-releases the instant the path completes (so a Hold-Last cut's results menu still gets input); 0/unwired = input stays live. Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
-    case VsNodeType::LightningBeam: desc = "Casts a lightning bolt that BOUNCES across the floor — a connected jagged ribbon from the player's feet to the lock-on enemy's feet (or `Range` ahead if nothing's locked), made of `Bounces` arches that rise off the ground and touch back down between each, crawling forward as it crackles. Camera-facing, additive (glows on its own, no texture). Fire from On Key Pressed. Pins: Range = forward distance when unlocked; Width x100 = ribbon half-width ×100; Arch x100 = how high each bounce rises off the floor ×100; Jitter x100 = jagged crackle ×100 (0 = clean arches); Segments = base resolution (auto-raised so each arch is smooth); Life = frames the bolt lasts (flickering); Bounces = how many arches it skips across the floor. The pink impact star is a separate Spawn Particles at the target."; break;
+    case VsNodeType::LightningBeam: desc = "Casts a lightning bolt that BOUNCES across the floor — a connected jagged ribbon from the player's feet to the lock-on enemy's feet (or `Range` ahead if nothing's locked), made of `Bounces` arches that rise off the ground and touch back down between each, crawling forward as it crackles. Camera-facing, additive (glows on its own, no texture). Fire from On Key Pressed. Pins: Range = forward distance when unlocked; Width x100 = ribbon half-width ×100; Arch x100 = how high each bounce rises off the floor ×100; Jitter x100 = jagged crackle ×100 (0 = clean arches); Segments = base resolution (auto-raised so each arch is smooth); Life = frames the bolt lasts (flickering); Bounces = how many arches it skips across the floor; Decay x100 = how much SHORTER each successive bounce is (78 = each 78% of the last, like a ball losing energy; 100 = even arches); Pulse x1000 = speed of the bright 'ball' that travels the arcs to animate the bounce (0 = static glow). The bounce shape is a parabolic-arc spline (sharp at the floor contacts like a real bounce). The pink impact star is a separate Spawn Particles at the target."; break;
     case VsNodeType::SpawnParticles: desc = "Emits a burst of billboard particles at the player — a pure-code sim: each particle integrates velocity + gravity per frame, fades over its life, and faces the camera. Fire it from any event: a one-shot On Key Pressed = a burst, On Update = a continuous stream (it emits Count particles every frame it runs). Pins: Sprite = graphic frame for the billboard (-1 = solid quad); Count = particles per emit; Speed x100 = initial speed in world-units/frame ×100 (150 = 1.5); Spread 0-100 = lateral cone width (0 = straight up); Life = lifetime in frames; Size x100 = start size ×100 (shrinks to 0); Gravity x1000 = downward pull ×1000 (40 = 0.04). Spawns at the player + a small height offset (spline pathing + emitter presets come from the Effects tab)."; break;
     case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
     case VsNodeType::AiDodgeClips: desc = "Sets the enemy's DODGE animation clips — the only enemy clips the AI Clips node doesn't cover. Run once from On Update (alongside AI Clips). Two sets: the standard sidestep/roll (Dodge L/R, Dodge FW/BWD = DodgeL/DodgeR/DodgeFW/DodgeBWD) used when reacting to an incoming blast, and the charge-dodge (Chg Dodge L/R = atk_spc_chg_dodge_L/_R) it plays when it sidesteps WITHOUT dropping a charge. Like AI Clips, each UNWIRED pin is name-resolved AT EXPORT to the rig's current index so a glTF re-sort can't drift them (defaults: Chg Dodge L/R = 9/10, Dodge L/R/FW/BWD = 28/29/27/26). The L/R clip the runtime picks is facing-relative (it projects the dodge move onto the enemy's actual render facing), so wire L=DodgeL and R=DodgeR straight. Wire a pin to a Skeletal Animation node to override. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
@@ -25900,15 +25900,16 @@ void FrameTick(float dt)
                         "    afn_beam_segs   = <Segments>;\n"
                         "    afn_beam_life   = <Life (frames)>;\n"
                         "    afn_beam_bounces= <Bounces>;          // arches across the floor (touch down between each)\n"
+                        "    afn_beam_decay  = <Decay x100> / 100.0f;  // each bounce this frac of the last height\n"
+                        "    afn_beam_pulse  = <Pulse x1000> / 1000.0f;// bounce-ball travel speed (0 = static)\n"
                         "    afn_beam_spawn  = 1;                  // cast THIS frame\n"
                         "    // --- Runtime (psv main.c) ---\n"
-                        "    // afn_beam_resolve(): source = player FEET, target = lock-on enemy feet\n"
-                        "    //   (s_npcX[ai_slot]) else player + forward*range, all on the floor.\n"
-                        "    // afn_beam_render(view): centerline = bow * |sin((t*bounces - frame*0.05)*PI)|\n"
-                        "    //   lifted along path-frame UP (bouncing arches that crawl forward, touching\n"
-                        "    //   the floor between each) + jitter*rand crackle in the screen plane; ends\n"
-                        "    //   ramp to the floor (anchored). Ribbon = +/- local-tangent side*width as a\n"
-                        "    //   TRIANGLE_STRIP, additive, no texture. afn_beam_update() counts life down.");
+                        "    // afn_beam_resolve(): source = player FEET, target = lock-on enemy feet else forward.\n"
+                        "    // afn_beam_render(view): centerline = a spline of PARABOLIC bounce arcs —\n"
+                        "    //   per bounce hump = 4*lt*(1-lt) (0 at contacts, peak mid), height *= decay^arch\n"
+                        "    //   (energy loss), lifted along path-frame UP + jitter*rand crackle. A bright\n"
+                        "    //   'ball' (pp = fmod(frame*pulse,1)) travels the arcs boosting per-point alpha\n"
+                        "    //   = the bounce animation. Ribbon = +/- local-tangent side*width, additive strip.");
                     break;
                 case VsNodeType::SpawnParticles:
                     editorCode = "// Emit a burst of billboard particles (pure-code sim) at the player";
@@ -31440,7 +31441,16 @@ void FrameTick(float dt)
 
         // ---- controls (left) ----
         static int   pvpCount=10; static float pvpSpeed=1.6f, pvpSpread=0.6f, pvpLife=45.0f, pvpGrav=0.05f, pvpSize=10.0f; static bool pvpStream=true; static int pvpBurst=0;
-        static float pvbWidth=3.0f, pvbBow=42.0f, pvbJitter=12.0f; static int pvbSegs=14, pvbBounces=3;
+        static float pvbWidth=3.0f, pvbBow=90.0f, pvbJitter=10.0f, pvbDecay=0.78f, pvbPulse=0.018f; static int pvbSegs=14, pvbBounces=3;
+        static std::vector<ImVec2> sFxSpline;   // draggable control points (normalised 0..1 in the canvas)
+        static std::vector<float> sFxThick;     // per-point thickness multiplier (middle-click a dot to edit)
+        static int sFxSel = -1;                 // point whose thickness panel is open
+        static bool sFxReseed = true;           // (re)build the points from the bounce sliders
+        static float pvbFalloffS=0.0f, pvbFalloffE=0.0f;   // thickness falloff length at each end (0 = none)
+        static bool pvbSurge=false;                                    // old scrolling-arch shape (compat)
+        static float pvbTaperS=0.0f, pvbTaperE=0.0f;                    // per-side taper length (0 = none)
+        static float pvbLifeIn=0.0f, pvbLifeOut=0.0f;                   // grow-in / retract-out lifetimes (0 = none)
+        static float pvbLifeClk=0.0f; pvbLifeClk += pvbPulse;          // lifecycle clock — Pulse drives its speed
         ImGui::BeginChild("##fxctrl", ImVec2(Scaled(210), 0), true);
         if (pvKind == 0) {
             ImGui::TextColored(ImVec4(1,0.8f,0.5f,1), "Particles"); ImGui::Separator();
@@ -31458,12 +31468,27 @@ void FrameTick(float dt)
             ImGui::TextColored(ImVec4(0.6f,0.8f,1,1), "Lightning (bounces)"); ImGui::Separator();
             ImGui::PushItemWidth(Scaled(110));
             ImGui::SliderFloat("Width", &pvbWidth, 0.5f, 12.0f, "%.1f");
-            ImGui::SliderFloat("Arch", &pvbBow, 5.0f, 90.0f, "%.0f");
-            ImGui::SliderFloat("Jitter", &pvbJitter, 0.0f, 40.0f, "%.0f");
-            ImGui::SliderInt("Segments", &pvbSegs, 2, 24);
+            ImGui::SliderFloat("Arch", &pvbBow, 5.0f, 170.0f, "%.0f");
             ImGui::SliderInt("Bounces", &pvbBounces, 1, 8);
+            ImGui::SliderFloat("Decay", &pvbDecay, 0.4f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Pulse", &pvbPulse, 0.0f, 0.06f, "%.3f");
+            ImGui::SliderFloat("Jitter", &pvbJitter, 0.0f, 200.0f, "%.0f");
+            ImGui::SliderInt("Segments", &pvbSegs, 2, 24);
             ImGui::PopItemWidth();
-            ImGui::TextDisabled("Bounces = arches it\nskips across the floor.\nIt crawls forward.");
+            ImGui::Spacing();
+            ImGui::Checkbox("Surge (old shape)", &pvbSurge);
+            ImGui::PushItemWidth(Scaled(110));
+            ImGui::SliderFloat("Life in", &pvbLifeIn, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Life out", &pvbLifeOut, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Taper start", &pvbTaperS, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Taper end", &pvbTaperE, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Thick falloff S", &pvbFalloffS, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Thick falloff E", &pvbFalloffE, 0.0f, 0.5f, "%.2f");
+            ImGui::PopItemWidth();
+            ImGui::Spacing();
+            ImGui::TextDisabled("Middle-click a dot to\nset its thickness.");
+            if (ImGui::Button("Reset to bounce", ImVec2(-1,0))) { sFxReseed = true; sFxSel = -1; }
+            ImGui::TextDisabled("Drag the dots to shape\nthe spline. Double-click\n= add point, Right-click\n= remove. Arch/Bounces/\nDecay only re-seed it.");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -31494,30 +31519,103 @@ void FrameTick(float dt)
                 dl->AddCircleFilled(ImVec2(pv[i].x,pv[i].y), sz, IM_COL32(255,225,150,al));
             }
         } else {
-            // Beam 2D — a lightning bolt that BOUNCES across the floor: |sin| arches that
-            // touch a floor line between each, crawling forward (pvbAnim) + jagged crackle.
-            static float pvbAnim = 0.0f; pvbAnim += 0.05f;
-            float floorY = cp.y + cs.y*0.80f;
-            float lx = cp.x + cs.x*0.06f, rx = cp.x + cs.x*0.94f;
-            dl->AddLine(ImVec2(cp.x, floorY), ImVec2(cp.x+cs.x, floorY), IM_COL32(55,55,75,255), 1.5f);  // floor
-            int nb = pvbBounces; int N = nb*8; if (N<pvbSegs) N=pvbSegs; if (N>200) N=200;
-            ImVec2 pts[208];
-            for (int i=0;i<=N;i++){ float t=(float)i/(float)N;
-                float bx = lx + (rx-lx)*t, by = floorY;
-                float edge = t<0.5f?t:1.0f-t; float endRamp = edge*8.0f<1.0f?edge*8.0f:1.0f;
-                float arch = pvbBow * fabsf(sinf((t*nb - pvbAnim)*3.14159265f)) * endRamp;
-                by -= arch;                              // up off the floor (screen -y)
-                by += pvbJitter * sym() * endRamp;       // crackle
-                pts[i]=ImVec2(bx,by);
+            // DRAGGABLE spline: control points (normalised) define a Catmull-Rom path; the
+            // ribbon (glow + core + travelling bounce ball + crackle) follows it. Drag the
+            // dots to shape the arc exactly; double-click adds a point, right-click removes.
+            static float pvbAnim = 0.0f; pvbAnim += pvbPulse;
+            float floorY = cp.y + cs.y*0.86f;
+            dl->AddLine(ImVec2(cp.x, floorY), ImVec2(cp.x+cs.x, floorY), IM_COL32(55,55,75,255), 1.5f);
+            auto toScr=[&](ImVec2 n){ return ImVec2(cp.x+n.x*cs.x, cp.y+n.y*cs.y); };
+            auto toNrm=[&](ImVec2 s){ float x=(s.x-cp.x)/cs.x,y=(s.y-cp.y)/cs.y; x=x<0?0:x>1?1:x; y=y<0?0:y>1?1:y; return ImVec2(x,y); };
+            // (re)seed control points from the bounce sliders
+            if (sFxReseed || sFxSpline.size()<2) {
+                sFxSpline.clear(); int nb=pvbBounces; float fy=0.85f, ph=0.08f + (pvbBow/170.0f)*0.6f;
+                for(int k=0;k<=2*nb;k++){ float nx=(float)k/(2.0f*nb); float dF=1.0f; for(int j=0;j<k/2;j++) dF*=pvbDecay;
+                    float ny=(k%2==0)? fy : fy - ph*dF; sFxSpline.push_back(ImVec2(nx,ny)); }
+                sFxThick.assign(sFxSpline.size(), 1.0f); sFxReseed=false;
             }
-            dl->AddPolyline(pts, N+1, IM_COL32(110,170,255,70), 0, pvbWidth*2.4f);   // glow
-            dl->AddPolyline(pts, N+1, IM_COL32(235,245,255,255), 0, pvbWidth);        // core
-            // contact arrows at the moving touch-down points (where the arches meet the floor)
-            float phase = pvbAnim - floorf(pvbAnim);
-            for (int k=0;k<=nb;k++){ float tv=((float)k + phase)/(float)nb; if (tv<0.02f||tv>0.98f) continue;
-                float ax = lx + (rx-lx)*tv;
-                dl->AddTriangleFilled(ImVec2(ax-4,floorY+16),ImVec2(ax+4,floorY+16),ImVec2(ax,floorY+7), IM_COL32(150,150,170,255));
-                dl->AddLine(ImVec2(ax,floorY+16),ImVec2(ax,floorY+26), IM_COL32(150,150,170,255), 1.5f); }
+            if (sFxThick.size()!=sFxSpline.size()) sFxThick.assign(sFxSpline.size(), 1.0f);   // keep thickness in sync
+            // input: grab/drag nearest; double-click add; right-click remove; MIDDLE-click = thickness panel
+            ImGui::InvisibleButton("##fxcnv", cs);
+            bool hov = ImGui::IsItemHovered(); ImVec2 ms = ImGui::GetIO().MousePos;
+            static int dragIdx=-1;
+            if (ImGui::IsItemActivated()){ dragIdx=-1; float best=14.0f*14.0f;
+                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;dragIdx=i;} } }
+            if (ImGui::IsItemActive() && dragIdx>=0) sFxSpline[dragIdx]=toNrm(ms);
+            if (!ImGui::IsItemActive()) dragIdx=-1;
+            if (hov && ImGui::IsMouseDoubleClicked(0)){ ImVec2 n=toNrm(ms); float nd=1e9f;
+                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y; float d2=dx*dx+dy*dy; if(d2<nd)nd=d2; }
+                if (nd>16.0f*16.0f){ int ins=(int)sFxSpline.size(); for(int i=0;i<(int)sFxSpline.size();i++) if(sFxSpline[i].x>n.x){ins=i;break;} sFxSpline.insert(sFxSpline.begin()+ins,n); sFxThick.insert(sFxThick.begin()+ins,1.0f); } }
+            if (hov && ImGui::IsMouseClicked(1) && (int)sFxSpline.size()>2){ int ri=-1; float best=16.0f*16.0f;
+                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;ri=i;} }
+                if(ri>=0){ sFxSpline.erase(sFxSpline.begin()+ri); if(ri<(int)sFxThick.size()) sFxThick.erase(sFxThick.begin()+ri); if(sFxSel==ri) sFxSel=-1; } }
+            if (hov && ImGui::IsMouseClicked(2)){ int mi=-1; float best=16.0f*16.0f;
+                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;mi=i;} }
+                if(mi>=0){ sFxSel=mi; ImGui::OpenPopup("##ptpanel"); } }
+            if (ImGui::BeginPopup("##ptpanel")){
+                if (sFxSel>=0 && sFxSel<(int)sFxThick.size()){
+                    ImGui::Text("Point %d  thickness", sFxSel);
+                    ImGui::SetNextItemWidth(Scaled(170));
+                    ImGui::SliderFloat("##pt", &sFxThick[sFxSel], 0.0f, 4.0f, "%.2f x");
+                } else ImGui::TextDisabled("(point removed)");
+                ImGui::EndPopup();
+            }
+            // sample the centerline: SURGE = scrolling |sin| arches on the floor (compat),
+            // else the draggable Catmull-Rom spline.
+            int M=(int)sFxSpline.size();
+            auto cr=[](float p0,float p1,float p2,float p3,float t){ float t2=t*t,t3=t2*t;
+                return 0.5f*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3); };
+            const int SUB=14; static ImVec2 sm[1024]; static float thA[1024]; int si=0;
+            if (pvbSurge) {
+                static float surgeAnim=0.0f; surgeAnim += 0.05f;
+                float lx=cp.x+cs.x*0.06f, rx=cp.x+cs.x*0.94f; int nb=pvbBounces; int NS=nb*12; if(NS>900)NS=900;
+                for(int i=0;i<=NS && si<1000;i++){ float t=(float)i/(float)NS;
+                    float by=floorY - pvbBow*fabsf(sinf((t*nb - surgeAnim)*3.14159265f));
+                    thA[si]=1.0f; sm[si++]=ImVec2(lx+(rx-lx)*t, by); }
+            } else {
+                for(int seg=0; seg<M-1 && si<1000; seg++){
+                    ImVec2 p0=sFxSpline[seg>0?seg-1:0],p1=sFxSpline[seg],p2=sFxSpline[seg+1],p3=sFxSpline[seg<M-2?seg+2:M-1];
+                    float t0=sFxThick[seg], t1=sFxThick[seg+1];   // per-point thickness, lerped along the segment
+                    for(int s=0;s<SUB;s++){ float t=(float)s/SUB; thA[si]=t0+(t1-t0)*t; sm[si++]=toScr(ImVec2(cr(p0.x,p1.x,p2.x,p3.x,t),cr(p0.y,p1.y,p2.y,p3.y,t))); } }
+                thA[si]=sFxThick[M-1]; sm[si++]=toScr(sFxSpline[M-1]);
+            }
+            int total=si;
+            // crackle: jitter each interior sample perpendicular to the local tangent
+            for(int i=1;i<total-1;i++){ float jx=sm[i+1].y-sm[i-1].y, jy=-(sm[i+1].x-sm[i-1].x); float l=sqrtf(jx*jx+jy*jy); if(l<0.001f)l=0.001f;
+                float off=pvbJitter*sym(); sm[i].x+=jx/l*off; sm[i].y+=jy/l*off; }
+            // LIFECYCLE: born by growing in over "Life in" (head advances 0->1), then dies by
+            // retracting over "Life out" (tail advances 0->1) — visible window = [tail, head].
+            float L = pvbLifeClk - floorf(pvbLifeClk);
+            bool useLife = (pvbPulse>0.0001f) && (pvbLifeIn>0.001f || pvbLifeOut>0.001f);   // Pulse = speed; 0 = static full bolt
+            float head=1.0f, tail=0.0f;
+            if (useLife){
+                head = (pvbLifeIn>0.001f && L<pvbLifeIn) ? L/pvbLifeIn : 1.0f;
+                tail = (pvbLifeOut>0.001f && L>1.0f-pvbLifeOut) ? (L-(1.0f-pvbLifeOut))/pvbLifeOut : 0.0f;
+            }
+            float pp = (!useLife && pvbPulse>0.0001f) ? (pvbAnim-floorf(pvbAnim)) : -1.0f;  // bounce ball (no lifecycle)
+            for(int i=0;i<total-1;i++){ float tm=(float)i/(float)(total-1);
+                if (useLife && (tm<tail || tm>head)) continue;            // visible window
+                int al=235;
+                if (useLife){ float ed=2.0f;                              // bright at the active growing/retracting edge
+                    if (head<1.0f){ float d=head-tm; if(d>=0&&d<ed)ed=d; }
+                    if (tail>0.0f){ float d=tm-tail; if(d>=0&&d<ed)ed=d; }
+                    al = ed<0.10f ? 255 : 175;
+                } else if (pp>=0.0f){ float d=tm-pp; if(d<0)d=-d; float b=d<0.12f?(1.0f-d/0.12f):0.0f; al=(int)(120+135*b*b); if(al<120)al=120; if(al>255)al=255; }
+                float taper=1.0f;
+                if (pvbTaperS>0.001f && tm<pvbTaperS) taper = tm/pvbTaperS;                       // point at the start
+                if (pvbTaperE>0.001f && tm>1.0f-pvbTaperE){ float te=(1.0f-tm)/pvbTaperE; if(te<taper) taper=te; }  // point at the end
+                float fall=1.0f;   // smooth THICKNESS falloff at each end (distinct from the sharp taper)
+                if (pvbFalloffS>0.001f && tm<pvbFalloffS){ float f=tm/pvbFalloffS; f=f*f*(3.0f-2.0f*f); if(f<fall)fall=f; }
+                if (pvbFalloffE>0.001f && tm>1.0f-pvbFalloffE){ float f=(1.0f-tm)/pvbFalloffE; f=f*f*(3.0f-2.0f*f); if(f<fall)fall=f; }
+                float w = pvbWidth*thA[i]*taper*fall*(al>=255?1.6f:1.0f); if (w<0.15f) continue;   // * per-point thickness
+                dl->AddLine(sm[i],sm[i+1], IM_COL32(110,170,255,(int)(al*0.30f)), w*2.4f);   // glow
+                dl->AddLine(sm[i],sm[i+1], IM_COL32(235,245,255,al), w);                      // core
+            }
+            // control-point handles (spline mode only); dot size shows that point's thickness
+            if (!pvbSurge) for(int i=0;i<M;i++){ ImVec2 sp=toScr(sFxSpline[i]); bool act=(i==dragIdx||i==sFxSel);
+                float r = 3.5f + (i<(int)sFxThick.size()? sFxThick[i]*1.6f : 1.6f);
+                dl->AddCircleFilled(sp, act?r+1.5f:r, act?IM_COL32(255,230,120,255):IM_COL32(120,200,255,220));
+                dl->AddCircle(sp, act?r+1.5f:r, IM_COL32(255,255,255,210), 0, 1.5f); }
         }
         ImGui::EndChild();
         ImGui::End();

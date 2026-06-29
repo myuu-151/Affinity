@@ -359,7 +359,7 @@ float afn_part_ox = 0.0f, afn_part_oy = 14.0f, afn_part_oz = 0.0f;  // spawn off
 typedef struct {
     int   active, life, maxLife;
     float sx, sy, sz, tx, ty, tz;     // source / target (world)
-    float width, bow, jitter;
+    float width, bow, jitter, decay, pulse;
     int   segs, bounces;
     unsigned col;                     // core colour 0xAABBGGRR
 } AfnBeam;
@@ -375,6 +375,8 @@ float afn_beam_width  = 0.4f;        // ribbon half-width (world units)
 float afn_beam_bow    = 6.0f;        // fixed arc bow (perpendicular bulge)
 float afn_beam_jitter = 3.0f;        // random zigzag amount (lightning crackle)
 int   afn_beam_bounces = 3;          // arches the bolt makes across the floor (touches down between each)
+float afn_beam_decay  = 0.78f;       // each bounce reaches this fraction of the previous height (1 = even)
+float afn_beam_pulse  = 0.018f;      // animated "ball" travels along the arcs at this speed (frac/frame; 0 = none)
 unsigned afn_beam_col = 0xFFFFFFFFu; // core colour
 // Beam clash — FULLY NODE-ORCHESTRATED now (ch_controller BP). The runtime keeps
 // only the heavy primitives: the 2D struggle render (clash_render_2d), the beam
@@ -2158,7 +2160,7 @@ static void afn_beam_resolve(float px, float py, float pz, float yawDeg) {
     }
     bm->width = afn_beam_width; bm->bow = afn_beam_bow; bm->jitter = afn_beam_jitter;
     bm->segs = afn_beam_segs; bm->col = afn_beam_col;
-    bm->bounces = afn_beam_bounces;
+    bm->bounces = afn_beam_bounces; bm->decay = afn_beam_decay; bm->pulse = afn_beam_pulse;
 }
 
 // Render each bolt as a camera-facing triangle strip: walk the source->target line in
@@ -2194,29 +2196,36 @@ static void afn_beam_render(const float* view) {
         float hsx = diry*wuz - dirz*wuy, hsy = dirz*wux - dirx*wuz, hsz = dirx*wuy - diry*wux;
         float hl = sqrtf(hsx*hsx+hsy*hsy+hsz*hsz); if (hl<0.001f) hl=0.001f; hsx/=hl; hsy/=hl; hsz/=hl;
         float hux = hsy*dirz - hsz*diry, huy = hsz*dirx - hsx*dirz, huz = hsx*diry - hsy*dirx;
-        float scroll = (float)afn_frame_count * 0.05f;   // arches crawl forward across the floor
         unsigned rng = ((unsigned)afn_frame_count * 2654435761u) ^ ((unsigned)b * 0x9E3779B9u) ^ 0xA53C9E1Du;
-        // Pass 1: centerline — BOUNCING arches (|sin| humps that touch the floor between each)
-        // crawling forward, + a jagged crackle. Ends ramp to the floor so they stay anchored.
+        // Pass 1: centerline — a spline of PARABOLIC bounce arcs. Each bounce is a hump
+        // 4*lt*(1-lt) (0 at both contacts, peak at the middle, steep at the floor like a real
+        // bounce), and each successive arch is `decay`x the previous height (energy loss). The
+        // arch lifts along path-frame UP; a jagged crackle rides on top (clean at the anchors).
         float cxA[AFN_BEAM_MAX_SEGS+1], cyA[AFN_BEAM_MAX_SEGS+1], czA[AFN_BEAM_MAX_SEGS+1];
         for (int i = 0; i <= N; i++) {
             float t = (float)i / (float)N;
             float bx = bm->sx + dx*t, by = bm->sy + dy*t, bz = bm->sz + dz*t;
+            float seg = t * (float)nb; int bi = (int)seg; if (bi >= nb) bi = nb-1;
+            float lt = seg - (float)bi;                       // 0..1 within this bounce
+            float hump = 4.0f * lt * (1.0f - lt);             // parabola: 0 at contacts, 1 at peak
+            float decayF = 1.0f; for (int k=0;k<bi;k++) decayF *= bm->decay;   // each arch lower
+            float arch = bm->bow * decayF * hump;
             float edge = t < 0.5f ? t : (1.0f - t);
-            float endRamp = edge*8.0f < 1.0f ? edge*8.0f : 1.0f;   // 0 at the very ends, 1 quickly
-            float arch = bm->bow * fabsf(sinf((t * (float)nb - scroll) * 3.14159265f)) * endRamp;
+            float endRamp = edge*8.0f < 1.0f ? edge*8.0f : 1.0f;
             rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
             float r = ((float)(rng & 0xFFFF) / 32768.0f) - 1.0f;
-            float jit = bm->jitter * r * endRamp;             // crackle, clean at the ends
+            float jit = bm->jitter * r * endRamp;
             bx += hux*arch + sscx*jit; by += huy*arch + sscy*jit; bz += huz*arch + sscz*jit;
             cxA[i]=bx; cyA[i]=by; czA[i]=bz;
         }
         float lifeF = bm->maxLife > 0 ? (float)bm->life / (float)bm->maxLife : 1.0f;
-        unsigned a = (unsigned)(((bm->col >> 24) & 0xFF) * lifeF);
-        unsigned col = (bm->col & 0x00FFFFFFu) | (a << 24);
+        unsigned baseA = (unsigned)(((bm->col >> 24) & 0xFF) * lifeF);
+        unsigned rgb = bm->col & 0x00FFFFFFu;
         float hw = bm->width;
-        // Pass 2: ribbon — at each point, width along the SCREEN-perpendicular of the
-        // local centerline tangent, so the strip faces the camera while following the coil.
+        // Animated bounce "ball": a bright spot that travels the arcs (up-and-down = bounce).
+        float pp = bm->pulse > 0.0001f ? (float)fmod((double)afn_frame_count * bm->pulse, 1.0) : -1.0f;
+        // Pass 2: ribbon — width along the SCREEN-perpendicular of the LOCAL tangent (camera-
+        // facing while following the arcs). Per-point alpha boosted near the bounce ball.
         AfnVertex strip[2 * (AFN_BEAM_MAX_SEGS + 1)];
         for (int i = 0; i <= N; i++) {
             int ia = i>0?i-1:0, ib = i<N?i+1:N;
@@ -2224,6 +2233,11 @@ static void afn_beam_render(const float* view) {
             float tr = tx*Rwx+ty*Rwy+tz*Rwz, tu = tx*Uwx+ty*Uwy+tz*Uwz;
             float tl = sqrtf(tr*tr+tu*tu); if (tl<0.001f) tl=0.001f;
             float lsx = (-tu/tl)*Rwx + (tr/tl)*Uwx, lsy = (-tu/tl)*Rwy + (tr/tl)*Uwy, lsz = (-tu/tl)*Rwz + (tr/tl)*Uwz;
+            unsigned a = baseA;
+            if (pp >= 0.0f) { float t = (float)i/(float)N, d = t - pp; if (d < 0) d = -d;
+                float boost = d < 0.14f ? (1.0f - d/0.14f) : 0.0f; boost *= boost;
+                unsigned pa = baseA + (unsigned)(baseA * boost * 1.8f); a = pa > 255 ? 255 : pa; }
+            unsigned col = rgb | (a << 24);
             strip[2*i].u=0; strip[2*i].v=0; strip[2*i].color=col;
             strip[2*i].x = cxA[i]-lsx*hw; strip[2*i].y = cyA[i]-lsy*hw; strip[2*i].z = czA[i]-lsz*hw;
             strip[2*i+1].u=1; strip[2*i+1].v=0; strip[2*i+1].color=col;
