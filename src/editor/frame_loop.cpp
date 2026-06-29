@@ -172,7 +172,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events, Elements, Sound };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events, Elements, Sound, Effects };
 static EditorTab sActiveTab = EditorTab::Map;
 static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 // Live PSV compile log, streamed by the Vita build (psv_package.cpp) — shown in
@@ -906,6 +906,8 @@ enum class VsNodeType : int {
     TogglePause,     // gate: flips the global scene-pause; exec A = On Paused, B = On Unpaused
     AiDodgeClips,    // action (enemy AI): set the enemy dodge + charge-dodge clip indices (name-resolved -> drift-proof)
     LockPlayerFunctions, // action: while it runs, lock out player abilities (charge/dodge/quick-attack/focus/block) — menu nav still works (for game-over / menu screens)
+    SpawnParticles,  // action: emit a burst of billboard particles (pure-code sim) at the player
+    LightningBeam,   // action: cast a jittered ribbon (lightning/laser) from the player to the lock-on enemy / forward
     COUNT
 };
 
@@ -1321,6 +1323,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Toggle Pause",    0xFF4488CC, 1, 2, 0, 0, {}, {}, {"On Paused", "On Unpaused"} },
     { "AI Dodge Clips",  0xFF55AA66, 1, 1, 6, 0, {"Chg Dodge L", "Chg Dodge R", "Dodge L", "Dodge R", "Dodge FW", "Dodge BWD"}, {}, {} },
     { "Lock Player Functions", 0xFF4488CC, 1, 1, 0, 0, {}, {}, {} },
+    { "Spawn Particles",  0xFFCC6644, 1, 1, 7, 0, {"Sprite", "Count", "Speed x100", "Spread 0-100", "Life (frames)", "Size x100", "Gravity x1000"}, {}, {} },
+    { "Lightning Beam",   0xFF66AAFF, 1, 1, 7, 0, {"Range", "Width x100", "Arch x100", "Jitter x100", "Segments", "Life (frames)", "Bounces"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1629,6 +1633,8 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
     case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Player Clip = wire a Skeletal Animation node to force the player rig onto that clip (e.g. a 'winner' pose) for the WHOLE cutscene — it overrides the idle/move state machine until the path ends, then normal animation resumes; leave unwired for no override. Cry Sound = wire a Sound Instance index to play once at the cutscene start (e.g. a Pokémon cry); unwired = silent. Snap Player (1) = teleport the player to the scene-START pose the camera path was authored around (and clear lock-on/tank facing) at cut start, so a cutscene triggered MID-FIGHT (e.g. the victory cam) frames the player correctly instead of animating at the authored spot while the player is elsewhere; leave 0/unwired if the player is already in place (e.g. the intro). Snap X / Snap Z (int, world units) = an explicit snap spot instead of the scene spawn (wire BOTH; Y stays at spawn ground); leave unwired to snap to spawn. Face Angle (int, degrees 0-359) = the facing to hold for the whole cut instead of the scene-default heading; leave unwired for the default. Snap X/Z + Face Angle only apply when Snap Player is on. Freeze Input (1) = mask ALL buttons while the path is animating so no ability/lock-on/charge/dodge/movement fires during the shot — pair with Freeze Player; it auto-releases the instant the path completes (so a Hold-Last cut's results menu still gets input); 0/unwired = input stays live. Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
+    case VsNodeType::LightningBeam: desc = "Casts a lightning bolt that BOUNCES across the floor — a connected jagged ribbon from the player's feet to the lock-on enemy's feet (or `Range` ahead if nothing's locked), made of `Bounces` arches that rise off the ground and touch back down between each, crawling forward as it crackles. Camera-facing, additive (glows on its own, no texture). Fire from On Key Pressed. Pins: Range = forward distance when unlocked; Width x100 = ribbon half-width ×100; Arch x100 = how high each bounce rises off the floor ×100; Jitter x100 = jagged crackle ×100 (0 = clean arches); Segments = base resolution (auto-raised so each arch is smooth); Life = frames the bolt lasts (flickering); Bounces = how many arches it skips across the floor. The pink impact star is a separate Spawn Particles at the target."; break;
+    case VsNodeType::SpawnParticles: desc = "Emits a burst of billboard particles at the player — a pure-code sim: each particle integrates velocity + gravity per frame, fades over its life, and faces the camera. Fire it from any event: a one-shot On Key Pressed = a burst, On Update = a continuous stream (it emits Count particles every frame it runs). Pins: Sprite = graphic frame for the billboard (-1 = solid quad); Count = particles per emit; Speed x100 = initial speed in world-units/frame ×100 (150 = 1.5); Spread 0-100 = lateral cone width (0 = straight up); Life = lifetime in frames; Size x100 = start size ×100 (shrinks to 0); Gravity x1000 = downward pull ×1000 (40 = 0.04). Spawns at the player + a small height offset (spline pathing + emitter presets come from the Effects tab)."; break;
     case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
     case VsNodeType::AiDodgeClips: desc = "Sets the enemy's DODGE animation clips — the only enemy clips the AI Clips node doesn't cover. Run once from On Update (alongside AI Clips). Two sets: the standard sidestep/roll (Dodge L/R, Dodge FW/BWD = DodgeL/DodgeR/DodgeFW/DodgeBWD) used when reacting to an incoming blast, and the charge-dodge (Chg Dodge L/R = atk_spc_chg_dodge_L/_R) it plays when it sidesteps WITHOUT dropping a charge. Like AI Clips, each UNWIRED pin is name-resolved AT EXPORT to the rig's current index so a glTF re-sort can't drift them (defaults: Chg Dodge L/R = 9/10, Dodge L/R/FW/BWD = 28/29/27/26). The L/R clip the runtime picks is facing-relative (it projects the dodge move onto the enemy's actual render facing), so wire L=DodgeL and R=DodgeR straight. Wire a pin to a Skeletal Animation node to override. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::ChargeUp: desc = "Hold-to-charge. While this runs each frame, it REVEALS the player's hidden attached effect models (the charge aura) and adds Energy/Frame to the Energy meter (clamped to max). The aura auto-hides the frame you stop running it. Drive it from On Key Held(Circle) so holding the button charges; release hides the aura and stops filling. Give the aura mesh 'Hidden (effect)' so it stays invisible until charging."; break;
@@ -8978,7 +8984,7 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "version=%d", &ival) == 1)
                 projectVersion = ival;
             else if (sscanf(line, "activeTab=%d", &ival) == 1)
-                sActiveTab = (EditorTab)std::clamp(ival, 0, (int)EditorTab::Sound);
+                sActiveTab = (EditorTab)std::clamp(ival, 0, (int)EditorTab::Effects);
             else if (sscanf(line, "midiMasterDb=%f", &fval) == 1)
                 sMidiMasterDb = fval;
         }
@@ -14466,6 +14472,7 @@ static void DrawTabBar()
     TabButton("Nodes",    EditorTab::Events);
     TabButton("Elements", EditorTab::Elements);
     TabButton("Sound",    EditorTab::Sound);
+    TabButton("Effects",  EditorTab::Effects);
 
     // Track the last scene tab so a build from any tab boots into it.
     if (sActiveTab == EditorTab::Map)          sLastSceneTabMode = 0;
@@ -25883,6 +25890,43 @@ void FrameTick(float dt)
                         "    //   Down, the menu nav's key, so the held-mask can't catch it; one-shot beeps stay).\n"
                         "    // Drive per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions.");
                     break;
+                case VsNodeType::LightningBeam:
+                    editorCode = "// Cast a jittered ribbon bolt (lightning) at the lock-on enemy / forward";
+                    setActionFunc(infoNode, "_lightning_beam",
+                        "    afn_beam_range  = <Range>;             // forward distance when unlocked\n"
+                        "    afn_beam_width  = <Width x100> / 100.0f;\n"
+                        "    afn_beam_bow    = <Arch x100> / 100.0f;   // arch HEIGHT off the floor\n"
+                        "    afn_beam_jitter = <Jitter x100> / 100.0f; // jagged crackle\n"
+                        "    afn_beam_segs   = <Segments>;\n"
+                        "    afn_beam_life   = <Life (frames)>;\n"
+                        "    afn_beam_bounces= <Bounces>;          // arches across the floor (touch down between each)\n"
+                        "    afn_beam_spawn  = 1;                  // cast THIS frame\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_beam_resolve(): source = player FEET, target = lock-on enemy feet\n"
+                        "    //   (s_npcX[ai_slot]) else player + forward*range, all on the floor.\n"
+                        "    // afn_beam_render(view): centerline = bow * |sin((t*bounces - frame*0.05)*PI)|\n"
+                        "    //   lifted along path-frame UP (bouncing arches that crawl forward, touching\n"
+                        "    //   the floor between each) + jitter*rand crackle in the screen plane; ends\n"
+                        "    //   ramp to the floor (anchored). Ribbon = +/- local-tangent side*width as a\n"
+                        "    //   TRIANGLE_STRIP, additive, no texture. afn_beam_update() counts life down.");
+                    break;
+                case VsNodeType::SpawnParticles:
+                    editorCode = "// Emit a burst of billboard particles (pure-code sim) at the player";
+                    setActionFunc(infoNode, "_spawn_particles",
+                        "    afn_part_frame  = <Sprite>;            // billboard graphic (-1 = solid quad)\n"
+                        "    afn_part_speed  = <Speed x100> / 100.0f;   // world units/frame\n"
+                        "    afn_part_spread = <Spread 0-100> / 100.0f; // lateral cone (0 = straight up)\n"
+                        "    afn_part_life   = <Life (frames)>;\n"
+                        "    afn_part_size0  = <Size x100> / 100.0f; afn_part_size1 = 0.0f;  // shrink to 0\n"
+                        "    afn_part_grav   = <Gravity x1000> / 1000.0f;\n"
+                        "    afn_part_spawn  = <Count>;             // emit this many THIS frame\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // The 3D pass calls afn_particles_emit(playerX+ox, playerY+14, playerZ+oz):\n"
+                        "    //   spawns afn_part_spawn particles with a mostly-up velocity cone (speed*spread),\n"
+                        "    //   randomized life, then clears afn_part_spawn. afn_particles_update() integrates\n"
+                        "    //   each: vy -= grav; pos += vel; life--. afn_particles_render(view) billboards them\n"
+                        "    //   camera-facing (view right/up basis), size + colour lerped over age, additive blend.");
+                    break;
                 case VsNodeType::PlayCameraAnim: {
                     editorCode = "// Take over the camera + play the player's keyframed cutscene path";
                     setActionFunc(infoNode, "_play_camera_anim",
@@ -31368,6 +31412,116 @@ void FrameTick(float dt)
         DrawSpritesTab(
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(totalW, bodyH), dt);
+    }
+    else if (sActiveTab == EditorTab::Effects)
+    {
+        // Effects tab — LIVE PREVIEW sandbox. Mirrors the runtime pure-code sim
+        // (particle integration + beam jitter) with ImGui draw lists, so you can
+        // watch the behaviour and tune before wiring the Spawn Particles / Lightning
+        // Beam nodes. (Illustrative px scale — relative motion/jitter/fade match.)
+        int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
+        ImGui::Begin("##EffectsTab", nullptr, flags);
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Effects — live preview");
+        ImGui::SameLine(); ImGui::TextDisabled("(behaviour sandbox; wire Spawn Particles / Lightning Beam nodes to use in-game)");
+        ImGui::Separator();
+        static int pvKind = 1;   // 0 = particles, 1 = lightning
+        ImGui::RadioButton("Particles", &pvKind, 0); ImGui::SameLine(0, Scaled(16));
+        ImGui::RadioButton("Lightning", &pvKind, 1);
+        ImGui::Spacing();
+
+        // tiny xorshift for the preview sim
+        static unsigned pvRng = 0x9E3779B9u;
+        auto rnd = [&]() -> float { pvRng ^= pvRng<<13; pvRng ^= pvRng>>17; pvRng ^= pvRng<<5; return (float)(pvRng & 0xFFFF) / 65536.0f; };
+        auto sym = [&]() -> float { return rnd()*2.0f - 1.0f; };
+
+        // ---- controls (left) ----
+        static int   pvpCount=10; static float pvpSpeed=1.6f, pvpSpread=0.6f, pvpLife=45.0f, pvpGrav=0.05f, pvpSize=10.0f; static bool pvpStream=true; static int pvpBurst=0;
+        static float pvbWidth=3.0f, pvbBow=42.0f, pvbJitter=12.0f; static int pvbSegs=14, pvbBounces=3;
+        ImGui::BeginChild("##fxctrl", ImVec2(Scaled(210), 0), true);
+        if (pvKind == 0) {
+            ImGui::TextColored(ImVec4(1,0.8f,0.5f,1), "Particles"); ImGui::Separator();
+            ImGui::PushItemWidth(Scaled(110));
+            ImGui::SliderInt("Count", &pvpCount, 1, 40);
+            ImGui::SliderFloat("Speed", &pvpSpeed, 0.1f, 5.0f, "%.2f");
+            ImGui::SliderFloat("Spread", &pvpSpread, 0.0f, 1.5f, "%.2f");
+            ImGui::SliderFloat("Life", &pvpLife, 5.0f, 120.0f, "%.0f");
+            ImGui::SliderFloat("Gravity", &pvpGrav, -0.10f, 0.20f, "%.3f");
+            ImGui::SliderFloat("Size", &pvpSize, 1.0f, 30.0f, "%.0f");
+            ImGui::PopItemWidth();
+            ImGui::Checkbox("Stream", &pvpStream);
+            if (ImGui::Button("Burst")) pvpBurst = pvpCount;
+        } else {
+            ImGui::TextColored(ImVec4(0.6f,0.8f,1,1), "Lightning (bounces)"); ImGui::Separator();
+            ImGui::PushItemWidth(Scaled(110));
+            ImGui::SliderFloat("Width", &pvbWidth, 0.5f, 12.0f, "%.1f");
+            ImGui::SliderFloat("Arch", &pvbBow, 5.0f, 90.0f, "%.0f");
+            ImGui::SliderFloat("Jitter", &pvbJitter, 0.0f, 40.0f, "%.0f");
+            ImGui::SliderInt("Segments", &pvbSegs, 2, 24);
+            ImGui::SliderInt("Bounces", &pvbBounces, 1, 8);
+            ImGui::PopItemWidth();
+            ImGui::TextDisabled("Bounces = arches it\nskips across the floor.\nIt crawls forward.");
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+
+        // ---- canvas (right) ----
+        ImGui::BeginChild("##fxcanvas", ImVec2(0,0), true);
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        ImVec2 cs = ImGui::GetContentRegionAvail();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), IM_COL32(6,6,12,255));
+        if (pvKind == 0) {
+            // Particle 2D sim — mirrors runtime: vy += grav; pos += vel; life--; fade+shrink.
+            static struct { float x,y,vx,vy,life,maxLife; bool active; } pv[256] = {};
+            const float PX = 6.0f;
+            float ox = cp.x + cs.x*0.5f, oy = cp.y + cs.y*0.82f;   // fountain origin
+            int toEmit = (pvpStream ? pvpCount : 0) + pvpBurst; pvpBurst = 0;
+            for (int e=0;e<toEmit;e++){ int s=-1; for(int i=0;i<256;i++) if(!pv[i].active){s=i;break;} if(s<0)break;
+                pv[s].active=true; pv[s].x=ox; pv[s].y=oy;
+                pv[s].vx = sym()*pvpSpread*pvpSpeed*PX;
+                pv[s].vy = -(0.4f+rnd()*0.6f)*pvpSpeed*PX;
+                pv[s].maxLife = pv[s].life = pvpLife*(0.7f+rnd()*0.6f); }
+            for (int i=0;i<256;i++){ if(!pv[i].active)continue;
+                pv[i].vy += pvpGrav*PX; pv[i].x += pv[i].vx; pv[i].y += pv[i].vy;
+                if ((pv[i].life-=1.0f)<=0){ pv[i].active=false; continue; }
+                float age = 1.0f - pv[i].life/pv[i].maxLife;
+                float sz = pvpSize*(1.0f-age); if (sz<0.5f) sz=0.5f;
+                int al = (int)(235*(1.0f-age));
+                dl->AddCircleFilled(ImVec2(pv[i].x,pv[i].y), sz, IM_COL32(255,225,150,al));
+            }
+        } else {
+            // Beam 2D — a lightning bolt that BOUNCES across the floor: |sin| arches that
+            // touch a floor line between each, crawling forward (pvbAnim) + jagged crackle.
+            static float pvbAnim = 0.0f; pvbAnim += 0.05f;
+            float floorY = cp.y + cs.y*0.80f;
+            float lx = cp.x + cs.x*0.06f, rx = cp.x + cs.x*0.94f;
+            dl->AddLine(ImVec2(cp.x, floorY), ImVec2(cp.x+cs.x, floorY), IM_COL32(55,55,75,255), 1.5f);  // floor
+            int nb = pvbBounces; int N = nb*8; if (N<pvbSegs) N=pvbSegs; if (N>200) N=200;
+            ImVec2 pts[208];
+            for (int i=0;i<=N;i++){ float t=(float)i/(float)N;
+                float bx = lx + (rx-lx)*t, by = floorY;
+                float edge = t<0.5f?t:1.0f-t; float endRamp = edge*8.0f<1.0f?edge*8.0f:1.0f;
+                float arch = pvbBow * fabsf(sinf((t*nb - pvbAnim)*3.14159265f)) * endRamp;
+                by -= arch;                              // up off the floor (screen -y)
+                by += pvbJitter * sym() * endRamp;       // crackle
+                pts[i]=ImVec2(bx,by);
+            }
+            dl->AddPolyline(pts, N+1, IM_COL32(110,170,255,70), 0, pvbWidth*2.4f);   // glow
+            dl->AddPolyline(pts, N+1, IM_COL32(235,245,255,255), 0, pvbWidth);        // core
+            // contact arrows at the moving touch-down points (where the arches meet the floor)
+            float phase = pvbAnim - floorf(pvbAnim);
+            for (int k=0;k<=nb;k++){ float tv=((float)k + phase)/(float)nb; if (tv<0.02f||tv>0.98f) continue;
+                float ax = lx + (rx-lx)*tv;
+                dl->AddTriangleFilled(ImVec2(ax-4,floorY+16),ImVec2(ax+4,floorY+16),ImVec2(ax,floorY+7), IM_COL32(150,150,170,255));
+                dl->AddLine(ImVec2(ax,floorY+16),ImVec2(ax,floorY+26), IM_COL32(150,150,170,255), 1.5f); }
+        }
+        ImGui::EndChild();
+        ImGui::End();
+        ImGui::PopStyleColor();
     }
     else if (sActiveTab == EditorTab::Sound)
     {

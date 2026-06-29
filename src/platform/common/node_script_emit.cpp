@@ -1251,6 +1251,37 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_ai_dodge_clip_f = " << clip(4,"DodgeFW",27) << "; afn_ai_dodge_clip_b = " << clip(5,"DodgeBWD",26) << ";\n";
                 break;
             }
+            case AfnScriptNodeType::SpawnParticles: {
+                // Fill the particle spawn request — the main loop emits afn_part_spawn
+                // particles at the player next frame and integrates the pool (pure code).
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6);
+                f << "    afn_part_frame = " << (d0?resolveInt(d0):-1) << ";\n";
+                f << "    afn_part_speed = " << (d2?resolveInt(d2):150) << " / 100.0f;\n";
+                f << "    afn_part_spread = " << (d3?resolveInt(d3):60) << " / 100.0f;\n";
+                f << "    afn_part_life = " << (d4?resolveInt(d4):40) << ";\n";
+                f << "    afn_part_size0 = " << (d5?resolveInt(d5):50) << " / 100.0f; afn_part_size1 = 0.0f;\n";
+                f << "    afn_part_grav = " << (d6?resolveInt(d6):40) << " / 1000.0f;\n";
+                f << "    afn_part_spawn = " << (d1?resolveInt(d1):8) << ";   // emit this many THIS frame\n";
+                break;
+            }
+            case AfnScriptNodeType::LightningBeam: {
+                // Queue a bolt — the main loop resolves source/target + spawns it. The
+                // ribbon (jitter, bow, camera-facing strip) is pure-code in afn_beam_render.
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6);
+                f << "    afn_beam_range = " << (d0?resolveInt(d0):80) << ";\n";
+                f << "    afn_beam_width = " << (d1?resolveInt(d1):40) << " / 100.0f;\n";
+                f << "    afn_beam_bow = " << (d2?resolveInt(d2):1400) << " / 100.0f;\n";   // arch height off the floor
+                f << "    afn_beam_jitter = " << (d3?resolveInt(d3):250) << " / 100.0f;\n";
+                f << "    afn_beam_segs = " << (d4?resolveInt(d4):14) << ";\n";
+                f << "    afn_beam_life = " << (d5?resolveInt(d5):12) << ";\n";
+                f << "    afn_beam_bounces = " << (d6?resolveInt(d6):3) << ";   // arches across the floor\n";
+                f << "    afn_beam_spawn = 1;   // cast THIS frame\n";
+                break;
+            }
             case AfnScriptNodeType::LockPlayerFunctions:
                 // Lock out player combat functions for this frame. The runtime masks HELD
                 // keys (so On-Key-Held abilities like Charge Up don't run — kills the energy

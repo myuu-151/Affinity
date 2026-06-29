@@ -570,6 +570,8 @@ enum class AfnScriptNodeType : int {
     TogglePause,     // gate: flips the global scene-pause; exec A = On Paused, B = On Unpaused
     AiDodgeClips,    // action (enemy AI): set the enemy dodge + charge-dodge clip indices (name-resolved -> drift-proof)
     LockPlayerFunctions, // action: while it runs, lock out player abilities (menu nav still works)
+    SpawnParticles,  // action: emit a burst of billboard particles (pure-code sim) at the player
+    LightningBeam,   // action: cast a jittered ribbon (lightning/laser) from the player to the lock-on enemy / forward
     COUNT
 };
 

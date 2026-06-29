@@ -304,6 +304,78 @@ typedef struct {
     int   life, dmg, tgt, full;
 } AfnFbShot;
 static AfnFbShot s_fbPool[AFN_FB_POOL] = {{0}};
+
+// ---------------------------------------------------------------------------
+// Particle system — pure code: each particle is a billboard whose motion is
+// vector-integrated every frame (velocity + gravity), with size/colour lerped
+// over its life. Fixed 60 Hz step, so velocities are world-units PER FRAME (no
+// dt). The Spawn Particles node fills the per-frame spawn request below; the
+// main loop emits at the player, integrates the pool, and afn_particles_render
+// billboards each live one camera-facing (same right/up basis as enemy_orb_render).
+// Spline pathing (afn_part_spline) layers on top in phase 2.
+// ---------------------------------------------------------------------------
+#define AFN_PART_POOL 256
+typedef struct {
+    unsigned char active, blend;        // blend: 0 = alpha, 1 = additive
+    short  frame;                       // sprite frame for the quad (-1 = solid)
+    float  x, y, z, vx, vy, vz;
+    float  life, maxLife, grav;
+    float  size0, size1;                // start/end size (world units), lerp by age
+    unsigned char r0,g0,b0,a0, r1,g1,b1,a1;  // start/end colour
+} AfnParticle;
+static AfnParticle s_parts[AFN_PART_POOL] = {{0}};
+static unsigned s_partRng = 0x9E3779B9u;
+static inline float part_rand(void) {   // 0..1, xorshift (runtime-only RNG)
+    s_partRng ^= s_partRng << 13; s_partRng ^= s_partRng >> 17; s_partRng ^= s_partRng << 5;
+    return (float)(s_partRng & 0xFFFFFFu) / (float)0x1000000u;
+}
+static inline float part_sym(void) { return part_rand() * 2.0f - 1.0f; }  // -1..1
+
+// Spawn request — Spawn Particles node sets these in script_tick; the main loop
+// emits afn_part_spawn particles at the player (+offset) then clears the count.
+int   afn_part_spawn   = 0;          // particles to emit THIS frame (0 = none)
+int   afn_part_frame   = -1;         // billboard sprite frame (-1 = solid quad)
+int   afn_part_blend   = 1;          // 0 = alpha, 1 = additive
+float afn_part_speed   = 1.5f;       // initial speed (world units/frame)
+float afn_part_spread  = 0.6f;       // lateral spread (0 = straight up .. 1 = wide cone)
+float afn_part_life    = 40.0f;      // lifetime (frames)
+float afn_part_grav    = 0.04f;      // downward accel (units/frame^2)
+float afn_part_size0   = 0.5f;       // start size  (world units)
+float afn_part_size1   = 0.0f;       // end size
+unsigned afn_part_col0 = 0xFFFFFFFFu;// start colour 0xAABBGGRR
+unsigned afn_part_col1 = 0x00FFFFFFu;// end colour (alpha 0 = fade out)
+float afn_part_ox = 0.0f, afn_part_oy = 14.0f, afn_part_oz = 0.0f;  // spawn offset from player
+
+// ---------------------------------------------------------------------------
+// Beam / lightning ribbon — a CONNECTED strip (vs the independent particle dots).
+// A path of points from source to target, each pushed sideways (perpendicular to
+// the path IN SCREEN SPACE) by a fixed bow (the arc) + random jitter that decays to
+// 0 at both ends (so it stays anchored). The jitter re-rolls every frame = crackle.
+// Rendered as a camera-facing triangle strip, additive (glows on its own, no texture).
+// All pure vector math. The impact flash at the end is the particle pool above.
+// ---------------------------------------------------------------------------
+#define AFN_BEAM_POOL 4
+#define AFN_BEAM_MAX_SEGS 24
+typedef struct {
+    int   active, life, maxLife;
+    float sx, sy, sz, tx, ty, tz;     // source / target (world)
+    float width, bow, jitter;
+    int   segs, bounces;
+    unsigned col;                     // core colour 0xAABBGGRR
+} AfnBeam;
+static AfnBeam s_beams[AFN_BEAM_POOL] = {{0}};
+
+// Spawn request — the Lightning Beam node sets these in script_tick; the main loop
+// resolves source = player chest, target = lock-on enemy (else forward*range), spawns.
+int   afn_beam_spawn  = 0;            // 1 = cast a bolt THIS frame
+int   afn_beam_life   = 12;          // frames it lasts (flickering)
+int   afn_beam_range  = 80;          // forward distance if no lock target (world units)
+int   afn_beam_segs   = 14;          // jaggedness (coil resolution)
+float afn_beam_width  = 0.4f;        // ribbon half-width (world units)
+float afn_beam_bow    = 6.0f;        // fixed arc bow (perpendicular bulge)
+float afn_beam_jitter = 3.0f;        // random zigzag amount (lightning crackle)
+int   afn_beam_bounces = 3;          // arches the bolt makes across the floor (touches down between each)
+unsigned afn_beam_col = 0xFFFFFFFFu; // core colour
 // Beam clash — FULLY NODE-ORCHESTRATED now (ch_controller BP). The runtime keeps
 // only the heavy primitives: the 2D struggle render (clash_render_2d), the beam
 // geometry -> afn_clash_ready flag (clash_sense), and the RNG masher / pitch /
@@ -1975,6 +2047,195 @@ static void enemy_orb_render(const float* view) {
     glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDisable(GL_BLEND);
 #endif
+}
+
+// Particle pool: integrate every live particle one fixed step — gravity into the
+// velocity, velocity into the position, age down. Pure vector math, no dt.
+static void afn_particles_update(void) {
+    if (afn_paused) return;
+    for (int i = 0; i < AFN_PART_POOL; i++) {
+        AfnParticle* p = &s_parts[i];
+        if (!p->active) continue;
+        p->vy -= p->grav;
+        p->x += p->vx; p->y += p->vy; p->z += p->vz;
+        if ((p->life -= 1.0f) <= 0.0f) p->active = 0;
+    }
+}
+
+// Emit afn_part_spawn particles at (ox,oy,oz) using the current request params, then
+// clear the request. Velocity = a mostly-upward cone scaled by speed/spread.
+static void afn_particles_emit(float ox, float oy, float oz) {
+    int n = afn_part_spawn; afn_part_spawn = 0;
+    for (int e = 0; e < n; e++) {
+        int slot = -1;
+        for (int i = 0; i < AFN_PART_POOL; i++) if (!s_parts[i].active) { slot = i; break; }
+        if (slot < 0) break;   // pool full — drop the rest
+        AfnParticle* p = &s_parts[slot];
+        p->active = 1; p->blend = (unsigned char)afn_part_blend; p->frame = (short)afn_part_frame;
+        p->x = ox; p->y = oy; p->z = oz;
+        float sp = afn_part_speed;
+        p->vx = part_sym() * afn_part_spread * sp;
+        p->vz = part_sym() * afn_part_spread * sp;
+        p->vy = (0.4f + part_rand() * 0.6f) * sp;          // mostly up
+        p->maxLife = p->life = afn_part_life * (0.7f + part_rand() * 0.6f);
+        p->grav = afn_part_grav; p->size0 = afn_part_size0; p->size1 = afn_part_size1;
+        p->r0 = afn_part_col0 & 0xFF; p->g0 = (afn_part_col0 >> 8) & 0xFF; p->b0 = (afn_part_col0 >> 16) & 0xFF; p->a0 = (afn_part_col0 >> 24) & 0xFF;
+        p->r1 = afn_part_col1 & 0xFF; p->g1 = (afn_part_col1 >> 8) & 0xFF; p->b1 = (afn_part_col1 >> 16) & 0xFF; p->a1 = (afn_part_col1 >> 24) & 0xFF;
+    }
+}
+
+// Billboard every live particle camera-facing (right/up = the view matrix's basis
+// columns, same as enemy_orb_render), size + colour lerped over its life.
+static void afn_particles_render(const float* view) {
+    float Rwx = view[0], Rwy = view[4], Rwz = view[8];   // camera right (world)
+    float Uwx = view[1], Uwy = view[5], Uwz = view[9];   // camera up (world)
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);   // texture * vertex colour (alpha fade)
+    glDepthMask(GL_FALSE);   // soft/additive: test depth but don't write it
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    int curBlend = -1, texOn = -1; GLuint curTex = 0;
+    for (int i = 0; i < AFN_PART_POOL; i++) {
+        AfnParticle* p = &s_parts[i];
+        if (!p->active) continue;
+        float age = 1.0f - p->life / (p->maxLife > 0.0f ? p->maxLife : 1.0f);  // 0..1
+        float sz = p->size0 + (p->size1 - p->size0) * age, hw = sz * 0.5f, hh = sz * 0.5f;
+        unsigned int r = p->r0 + (int)((p->r1 - p->r0) * age), g = p->g0 + (int)((p->g1 - p->g0) * age);
+        unsigned int b = p->b0 + (int)((p->b1 - p->b0) * age), a = p->a0 + (int)((p->a1 - p->a0) * age);
+        unsigned int col = (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16) | ((a & 0xFF) << 24);
+        if (p->blend != curBlend) { glBlendFunc(GL_SRC_ALPHA, p->blend ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA); curBlend = p->blend; }
+        if (p->frame >= 0) { if (texOn != 1) { glEnable(GL_TEXTURE_2D); texOn = 1; } GLuint tx = s_sprTex[p->frame]; if (tx != curTex) { glBindTexture(GL_TEXTURE_2D, tx); curTex = tx; } }
+        else if (texOn != 0) { glDisable(GL_TEXTURE_2D); texOn = 0; }
+        float cx = p->x, cy = p->y, cz = p->z;
+        AfnVertex q[4] = {
+            { 0,0, col, cx - Rwx*hw + Uwx*hh, cy - Rwy*hw + Uwy*hh, cz - Rwz*hw + Uwz*hh },
+            { 1,0, col, cx + Rwx*hw + Uwx*hh, cy + Rwy*hw + Uwy*hh, cz + Rwz*hw + Uwz*hh },
+            { 1,1, col, cx + Rwx*hw - Uwx*hh, cy + Rwy*hw - Uwy*hh, cz + Rwz*hw - Uwz*hh },
+            { 0,1, col, cx - Rwx*hw - Uwx*hh, cy - Rwy*hw - Uwy*hh, cz - Rwz*hw - Uwz*hh },
+        };
+        AfnVertex* v = q;
+        glTexCoordPointer(2, GL_FLOAT, sizeof(AfnVertex), &v->u);
+        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &v->x);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    }
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// Beam pool: count each bolt's life down; expire at 0.
+static void afn_beam_update(void) {
+    if (afn_paused) return;
+    for (int b = 0; b < AFN_BEAM_POOL; b++)
+        if (s_beams[b].active && --s_beams[b].life <= 0) s_beams[b].active = 0;
+}
+
+// Cast a queued bolt: source = player chest, target = the lock-on enemy if one is
+// locked, else a point `range` ahead along the player's facing. Pure vector setup.
+static void afn_beam_resolve(float px, float py, float pz, float yawDeg) {
+    if (!afn_beam_spawn) return;
+    afn_beam_spawn = 0;
+    int slot = -1;
+    for (int b = 0; b < AFN_BEAM_POOL; b++) if (!s_beams[b].active) { slot = b; break; }
+    if (slot < 0) slot = 0;   // pool full: recycle slot 0
+    AfnBeam* bm = &s_beams[slot];
+    bm->active = 1; bm->life = bm->maxLife = afn_beam_life;
+    // Floor height: a slinky/bolt crawls ACROSS the floor, so run it just above the
+    // ground (feet + 2) rather than chest. A coil then loops up off the floor by radius.
+    bm->sx = px; bm->sy = py + 2.0f; bm->sz = pz;
+    int gotTarget = 0;
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_CAM_LOCK)
+    if (afn_cam_lock_target >= 0 && afn_ai_slot >= 0) {
+        bm->tx = s_npcX[afn_ai_slot]; bm->ty = s_npcY[afn_ai_slot] + 2.0f; bm->tz = s_npcZ[afn_ai_slot];
+        gotTarget = 1;
+    }
+#endif
+    if (!gotTarget) {
+        float yr = yawDeg * (3.14159265f / 180.0f);
+        bm->tx = px + sinf(yr) * (float)afn_beam_range;
+        bm->ty = py + 2.0f;
+        bm->tz = pz + cosf(yr) * (float)afn_beam_range;
+    }
+    bm->width = afn_beam_width; bm->bow = afn_beam_bow; bm->jitter = afn_beam_jitter;
+    bm->segs = afn_beam_segs; bm->col = afn_beam_col;
+    bm->bounces = afn_beam_bounces;
+}
+
+// Render each bolt as a camera-facing triangle strip: walk the source->target line in
+// N segments, push each point sideways (screen-perpendicular to the path) by the arc
+// bow + per-frame random jitter (decaying to 0 at the ends), then emit two verts
+// +/- side*halfWidth. Additive, no texture (the bright geometry glows on its own).
+static void afn_beam_render(const float* view) {
+    int any = 0;
+    for (int b = 0; b < AFN_BEAM_POOL; b++) if (s_beams[b].active) { any = 1; break; }
+    if (!any) return;
+    float Rwx = view[0], Rwy = view[4], Rwz = view[8];   // camera right
+    float Uwx = view[1], Uwy = view[5], Uwz = view[9];   // camera up
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D);
+    glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+    for (int b = 0; b < AFN_BEAM_POOL; b++) {
+        AfnBeam* bm = &s_beams[b];
+        if (!bm->active) continue;
+        int nb = bm->bounces > 0 ? bm->bounces : 1;
+        int N = bm->segs; { int need = nb * 8; if (need > N) N = need; }   // ~8 segs per arch
+        if (N < 2) N = 2; if (N > AFN_BEAM_MAX_SEGS) N = AFN_BEAM_MAX_SEGS;
+        float dx = bm->tx - bm->sx, dy = bm->ty - bm->sy, dz = bm->tz - bm->sz;
+        float len = sqrtf(dx*dx + dy*dy + dz*dz); if (len < 0.001f) len = 0.001f;
+        float dirx = dx/len, diry = dy/len, dirz = dz/len;
+        // Screen-perpendicular to the path (for the lightning jitter crackle).
+        float pr = dirx*Rwx + diry*Rwy + dirz*Rwz, pu = dirx*Uwx + diry*Uwy + dirz*Uwz;
+        float pl = sqrtf(pr*pr + pu*pu); if (pl < 0.001f) pl = 0.001f;
+        float sscx = (-pu/pl)*Rwx + (pr/pl)*Uwx, sscy = (-pu/pl)*Rwy + (pr/pl)*Uwy, sscz = (-pu/pl)*Rwz + (pr/pl)*Uwz;
+        // Path-frame UP (for the bounce arches to rise off the floor): up = (dir x worldUp) x dir.
+        float wux=0,wuy=1,wuz=0; if (diry > 0.95f || diry < -0.95f) { wux=1; wuy=0; }
+        float hsx = diry*wuz - dirz*wuy, hsy = dirz*wux - dirx*wuz, hsz = dirx*wuy - diry*wux;
+        float hl = sqrtf(hsx*hsx+hsy*hsy+hsz*hsz); if (hl<0.001f) hl=0.001f; hsx/=hl; hsy/=hl; hsz/=hl;
+        float hux = hsy*dirz - hsz*diry, huy = hsz*dirx - hsx*dirz, huz = hsx*diry - hsy*dirx;
+        float scroll = (float)afn_frame_count * 0.05f;   // arches crawl forward across the floor
+        unsigned rng = ((unsigned)afn_frame_count * 2654435761u) ^ ((unsigned)b * 0x9E3779B9u) ^ 0xA53C9E1Du;
+        // Pass 1: centerline — BOUNCING arches (|sin| humps that touch the floor between each)
+        // crawling forward, + a jagged crackle. Ends ramp to the floor so they stay anchored.
+        float cxA[AFN_BEAM_MAX_SEGS+1], cyA[AFN_BEAM_MAX_SEGS+1], czA[AFN_BEAM_MAX_SEGS+1];
+        for (int i = 0; i <= N; i++) {
+            float t = (float)i / (float)N;
+            float bx = bm->sx + dx*t, by = bm->sy + dy*t, bz = bm->sz + dz*t;
+            float edge = t < 0.5f ? t : (1.0f - t);
+            float endRamp = edge*8.0f < 1.0f ? edge*8.0f : 1.0f;   // 0 at the very ends, 1 quickly
+            float arch = bm->bow * fabsf(sinf((t * (float)nb - scroll) * 3.14159265f)) * endRamp;
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            float r = ((float)(rng & 0xFFFF) / 32768.0f) - 1.0f;
+            float jit = bm->jitter * r * endRamp;             // crackle, clean at the ends
+            bx += hux*arch + sscx*jit; by += huy*arch + sscy*jit; bz += huz*arch + sscz*jit;
+            cxA[i]=bx; cyA[i]=by; czA[i]=bz;
+        }
+        float lifeF = bm->maxLife > 0 ? (float)bm->life / (float)bm->maxLife : 1.0f;
+        unsigned a = (unsigned)(((bm->col >> 24) & 0xFF) * lifeF);
+        unsigned col = (bm->col & 0x00FFFFFFu) | (a << 24);
+        float hw = bm->width;
+        // Pass 2: ribbon — at each point, width along the SCREEN-perpendicular of the
+        // local centerline tangent, so the strip faces the camera while following the coil.
+        AfnVertex strip[2 * (AFN_BEAM_MAX_SEGS + 1)];
+        for (int i = 0; i <= N; i++) {
+            int ia = i>0?i-1:0, ib = i<N?i+1:N;
+            float tx = cxA[ib]-cxA[ia], ty = cyA[ib]-cyA[ia], tz = czA[ib]-czA[ia];
+            float tr = tx*Rwx+ty*Rwy+tz*Rwz, tu = tx*Uwx+ty*Uwy+tz*Uwz;
+            float tl = sqrtf(tr*tr+tu*tu); if (tl<0.001f) tl=0.001f;
+            float lsx = (-tu/tl)*Rwx + (tr/tl)*Uwx, lsy = (-tu/tl)*Rwy + (tr/tl)*Uwy, lsz = (-tu/tl)*Rwz + (tr/tl)*Uwz;
+            strip[2*i].u=0; strip[2*i].v=0; strip[2*i].color=col;
+            strip[2*i].x = cxA[i]-lsx*hw; strip[2*i].y = cyA[i]-lsy*hw; strip[2*i].z = czA[i]-lsz*hw;
+            strip[2*i+1].u=1; strip[2*i+1].v=0; strip[2*i+1].color=col;
+            strip[2*i+1].x = cxA[i]+lsx*hw; strip[2*i+1].y = cyA[i]+lsy*hw; strip[2*i+1].z = czA[i]+lsz*hw;
+        }
+        AfnVertex* v = strip;
+        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &v->x);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 2 * (N + 1));
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
 // Node primitive (Step Enemy Beam): advance the enemy's fired projectile. Driven
@@ -5010,6 +5271,15 @@ int main(void)
           s_prevEfbCharging = s_efbCharging; }
         enemy_orb_render(view);   // HARDCODED: enemy projectile orb (charge spot / in flight)
 #endif
+        // Particle system: integrate the pool, emit any pending burst at the player,
+        // then billboard them. (Spawn Particles node fills afn_part_spawn in script_tick.)
+        afn_particles_update();
+        afn_particles_emit(playerX + afn_part_ox, playerY + afn_part_oy, playerZ + afn_part_oz);
+        afn_particles_render(view);
+        // Beam/lightning ribbons: tick life, cast any queued bolt, draw the strips.
+        afn_beam_update();
+        afn_beam_resolve(playerX, playerY, playerZ, playerYaw);
+        afn_beam_render(view);
 
         }   // end 3D world (skipped in 2D menu mode)
 
