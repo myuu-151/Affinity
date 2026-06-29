@@ -421,9 +421,12 @@ struct CameraKeyframe
     float yaw    = 0.0f;         // look yaw, radians
     float pitch  = 0.0f;         // look pitch, radians
     float fov    = 45.0f;        // field of view, degrees (reserved; 0 = scene default)
-    int   interp = 2;            // 0 = Constant, 1 = Linear, 2 = Smooth (Catmull-Rom eye + eased angles)
+    int   interp = 2;            // EYE-PATH shape: 0 = Constant, 1 = Linear, 2 = Curved (Catmull-Rom)
     float speed  = 1.0f;         // playback-rate multiplier for the SEGMENT starting at this keyframe
                                  // (2 = that leg plays twice as fast; unused on the last keyframe)
+    bool  smoothIn  = true;      // ease TIME as the camera ARRIVES at this keyframe (decelerate in)
+    bool  smoothOut = true;      // ease TIME as the camera LEAVES this keyframe (accelerate out)
+                                 // independent toggles; apply in Linear eye mode too
 };
 
 // A named keyframed camera path (one cutscene, e.g. "intro" / "victory" / "failure").
@@ -432,6 +435,10 @@ struct CameraAnim
 {
     char name[32] = "Camera Anim";
     int  fps = 30;                       // playback fps (speed/step derivation like HUD layers)
+    bool smoothPath = false;             // true = traverse ALL points as one continuous motion
+                                         // (uniform-knot Catmull-Rom + a single global ease in/out);
+                                         // ignores per-keyframe interp/ease/speed. Kills the per-point
+                                         // "ramp/stop" jitter for fly-throughs.
     std::vector<CameraKeyframe> keyframes;
 };
 
@@ -552,6 +559,9 @@ struct FloorSprite
     int   riggedMeshIdx = -1;    // index into sRiggedMeshAssets
     int   rigAnimIdx = 0;        // which animation clip to play
     bool  rigAnimPlay = true;    // play the clip in the editor preview
+    float modelYaw = 0.0f;       // PER-OBJECT yaw correction (deg), added on top of the
+                                 // rig asset's shared yawOffset — so two objects sharing a
+                                 // glTF can face different ways without rotating each other.
     float rigAnimClock = 0.0f;   // transient editor-only playback frame (NOT serialized)
 
     // Player camera presets (Mode 4). Only meaningful on the player object

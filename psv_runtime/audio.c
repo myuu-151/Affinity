@@ -340,10 +340,30 @@ void afn_stop_sound(void) {
     unlock();
 }
 
+// A single voice that a SAMPLE-WIDE stop must NOT cut. Shields the enemy's
+// voice-tracked charge wind-up from the PLAYER's chargefocus StopSound — both
+// share sample 4, so the player firing (afn_stop_sfx_sample(4)) used to also kill
+// the enemy's charge loop, which then audibly re-started. The enemy stops its OWN
+// voice via afn_stop_inst_voice; set this = that voice while it charges. -1 = none.
+int afn_sfx_protect_voice = -1;
+
 void afn_stop_sfx_sample(int smpIdx) {
     lock();
     for (int i = 0; i < SND_MAX_VOICES; i++)
-        if (snd_voices[i].playing && snd_voices[i].smpIdx == smpIdx)
+        if (i != afn_sfx_protect_voice && snd_voices[i].playing && snd_voices[i].smpIdx == smpIdx)
+            snd_voices[i].playing = 0;
+    unlock();
+}
+
+// Stop every currently-playing LOOPING SFX voice (e.g. the player's hold-to-charge
+// sound) without touching one-shots (UI beeps) or persistent music. Used by the Lock
+// Player Functions node on menu/game-over screens: a held/looping ability sound that
+// got (re)started by a key the menu nav shares can't be separated by an input mask, so
+// the runtime just silences the loops while locked. Respects afn_sfx_protect_voice.
+void afn_stop_looping_sfx(void) {
+    lock();
+    for (int i = 0; i < SND_MAX_VOICES; i++)
+        if (i != afn_sfx_protect_voice && snd_voices[i].playing && snd_voices[i].isSfxLoop)
             snd_voices[i].playing = 0;
     unlock();
 }

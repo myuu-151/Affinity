@@ -144,6 +144,17 @@ static int   s_efbActive = 0, s_efbCharging = 0, s_efbDmg = 0, s_efbLife = 0;   
 static float s_efbX, s_efbY, s_efbZ, s_efbDirX = 0, s_efbDirZ = 1, s_efbScale = 0.05f, s_efbSpeed = 0, s_efbHoming = 0;
 static int   s_eDodgeFrames = 0, s_eDodgeTotal = 0, s_eDodgeClip = 28;          // enemy dodge roll (28 = DodgeL)
 static float s_eDodgeDX = 0, s_eDodgeDZ = 0;
+// Charge-dodge: the enemy sidesteps an incoming blast WHILE charging — keeps the charge
+// alive (no state switch) and plays the player's charge-dodge clips, instead of the old
+// behaviour where a dodge dropped the charge entirely. Clips HARDCODED (drift-protected
+// like the other enemy clips; re-point via Ai Clips if the glTF re-sorts).
+static int   s_eChgDodgeFrames = 0, s_eChgDodgeTotal = 0, s_aiChgDodgeCD = 0, s_eChgDodgeClip = 9;
+static float s_eChgDodgeDX = 0, s_eChgDodgeDZ = 0;
+int afn_ai_chgdodge_clip_l = 9, afn_ai_chgdodge_clip_r = 10;   // atk_spc_chg_dodge_L / _R
+// Enemy's OWN standard-dodge clips (DodgeL/R). MUST NOT reuse the player's afn_dodge_clip_l/r:
+// player combat actions (block/launch/charge) rewrite those shared globals to other clip sets
+// (29/28, even the charge-dodge 10/9), which swapped the enemy's dodge clips mid-fight.
+int afn_ai_dodge_clip_l = 28, afn_ai_dodge_clip_r = 29, afn_ai_dodge_clip_f = 27, afn_ai_dodge_clip_b = 26;   // DodgeL / DodgeR / DodgeFW / DodgeBWD
 // HARDCODED melee-reflex state (enemy Quick Attack + jump-evade).
 static int   s_eqaPhase = 0, s_eqaFrames = 0, s_eqaCD = 0, s_eqaDealt = 0;       // enemy QA dash/skid
 static float s_eqaDirX = 0.0f, s_eqaDirZ = 1.0f, s_eqaYaw = 0.0f;
@@ -211,6 +222,8 @@ static int s_eBlockFrames = 0;   // enemy block-stance countdown
 #define AFN_TARGET_ELEM     0    // 'target' lock-on reticle element (hidden when the enemy dies)
 #define AFN_RESULT_ELEM    10    // 'die' menu element (exported HUD index)
 #define AFN_RESULT_CURSOR  11    // 'die_slct' cursor element
+#define AFN_PAUSE_ELEM     16    // 'pause' overlay element (exported HUD index — last in the list)
+#define AFN_SND_SELECT      2    // 'select' sound instance (confirm/pause SFX)
 #define AFN_RESULT_DELAY  180    // ~3s @ 60fps before the menu appears
 #define AFN_RESULT_FADE    60    // ~1s crossfade-in
 #define AFN_SND_BEEP        8    // beep sound instance (cursor move)
@@ -239,10 +252,12 @@ int afn_ai_sfx_tap    = AFN_SND_SMALLBLAST; // tap (uncharged) blast launch
 int afn_ai_sfx_whoosh = AFN_SND_QSWEEP;     // Quick Attack dash whoosh
 int  afn_play_sfx_inst_gain(int inst, int gain);   // audio.c — play SFX instance, returns its voice idx
 void afn_stop_sfx_inst(int inst);                  // audio.c — stop a looping SFX instance (all voices)
+void afn_stop_looping_sfx(void);                   // audio.c — stop ALL looping SFX voices (keeps one-shots/music); used by Lock Player Functions
 int  afn_sfx_active_inst(int inst);                // audio.c — is the instance's sample playing
 void afn_set_sfx_pitch_inst(int inst, int pitch);  // audio.c — pitch an SFX instance's sample
 int  afn_inst_voice_active(int v, int inst);       // audio.c — is voice v still this instance's sample
 void afn_stop_inst_voice(int v, int inst);         // audio.c — stop ONLY voice v (this instance's sample)
+extern int afn_sfx_protect_voice;                  // audio.c — voice a sample-wide stop must NOT cut (the enemy charge loop)
 // Distance-attenuated gain (0..127) for enemy combat SFX: full up close, floored so
 // it stays faintly audible across the arena. dist = enemy->player distance (afn_ai_dist).
 static int afn_enemy_sfx_gain(float dist) {
@@ -549,6 +564,8 @@ static int   s_paHead = -1, s_paFilled = 0;
 static float s_eaTrail[PA_TRAIL_N][4];   // enemy x,y,z,yawDeg history (Quick Attack afterimage)
 static int   s_eaHead = -1, s_eaFilled = 0;
 extern int afn_qa_active;                // defined later in this TU; forward-declared for the afterimage gate
+extern int afn_paused;                   // defined later; forward-declared so rigs_render can hold the animation while paused
+extern int afn_player_frozen;            // defined later; forward-declared so rigs_render can drop the QA trail while frozen
 // Quick Attack afterimage tunables — NODE-DRIVEN (Quick Attack / Ai Quick Attack nodes).
 // Trail Alpha scales the per-ghost alpha ramp (default 96 = the original peak); Trail
 // Length = how many of the 6 trail samples to draw (nearest N). Defaults = original look.
@@ -623,7 +640,9 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         s_pclip = afn_rig_clip; s_pframe = 0.0f;
     }
     // Hold (HoldSkelClip / KO): play the clip ONCE and hold the last frame (collapse).
-    if (s_playerClipHold) {
+    if (afn_paused) {
+        /* paused: hold the current pose — no frame advance */
+    } else if (s_playerClipHold) {
         float last = (float)(PR->clipframes[s_pclip] - 1);
         s_pframe += 0.4f; if (s_pframe > last) s_pframe = last;
     } else {
@@ -636,7 +655,9 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
 
     // Quick Attack afterimage: cyan ghost trail behind the dashing player. Drawn
     // far/old -> near/recent so the brighter recent ghosts overlay the faint ones.
-    if (afn_qa_active) {
+    // Never trail while frozen (a cutscene): the stacked ghosts washed the model white
+    // when you won mid-Quick-Attack and the victory cut took over.
+    if (afn_qa_active && !afn_player_frozen) {
         static const int paBack[6] = { 12, 10, 8, 6, 4, 2 };  // frames back
         int n = afn_qa_trail_len; if (n < 0) n = 0; if (n > 6) n = 6;   // Trail Length: draw nearest N
         for (int k = 6 - n; k < 6; k++) {
@@ -689,10 +710,10 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
             // Hold (HoldSkelClip / KO): the clip may be flagged Loop, but for a
             // collapse we play it once and freeze the final frame (ignore the wrap).
             float last = (float)(R->clipframes[clip] - 1);
-            s_npcFrame[i] += 0.4f; if (s_npcFrame[i] > last) s_npcFrame[i] = last;
+            if (!afn_paused) { s_npcFrame[i] += 0.4f; if (s_npcFrame[i] > last) s_npcFrame[i] = last; }
         } else
 #endif
-            s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
+            if (!afn_paused) s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
         // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop),
         // tilted to the smoothed floor normal like the player (slope snap).
@@ -1367,9 +1388,10 @@ static float rail_nearest(int rail, float px, float pz, float* outD2) {
 
 #ifdef AFN_HAS_CAM_ANIM
 // Sample the keyframed camera path (cutscene) at a fractional frame -> eye + look
-// forward vector. Catmull-Rom eye; angle-unwrapped, smoothstep-eased yaw/pitch. This
-// is the line-for-line mirror of the editor's SampleCameraAnim() so the in-game
-// cutscene matches the Meshes-tab preview. Per-keyframe `interp` is the mode LEAVING it.
+// forward vector. Catmull-Rom eye; angle-unwrapped yaw/pitch. Time easing is per-keyframe
+// Smooth In/Out (decel arriving / accel leaving), applied to all eye modes. This is the
+// line-for-line mirror of the editor's SampleCameraAnim() so the in-game cutscene matches
+// the Meshes-tab preview. Per-keyframe `interp` is the eye-path shape LEAVING it.
 static void afn_cam_anim_sample(int anim, float frame, float* ex, float* ey, float* ez,
                                 float* fx, float* fy, float* fz) {
     if (anim < 0 || anim >= AFN_CAM_ANIM_COUNT) anim = 0;
@@ -1383,6 +1405,32 @@ static void afn_cam_anim_sample(int anim, float frame, float* ex, float* ey, flo
         *fx = sinf(A->yaw)*cp; *fy = sinf(A->pitch); *fz = cosf(A->yaw)*cp;
         return;
     }
+    if (afn_cam_anim_smooth[anim]) {
+        /* Whole-path smooth travel (mirror of editor SampleCameraAnim smooth branch): one
+           continuous motion from first to last keyframe. Global smoothstep eases the whole
+           timeline; a UNIFORM-knot Catmull-Rom through every eye keeps velocity continuous
+           at interior points (no per-keyframe ramp/stop). Per-keyframe interp/ease/speed
+           are ignored here. */
+        float first = (float)K[0].frame, lastf = (float)K[n-1].frame;
+        float p = (lastf > first) ? (frame - first) / (lastf - first) : 0.0f;
+        if (p < 0.0f) p = 0.0f; if (p > 1.0f) p = 1.0f;
+        float P = p*p*(3.0f-2.0f*p);
+        float gu = P * (float)(n-1);
+        int si = (int)gu; if (si > n-2) si = n-2; if (si < 0) si = 0;
+        float t = gu - (float)si, t2 = t*t, t3 = t2*t;
+        const AfnCamKf* A = &K[si]; const AfnCamKf* B = &K[si+1];
+        const AfnCamKf* P0 = &K[si>0 ? si-1 : si]; const AfnCamKf* P3 = &K[(si+2)<n ? si+2 : si+1];
+        #define AFN_CRV(a,b,c,d) (0.5f*((2.0f*(b)) + (-(a)+(c))*t + (2.0f*(a)-5.0f*(b)+4.0f*(c)-(d))*t2 + (-(a)+3.0f*(b)-3.0f*(c)+(d))*t3))
+        *ex = AFN_CRV(P0->ex,A->ex,B->ex,P3->ex); *ey = AFN_CRV(P0->ey,A->ey,B->ey,P3->ey); *ez = AFN_CRV(P0->ez,A->ez,B->ez,P3->ez);
+        #undef AFN_CRV
+        float dyaw = B->yaw - A->yaw;
+        while (dyaw >  3.14159265f) dyaw -= 6.28318531f;
+        while (dyaw < -3.14159265f) dyaw += 6.28318531f;
+        float yaw = A->yaw + dyaw*t, pit = A->pitch + (B->pitch - A->pitch)*t;
+        float cp = cosf(pit);
+        *fx = sinf(yaw)*cp; *fy = sinf(pit); *fz = cosf(yaw)*cp;
+        return;
+    }
     int i = 0;
     if (frame <= (float)K[0].frame) i = 0;
     else if (frame >= (float)K[n-1].frame) i = n-2;
@@ -1394,7 +1442,11 @@ static void afn_cam_anim_sample(int anim, float frame, float* ex, float* ey, flo
     if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
     int mode = A->interp;
     if (mode == 0) t = 0.0f;
-    float te = (mode == 2) ? t*t*(3.0f-2.0f*t) : t;
+    /* Per-keyframe time ease (mirror of editor SampleCameraAnim): smooth-out of A and
+       smooth-in to B as independent toggles; cubic Hermite with endpoint slopes s0/s1. */
+    float s0 = A->smoothOut ? 0.0f : 1.0f;
+    float s1 = B->smoothIn  ? 0.0f : 1.0f;
+    float te = (s0+s1-2.0f)*t*t*t + (3.0f-2.0f*s0-s1)*t*t + s0*t;
     if (mode == 2) {
         const AfnCamKf* P0 = &K[i>0 ? i-1 : i];
         const AfnCamKf* P3 = &K[(i+2)<n ? i+2 : i+1];
@@ -1433,6 +1485,15 @@ static float afn_cam_seg_speed(int anim, float frame) {
 // how fast it advances. afn_cam_cut_frame mirrors it as an int for legacy resets.
 int afn_cam_cut_active = 0, afn_cam_cut_anim = 0, afn_cam_cut_timer = 0, afn_cam_cut_frame = 0;
 int afn_cam_cut_loop = 0, afn_cam_cut_hold = 0, afn_cam_cut_done = 0;
+int afn_cam_cut_player_clip = -1;   // Play Camera Anim "Player Clip" pin: force this player rig clip while the cut is active (-1 = no override)
+int afn_cam_cut_snap = 0;           // Play Camera Anim "Snap Player" pin: teleport the player to the scene-start pose at cut start (so a mid-fight cutscene frames the player)
+int afn_cam_cut_face_lock = 0;      // set by Snap: FORCE the player facing to the scene-default angle for the whole cut (bypass the heading, which re-syncs to the rotated gameplay orbit each frame)
+// Optional snap-pose overrides (Play Camera Anim "Snap X/Z" + "Face Angle" pins). When
+// the _has flag is 0 the snap uses the scene spawn / default facing (back-compat); when
+// 1 it snaps to the wired world-X/Z (Y stays at spawn ground) / faces the wired degrees.
+int afn_cam_cut_snap_has_pos = 0, afn_cam_cut_snap_x = 0, afn_cam_cut_snap_z = 0;
+int afn_cam_cut_snap_has_face = 0, afn_cam_cut_snap_face_deg = 0;
+int afn_cam_cut_freeze_input = 0;   // Play Camera Anim "Freeze Input" pin: mask ALL buttons while the path is ANIMATING (active + not done) so no ability/lock-on/charge/dodge/move fires; releases when the path completes (so a Hold-Last cut's results menu still gets input)
 float afn_cam_cut_fframe = 0.0f;
 #endif // AFN_HAS_CAM_ANIM
 
@@ -1447,12 +1508,18 @@ int afn_input_fwd = 0, afn_input_right = 0;   // camera-space move intent (256 =
 int afn_stick_8way = 0;                       // 8-Way Stick node: snap move vector to 45 deg octants
 int afn_move_speed = 0, afn_speed_prio = 0;   // node-set speed (0 = use walk default)
 int afn_player_frozen = 0;
+int afn_paused = 0;                           // Start-toggle pause: freezes the WHOLE scene (skips
+                                              // script_tick = player + AI + projectiles, zeros input,
+                                              // holds the rig animation advance) + shows the pause overlay
 int afn_enemy_frozen = 0;                     // freeze the enemy AI (movement + decisions);
                                               // Play Camera Anim's "Freeze Enemy" pin sets it
                                               // for a cutscene, cleared when the cut ends.
 int afn_face_lock = 0;                        // MovePlayer "Consistent Facing": keep
                                               // rig yaw while moving (strafe/moonwalk)
 int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
+int afn_cam_reinit = 0;                        // set on scene (re)start: force the follow-cam eye
+                                               // statics to re-seed so the camera SNAPS to the correct
+                                               // position relative to the player (no stale swing/rotate)
 int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
 static float s_camLookYaw = 0.0f;             // eased camera AIM pan (rad) — the active slot's lookYaw (column 5)
 static float s_camHOffset = 0.0f;             // eased camera lateral framing TRANSLATE (world px) — slot column 7
@@ -1498,6 +1565,7 @@ enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT
        KEY_RSTICK_UP=65536,   KEY_RSTICK_DOWN=131072,  KEY_RSTICK_LEFT=262144,  KEY_RSTICK_RIGHT=524288,
        KEY_L3=1048576,        KEY_R3=2097152 };   // stick clicks (external/PSTV controller only)
 unsigned afn_keys_held=0, afn_keys_pressed=0, afn_keys_released=0;
+unsigned afn_pause_key = 64;   // KEY_START default; the Toggle Pause node captures the key that paused (so the resume key auto-matches whatever On Key Pressed drives it — Select, Start, etc.)
 // Per-direction analog trip thresholds on the 0..127 axis range, ordered
 // LU,LD,LL,LR,RU,RD,RL,RR. 48 = default; a Key node's Sensitivity slider
 // retunes its direction via the emitted afn_emitted_script_init (the
@@ -1568,9 +1636,16 @@ static void input_update(const SceCtrlData* pad) {
     afn_stick_mag[5] = stick_mag( ry, afn_stick_sens[5], afn_stick_strength[5]);
     afn_stick_mag[6] = stick_mag(-rx, afn_stick_sens[6], afn_stick_strength[6]);
     afn_stick_mag[7] = stick_mag( rx, afn_stick_sens[7], afn_stick_strength[7]);
-    afn_keys_pressed  = k & ~afn_keys_held;
-    afn_keys_released = ~k & afn_keys_held;
+    // Edge detection uses a PRIVATE previous-held snapshot (the RAW pad state), NOT
+    // afn_keys_held — because afn_keys_held is the script-facing value that the pause /
+    // cutscene-freeze / lock-functions masks below overwrite each frame. If pressed/
+    // released were derived from a masked afn_keys_held, the frame AFTER a mask every
+    // still-held key would read as a fresh press (cursor spazz + repeated SFX triggers).
+    static unsigned s_prevHeldRaw = 0;
+    afn_keys_pressed  = k & ~s_prevHeldRaw;
+    afn_keys_released = ~k & s_prevHeldRaw;
     afn_keys_held     = k;
+    s_prevHeldRaw     = k;
 }
 
 // ---- Script-glue variables ------------------------------------------------
@@ -1799,6 +1874,7 @@ int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
 int afn_obj_hit[NUM_SPRITES]={0}, afn_any_hit=0;
 int afn_energy=0, afn_energy_max=100;   // player energy resource (node-driven: Add/Spend/Set/SetMax Energy)
 int afn_charging_up=0;                   // ChargeUp node sets =1 each frame it runs; reset pre-tick, drives the charge aura
+int afn_lock_functions=0;                // Lock Player Functions node sets =1 each frame it runs; held keys are masked (so On-Key-Held abilities don't run) + ability triggers cleared post-tick. For menus/game-over: nav (On Key Pressed) still works
 int afn_charge_clip=23;                  // rig clip held while charging (44-anim r8 default = "charge"; ChargeUp's Charge Clip pin overrides, name-resolved)
 int afn_health=100, afn_health_max=100; // player health resource (node-driven: Damage/Heal/Set/SetMax Health)
 int afn_stop_links[16]={0};
@@ -1906,6 +1982,7 @@ static void enemy_orb_render(const float* view) {
 // a shot always completes (hits the player or expires) even if the enemy dies
 // mid-flight. Reads the player position from player_x/y/z (1-frame lag is fine).
 void afn_enemy_beam_step(void) {
+    if (afn_paused) return;   // scene pause: freeze the in-flight enemy projectile
     if (!s_efbActive) return;
     float px = (float)player_x, py = (float)player_y, pz = (float)player_z;
     float tx = px, ty = py + (COL_BOTTOM + COL_TOP) * 0.5f, tz = pz;   // player collision-box center
@@ -1933,6 +2010,7 @@ void afn_enemy_beam_step(void) {
 // contact, expire on lifetime. Charging/release stays in the main loop (already
 // node-gated by Charge Shot / Fire Charge Shot). Driven once per frame by a node.
 void afn_focus_blast_step(void) {
+    if (afn_paused) return;   // scene pause: freeze in-flight player Focus Blasts
     int anyActive = 0, anyFull = 0;
     float sp = afn_fb_speed;
     for (int k = 0; k < AFN_FB_POOL; k++) {
@@ -2002,13 +2080,20 @@ void afn_ai_sense(void) {
     int i = afn_ai_slot; if (i < 0) return;
     int eidx = AFN_ENEMY_EIDX;
     if (!s_aiInited) { afn_hp[eidx] = ENEMY_HP_MAX; afn_sprite_visible[eidx] = 1; afn_ai_state = AI_ROAM; s_aiInited = 1; }
-    if (afn_enemy_frozen) { s_npcClip[i] = afn_aic_idle; return; }   // cutscene freeze (Play Camera Anim): hold idle, no decisions
+    if (afn_enemy_frozen || afn_paused) {   // cutscene freeze OR scene pause: no decisions
+        // Don't stand a DEAD enemy back up. A victory cutscene (Freeze Enemy) or pause
+        // would otherwise stomp the die-collapse (the BP's Hold Skel Clip, held via
+        // s_npcClipHold) with the idle pose — "the enemy standing up in the background."
+        // Only a LIVE enemy with no held clip snaps to idle while frozen.
+        if (afn_hp[eidx] > 0 && !s_npcClipHold[i]) s_npcClip[i] = afn_aic_idle;
+        return;
+    }
 #if defined(AFN_HAS_HUD) && defined(AFN_HAS_SPRITE_IDX)
     if (afn_hud_visible[AFN_CLASH_ELEM]) return;   // beam clash owns the enemy — freeze the AI
 #endif
     if (s_aiAtkCD > 0) s_aiAtkCD--;
     if (s_aiDodgeCD > 0) s_aiDodgeCD--;
-    if (afn_ai_state != AI_CHARGE) s_efbCharging = 0;   // never leave a charge orb hanging
+    if (afn_ai_state != AI_CHARGE) { s_efbCharging = 0; s_eChgDodgeFrames = 0; }   // never leave a charge orb hanging; drop any in-charge dodge so it can't resume on the next charge
 
     if (afn_ai_state != AI_BLOCK) { afn_ai_blocking = 0; s_eBlockFrames = 0; }   // only the BLOCK state keeps the guard up
     // A dodge/block interrupted by a state change (or the beam clash) must not leave
@@ -2051,7 +2136,7 @@ void afn_ai_sense(void) {
 // ROAM: nav drives motion; just pick walk/idle clip.
 void afn_ai_roam(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
 #ifdef AFN_HAS_NAVMESH
     s_npcClip[i] = s_npcNavMoving[i] ? afn_aic_move : afn_aic_idle;   // Move : Idle (name-resolved via AI Clips)
 #endif
@@ -2060,7 +2145,7 @@ void afn_ai_roam(void) {
 // CHASE: close toward the player; set afn_ai_reached at the strafe radius.
 void afn_ai_chase(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     s_npcClip[i] = afn_aic_move;   // Move (name-resolved via AI Clips)
     float px = (float)player_x, pz = (float)player_z;
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
@@ -2073,7 +2158,7 @@ void afn_ai_chase(void) {
 // STRAFE: orbit the player at the preferred distance (8-direction clip).
 void afn_ai_strafe(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     // 8-dir strafe walk clips. 44-anim glTF map (atk_phs variants shift +3, "charge"
     // at 23 shifts the rest +1 more): Move 36, strafeL 37, strafeLD 38, strafeLDFW 39,
     // strafeR 40, strafeRD 41, strafeRDFW 42, backpeddle 21. Same direction order.
@@ -2110,6 +2195,7 @@ static float afn_fb_nearest_sq(float ex, float ez) {
 }
 int afn_ai_blast_incoming(void) {
     int i = afn_ai_slot; if (i < 0) return 0;
+    if (s_efbCharging) return 0;   // while charging, the in-charge sidestep (afn_ai_charge_step) handles dodging WITHOUT a state switch, so the node-driven dodge can't cancel the charge
     if (s_eDodgeFrames != 0 || s_eBlockFrames != 0 || s_aiDodgeCD != 0 || !afn_fb_active) return 0;
     float d2 = afn_fb_nearest_sq(s_npcX[i], s_npcZ[i]);
     float dtr = (float)afn_ai_dodge_trig;
@@ -2122,6 +2208,7 @@ int afn_ai_blast_incoming(void) {
 // blast is in dodge range and it isn't already dodging/blocking.
 int afn_ai_blast_block(void) {
     int i = afn_ai_slot; if (i < 0) return 0;
+    if (s_efbCharging) return 0;   // while charging, the in-charge sidestep handles the threat — don't block (a block state-switch would cancel the charge)
     if (s_eDodgeFrames != 0 || s_eBlockFrames != 0 || afn_ai_state == AI_BLOCK || !afn_fb_active) return 0;
     float d2 = afn_fb_nearest_sq(s_npcX[i], s_npcZ[i]);
     float dtr = (float)afn_ai_dodge_trig;
@@ -2152,11 +2239,25 @@ void afn_ai_dodge_begin(void) {
     float px = (float)player_x, pz = (float)player_z;
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
     float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : 1.0f, fx = dx/pl, fz = dz/pl, rx = fz, rz = -fx;
-    int side = ai_chance(0.5f) ? 1 : -1;
-    s_eDodgeDX = rx * side; s_eDodgeDZ = rz * side;
-    int clipL = afn_dodge_clip_l > 0 ? afn_dodge_clip_l : 28;   // DodgeL
-    int clipR = afn_dodge_clip_r > 0 ? afn_dodge_clip_r : 29;   // DodgeR
-    s_eDodgeClip = side > 0 ? clipR : clipL;                    // L/R clips flipped (enemy faces the player)
+    // Lock mirrors the PLAYER's lock-strafe (parity with the player's own dodge): only while
+    // the player is Z-targeting does anyone strafe. Out of lock there's NO sideways dodge —
+    // only back/forth along the player axis.
+    int locked = (afn_lock_strafe && afn_cam_lock_target >= 0);
+    if (locked) {
+        // LOCK-ON strafe dodge: perpendicular to the player, random L/R; clip from the move
+        // vector projected onto the enemy's actual render facing (its OWN DodgeL/R clips).
+        int side = ai_chance(0.5f) ? 1 : -1;
+        s_eDodgeDX = rx * side; s_eDodgeDZ = rz * side;
+        float ey = s_npcYaw[i] * DEG2RAD;
+        float dotR = s_eDodgeDX * cosf(ey) - s_eDodgeDZ * sinf(ey);
+        s_eDodgeClip = (dotR > 0.0f) ? afn_ai_dodge_clip_l : afn_ai_dodge_clip_r;
+    } else {
+        // OUT OF LOCK: NEVER strafe — back/forth along the player axis only. Random forward
+        // (toward the player, DodgeFW) or back (away, DodgeBWD); the enemy faces the player so
+        // forward/back is unambiguous (no L/R parity to break).
+        if (ai_chance(0.5f)) { s_eDodgeDX = -fx; s_eDodgeDZ = -fz; s_eDodgeClip = afn_ai_dodge_clip_b; }   // back, away
+        else                 { s_eDodgeDX =  fx; s_eDodgeDZ =  fz; s_eDodgeClip = afn_ai_dodge_clip_f; }   // forward, in
+    }
     s_eDodgeFrames = s_eDodgeTotal = afn_ait_dodge_frames; s_aiDodgeCD = afn_ait_dodge_cd; afn_ai_dodge_done = 0;
 }
 
@@ -2167,7 +2268,7 @@ void afn_ai_dodge_begin(void) {
 // tunnel through a wall.
 void afn_ai_dodge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     if (s_eDodgeFrames > 0) {
         int total = s_eDodgeTotal, frames = s_eDodgeFrames;
         int ramp = afn_ait_dodge_ramp    >= 0 ? afn_ait_dodge_ramp    : (afn_dodge_ramp  > 0 ? afn_dodge_ramp  : 6);
@@ -2181,7 +2282,7 @@ void afn_ai_dodge_step(void) {
         float ix = s_eDodgeDX * sp, iz = s_eDodgeDZ * sp;
         int sub = (int)(sp / 3.0f) + 1;
         for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
-        s_npcClip[i] = s_eDodgeClip;
+        s_npcClip[i] = s_eDodgeClip;   // clip chosen at dodge_begin (strafe L/R while locked, forward when de-aggro'd)
         afn_ai_dodge_done = (--s_eDodgeFrames == 0) ? 1 : 0;
     } else afn_ai_dodge_done = 1;
 }
@@ -2264,7 +2365,7 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
 // player mid-clash. Replaces the old hardcoded call in the NPC update loop.
 void afn_ai_quick_attack(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     if (afn_hud_visible[AFN_CLASH_ELEM]) return;
     afn_ai_melee_reflex(i, AFN_ENEMY_EIDX, (float)player_x, (float)player_z);
 }
@@ -2276,20 +2377,24 @@ void afn_ai_charge_begin(void) {
     s_aiTimer = s_aiChargeShot ? afn_fb_max : afn_ait_tap_windup;
     s_efbScale = 0.05f; s_efbCharging = 1; afn_ai_charge_done = 0;   // seed small; charge_step grows it
     // Charge wind-up SFX — track OUR voice so stopping it can't cut the player's
-    // chargefocus (same shared instance/sample).
-    if (s_aiChargeShot) s_eChargeVoice = afn_play_sfx_inst_gain(afn_ai_sfx_charge, afn_enemy_sfx_gain(afn_ai_dist));
+    // chargefocus (same shared instance/sample). Shield it from the player's
+    // sample-wide chargefocus StopSound (fired when the player launches the blast
+    // the enemy is charge-dodging) so the enemy loop carries on instead of resetting.
+    if (s_aiChargeShot) { s_eChargeVoice = afn_play_sfx_inst_gain(afn_ai_sfx_charge, afn_enemy_sfx_gain(afn_ai_dist)); afn_sfx_protect_voice = s_eChargeVoice; }
 }
 
 // CHARGE step: hold the charge pose, grow the orb at the muzzle; set
 // afn_ai_charge_done when the wind-up elapses (the FireBeam node then launches).
 void afn_ai_charge_step(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     s_npcClip[i] = afn_aic_charge; s_efbCharging = 1;   // atk_spc_chg (charge pose)
     // Keep OUR charge voice alive — if it was cut, restart it. Check our specific
     // voice (not any sample-4 voice) so the player's chargefocus doesn't fool it.
-    if (s_aiChargeShot && !afn_inst_voice_active(s_eChargeVoice, afn_ai_sfx_charge))
+    if (s_aiChargeShot && !afn_inst_voice_active(s_eChargeVoice, afn_ai_sfx_charge)) {
         s_eChargeVoice = afn_play_sfx_inst_gain(afn_ai_sfx_charge, afn_enemy_sfx_gain(afn_ai_dist));
+        afn_sfx_protect_voice = s_eChargeVoice;
+    }
     float mx, my, mz; enemy_muzzle(i, &mx, &my, &mz);
     s_efbX = mx; s_efbY = my; s_efbZ = mz;
     // Grow the orb LINEARLY across the whole wind-up (like the player's level-based
@@ -2301,12 +2406,51 @@ void afn_ai_charge_step(void) {
     if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
     s_efbScale = 0.05f + (tgt - 0.05f) * frac;
     afn_ai_charge_done = (--s_aiTimer <= 0) ? 1 : 0;
+
+    // --- Charge-dodge: sidestep an incoming blast WITHOUT dropping the charge. The orb
+    // keeps growing (above) the whole time; we only add a lateral roll + swap the charge
+    // pose for the charge-dodge clip. Reuses the dodge tunables (range/chance/speed/CD). ---
+    if (s_aiChgDodgeCD > 0) s_aiChgDodgeCD--;
+    if (s_eChgDodgeFrames == 0 && s_aiChgDodgeCD == 0 && afn_fb_active) {
+        float d2 = afn_fb_nearest_sq(s_npcX[i], s_npcZ[i]);
+        float dtr = (float)afn_ai_dodge_trig;
+        if (d2 >= 0.0f && d2 <= dtr*dtr && ai_chance(afn_ai_dodgeprob * 0.01f)) {
+            float px = (float)player_x, pz = (float)player_z;
+            float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
+            float pl = afn_ai_dist > 1e-3f ? afn_ai_dist : sqrtf(dx*dx + dz*dz); if (pl < 1e-3f) pl = 1.0f;
+            float fx = dx/pl, fz = dz/pl, rx = fz, rz = -fx;
+            int side = ai_chance(0.5f) ? 1 : -1;
+            s_eChgDodgeDX = rx * side; s_eChgDodgeDZ = rz * side;
+            // Clip from the move vector projected onto the enemy's actual render facing
+            // (s_npcYaw) — robust to the facing lag/drift, same as the standard dodge.
+            float cdy = s_npcYaw[i] * DEG2RAD;
+            float cdDotR = s_eChgDodgeDX * cosf(cdy) - s_eChgDodgeDZ * sinf(cdy);
+            s_eChgDodgeClip = (cdDotR > 0.0f) ? afn_ai_chgdodge_clip_l : afn_ai_chgdodge_clip_r;
+            s_eChgDodgeFrames = s_eChgDodgeTotal = afn_ait_dodge_frames; s_aiChgDodgeCD = afn_ait_dodge_cd;
+        }
+    }
+    if (s_eChgDodgeFrames > 0) {
+        int total2 = s_eChgDodgeTotal, frames = s_eChgDodgeFrames;
+        int ramp = afn_ait_dodge_ramp    >= 0 ? afn_ait_dodge_ramp    : (afn_dodge_ramp  > 0 ? afn_dodge_ramp  : 6);
+        int fall = afn_ait_dodge_falloff >= 0 ? afn_ait_dodge_falloff : (afn_dodge_falloff > 0 ? afn_dodge_falloff : 6);
+        if (ramp > total2) ramp = total2; if (fall > total2) fall = total2;
+        float env = 1.0f;
+        if (ramp > 0) { float t = (float)(total2 - frames + 1) / (float)ramp; if (t > 1.0f) t = 1.0f; if (t*t < env) env = t*t; }
+        if (fall > 0) { float u = (float)frames / (float)fall; if (u > 1.0f) u = 1.0f; if (u*u < env) env = u*u; }
+        int spd = afn_ait_dodge_speed >= 0 ? afn_ait_dodge_speed : (afn_dodge_speed > 0 ? afn_dodge_speed : 70);
+        float sp = spd * 0.08f * env;
+        float ix = s_eChgDodgeDX * sp, iz = s_eChgDodgeDZ * sp;
+        int sub = (int)(sp / 3.0f) + 1;
+        for (int st = 0; st < sub; st++) { s_npcX[i] += ix/sub; s_npcZ[i] += iz/sub; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
+        s_npcClip[i] = s_eChgDodgeClip;   // charge-dodge anim overrides the static charge pose
+        s_eChgDodgeFrames--;
+    }
 }
 
 // FIRE: launch the projectile from the muzzle toward the player; start recovery.
 void afn_ai_fire_beam(void) {
     int i = afn_ai_slot; if (i < 0) return;
-    if (afn_enemy_frozen) return;   // cutscene freeze
+    if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     float px = (float)player_x, pz = (float)player_z;
     float mx, my, mz; enemy_muzzle(i, &mx, &my, &mz);
     float ddx = px - mx, ddz = pz - mz, dl = sqrtf(ddx*ddx + ddz*ddz); if (dl < 1e-3f) dl = 1.0f;
@@ -2402,6 +2546,11 @@ static void script_tick(void) {
     // Right is still held — with released-last, a Released->idle chain
     // stomped the Held->walk clip for one frame and reset the animation.
     // Pressed stays last so one-shots (attack on press) override held walks.
+    // NOTE on pause: we run the FULL graph even while paused so per-frame HUD upkeep in the
+    // update (lock-on reticle anchor, enemy HP bar afn_hpbar_*) keeps refreshing — otherwise
+    // it lapses and the reticle falls to its corner. The SIM is frozen instead at the source:
+    // the enemy AI steps + both projectile steps early-out on afn_paused, and the freeze block
+    // (after script_tick) zeros every player action. So nodes still run, nothing moves.
     afn_emitted_script_update();
     afn_emitted_script_key_released();
     afn_emitted_script_key_held();
@@ -3243,6 +3392,7 @@ int main(void)
     // Seed per-element visibility from the authored "visible" flag (ShowHUD /
     // CursorUp toggle it at runtime).
     for (int i = 0; i < AFN_HUD_ELEM_COUNT; i++) afn_hud_visible[i] = afn_hud_elems[i].startVis;
+    afn_hud_visible[AFN_PAUSE_ELEM] = 0; afn_paused = 0;   // pause overlay stays hidden until Start
     for (int i = 0; i < AFN_HUD_VIS_N; i++) afn_hud_elem_fade[i] = 256;   // opaque until a fade ramps it
     for (int i = 0; i < AFN_HUD_VIS_N; i++) {
         afn_hud_anchor_sprite[i] = -1;                                   // screen-space default
@@ -3335,6 +3485,33 @@ int main(void)
         // graph (script_tick) overrides afn_input_fwd/right, afn_move_speed,
         // orbit_angle and afn_rig_clip. The movement/camera below only READ them.
         input_update(&pad);
+        // Paused: ignore EVERY input except the pause/resume key. afn_pause_key is captured by
+        // the Toggle Pause node from whatever On Key Pressed drove it (Select, Start, ...), so the
+        // resume key is node-configurable — not hardcoded here. With the full graph still running
+        // for HUD upkeep, masking to that one key means no other node fires from a button — no
+        // lock-on toggle, no ability/energy spend, no movement, no camera orbit — only the Toggle
+        // Pause can resume. (Combined with the AI/projectile/anim gates below = total freeze.)
+        if (afn_paused) { afn_keys_held &= afn_pause_key; afn_keys_pressed &= afn_pause_key; afn_keys_released &= afn_pause_key; }
+#ifdef AFN_HAS_CAM_ANIM
+        // Cutscene input freeze (Play Camera Anim "Freeze Input" pin): while the path is
+        // ANIMATING (active + not done), mask EVERY button so no node fires — no ability,
+        // lock-on, charge, dodge, or movement during the shot. Gated on !done so a Hold-Last
+        // cut (e.g. the victory cam) releases input the instant the path completes, letting
+        // the results menu take over. The cut ends/eases on its own timer.
+        if (afn_cam_cut_active && !afn_cam_cut_done && afn_cam_cut_freeze_input) {
+            afn_keys_held = 0; afn_keys_pressed = 0; afn_keys_released = 0;
+        }
+#endif
+        // Lock Player Functions (game-over / menu screens): mask only the HELD keys so
+        // On-Key-Held abilities (Charge Up's energy fill + aura, Focus Blast charge) never
+        // run, while On-Key-Pressed menu navigation (cursor Up/Down, confirm) still fires.
+        // Uses last frame's flag (the node sets it during script_tick); reset just before
+        // the tick below, so it auto-clears the frame the node stops running.
+        if (afn_lock_functions) afn_keys_held = 0;
+        // Pause is NODE-DRIVEN now (Toggle Pause node, On Key Pressed(Start) in the BP): it
+        // flips afn_paused + shows/hides the overlay + plays the SFX. The runtime just RESPECTS
+        // afn_paused — script_tick runs only the key-pressed graph while paused, the freeze
+        // block zeros input, the NPC physics loop is skipped, and rigs_render holds animation.
         // On Hit detector: flag the player / any object that LOST hp since last
         // frame, so the On Hit node fires for every damage source (node or
         // hardcoded combat). Read by the On Hit dispatcher inside script_tick().
@@ -3351,7 +3528,23 @@ int main(void)
             }
         }
         afn_charging_up = 0;   // ChargeUp node re-asserts this each frame it runs (held)
-        script_tick();
+        afn_lock_functions = 0;   // Lock Player Functions node re-asserts each frame it runs (the held-mask above already consumed last frame's value)
+        script_tick();   // runs even while paused (HUD upkeep); AI + projectiles self-gate on afn_paused, freeze block (below) zeros player actions
+        // Lock Player Functions: clear every per-frame ability trigger the graph queued, so
+        // pressed/released abilities (Dodge, Quick Attack, Focus Blast fire, Block) and the
+        // charge aura don't fire on a menu screen. The HELD mask above stops the energy fill
+        // at its source; this stops the rest. Runs BEFORE the charge-aura render below.
+        if (afn_lock_functions) {
+            afn_charging_up = 0;
+            afn_fb_charge_req = 0; afn_fb_fire_req = 0;
+            afn_qa_trigger = 0; afn_dodge_trigger = 0;
+            afn_player_blocking = 0;
+            // The charge SOUND is on On-Key-PRESSED (Down) — the SAME key the menu's
+            // CursorDown uses — so the held-mask can't stop it without killing menu nav.
+            // It's a LOOPING sfx, so silence the loops here (after the graph queued it,
+            // before audio renders). One-shot nav beeps + music are untouched.
+            afn_stop_looping_sfx();
+        }
         // Charge aura: every HIDDEN attached-model mesh instance is shown while a
         // ChargeUp node ran this frame (button held), hidden otherwise.
 #if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_SPRITE_START_HIDDEN)
@@ -3362,16 +3555,67 @@ int main(void)
         }
 #endif
 #ifdef AFN_HAS_PLAYER_RIG
+        // Cutscene / scripted freeze (Play Camera Anim or any Freeze Player node): hold
+        // the player COMPLETELY still — kill movement, jump, dodge, Quick Attack, Focus
+        // Blast, block and charge before the action blocks below consume them, so NO
+        // ability can fire while frozen. Mirrors the charge lock-down below.
+        if (afn_player_frozen || afn_paused) {
+            afn_input_fwd = 0; afn_input_right = 0;        // no movement / strafe
+            afn_qa_trigger = 0; afn_dodge_trigger = 0;     // no Quick Attack / Dodge
+            player_vy = 0;                                 // no Jump
+            afn_fb_charge_req = 0; afn_fb_fire_req = 0;     // no Focus Blast charge/fire
+            afn_charging_up = 0;                           // no Charge Up
+            afn_player_blocking = 0;                       // drop Block
+            afn_qa_phase = 0; afn_qa_active = 0;            // cancel an in-progress Quick Attack (else its dash facing lingers)
+            afn_dodge_frames = 0;                          // cancel an in-progress dodge
+        }
+#ifdef AFN_HAS_CAM_ANIM
+        // Play Camera Anim "Snap Player": teleport the player to the scene-start pose the
+        // camera path was authored around, so a cutscene triggered MID-FIGHT (e.g. the
+        // victory cam) frames the player correctly instead of animating at the authored
+        // spot while the player is somewhere else. Fires once at cut start.
+        if (afn_cam_cut_snap) {
+            // Snap spot: the wired Snap X/Z (world units) if given, else the scene spawn.
+            // Y stays at the spawn ground (cutscene snaps are ground-level).
+            playerX = afn_cam_cut_snap_has_pos ? (float)afn_cam_cut_snap_x : AFN_PLAYER_START_X;
+            playerZ = afn_cam_cut_snap_has_pos ? (float)afn_cam_cut_snap_z : AFN_PLAYER_START_Z;
+            playerY = AFN_PLAYER_START_Y;
+            playerVY = 0.0f; grounded = 1;
+            // Face the wired Face Angle (degrees) if given, else the SCENE-DEFAULT heading
+            // the camera path was authored around — NOT the live gameplay orbit_angle (the
+            // player's last 3rd-person camera yaw), which made the victory cam show the
+            // player's BACK when you won facing away.
+            float snapFaceRad = afn_cam_cut_snap_has_face
+                ? (float)afn_cam_cut_snap_face_deg * (3.14159265f / 180.0f)
+                : afn_cam_slots[0][0];
+            afn_active_camera = 0;
+            orbit_angle = (int)(snapFaceRad * (65536.0f / 6.2831853f));
+            afn_player_heading = orbit_angle;
+            afn_cam_lock_target = -1; afn_lock_strafe = 0; afn_tank_camera = 0;   // clear lock-on/tank so rotation matches the authored spawn pose
+            afn_qa_phase = 0; afn_qa_active = 0; afn_dodge_frames = 0;             // cancel any in-progress Quick Attack / dodge that would hold the facing
+            afn_cam_cut_face_lock = 1;          // hold this facing for the whole cut (heading alone re-syncs to the rotated gameplay orbit)
+            afn_cam_reinit = 1;                 // re-seed the follow cam + orbit accumulator to the snapped pose
+            afn_cam_cut_snap = 0;
+        }
+#endif
         // Charging locks the player down: stand still, no other actions, hold the
         // charge pose. afn_charging_up is set by the ChargeUp node (D-pad Down held);
         // we cancel everything the node graph queued THIS frame before the movement/
         // action blocks below consume it, so the button does nothing but charge.
         if (afn_charging_up) {
-            afn_input_fwd = 0; afn_input_right = 0;        // stand still (kills movement + IsMoving + strafe anim)
-            afn_qa_trigger = 0; afn_dodge_trigger = 0;     // no Quick Attack / Dodge
-            player_vy = 0;                                 // no Jump this frame
-            afn_fb_charge_req = 0; afn_fb_fire_req = 0;     // no Focus Blast charge/fire
-            if (afn_charge_clip >= 0) afn_rig_clip = afn_charge_clip;   // play the charge anim
+            if (player_vy != 0) {
+                // Jump CANCELS the charge: a Jump mid-charge drops the charge and lets
+                // the jump through (don't eat the input + leave a dead, energy-draining
+                // press). Suppress only the Focus Blast so the same press can't also fire.
+                afn_charging_up = 0;
+                afn_fb_charge_req = 0; afn_fb_fire_req = 0;
+            } else {
+                afn_input_fwd = 0; afn_input_right = 0;        // stand still (kills movement + IsMoving + strafe anim)
+                afn_qa_trigger = 0; afn_dodge_trigger = 0;     // no Quick Attack / Dodge
+                player_vy = 0;                                 // no Jump this frame
+                afn_fb_charge_req = 0; afn_fb_fire_req = 0;     // no Focus Blast charge/fire
+                if (afn_charge_clip >= 0) afn_rig_clip = afn_charge_clip;   // play the charge anim
+            }
         }
         // No blocking in the air: the Block node sets afn_player_blocking (and it
         // persists across frames), so force it off whenever the player is airborne.
@@ -3405,7 +3649,18 @@ int main(void)
 #else
             playerX = afn_cam_start_x; playerY = afn_cam_start_h; playerZ = afn_cam_start_z;
 #endif
-            playerVY = 0.0f; grounded = 1; afn_player_heading = orbit_angle;
+            playerVY = 0.0f; grounded = 1;
+            // Reset the camera orbit + tank heading to the SCENE DEFAULT, NOT the stale
+            // gameplay orbit_angle the player last rotated the camera to. orbit_angle /
+            // afn_player_heading are only seeded from the default at BOOT; across a restart
+            // they persist, so the old code's `afn_player_heading = orbit_angle` baked in
+            // the last camera yaw -> in tank mode the intro player faced wherever you'd
+            // rotated. Seed both from the default slot so restart == fresh boot.
+            afn_active_camera = 0;
+            orbit_angle = (int)(afn_cam_slots[0][0] * (65536.0f / 6.2831853f));
+            afn_player_heading = orbit_angle;
+            afn_cam_reinit = 1;   // re-seed follow-cam eye + clear stale orbit accumulator / facing statics
+            afn_cam_lock_target = -1; afn_lock_strafe = 0; afn_tank_camera = 0;   // OnStart re-establishes
 #ifdef AFN_HAS_SPRITE_IDX
             for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = !afn_sprite_start_hidden[i]; afn_collision_enabled[i] = 1; }
 #endif
@@ -3598,6 +3853,9 @@ int main(void)
         {
             static int s_prevOrbit = 0, s_prevOrbitP = 0, s_prevOrbitInit = 0;
             if (!s_prevOrbitInit) { s_prevOrbit = orbit_angle; s_prevOrbitP = orbit_pitch; s_prevOrbitInit = 1; }
+            // Scene (re)start: snap the accumulator to the freshly-reset orbit_angle so the
+            // MAX_DELTA clamp below doesn't slow-swing the camera from the stale gameplay yaw.
+            if (afn_cam_reinit) { s_prevOrbit = orbit_angle; s_prevOrbitP = orbit_pitch; }
             int odelta = (int)(int16_t)(uint16_t)(orbit_angle - s_prevOrbit);
             int pdelta = orbit_pitch - s_prevOrbitP;
             orbitingNow = (odelta != 0 || pdelta != 0);
@@ -3674,6 +3932,11 @@ int main(void)
         // right AND afn_move_speed. No walk-speed fallback — purely node-driven.
         int facedByMove = 0;
         static float sTankRelFace = 0.0f;   // tank drive: facing offset from the heading (deg)
+        // Scene (re)start: drop the stale strafe-relative facing so a cutscene (e.g. the
+        // intro) faces the clean spawn pose instead of wherever the player last turned/
+        // strafed. Without this the player model came up rotated on restart. afn_cam_reinit
+        // is still set here (the camera-eye block clears it later this frame).
+        if (afn_cam_reinit) sTankRelFace = 0.0f;
         if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen && afn_qa_phase == 0) {
             float speed = afn_move_speed * 0.08f;
             float dx = mvX*speed, dz = mvZ*speed;
@@ -3722,6 +3985,7 @@ int main(void)
         // visibly rotates the whole frame. When a camera-relative walk ENDS,
         // bake its final facing into the heading (no snap there either).
         static int sWasFacedByMove = 0;
+        if (afn_cam_reinit) sWasFacedByMove = 0;   // (re)start: don't bake a stale move-facing into the heading
         if (afn_tank_camera) {
             if (sWasFacedByMove && !facedByMove)
                 afn_player_heading = (int)(playerYaw * (65536.0f / 360.0f));
@@ -4138,6 +4402,7 @@ int main(void)
             for (int i = 0; i < AFN_NPC_COUNT; i++) {
                 int eidx = (int)afn_npc_inst[i][7];
                 if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;
+                if (afn_paused) continue;   // pause: freeze NPC physics (gravity/nav/landing) too — script_tick gating alone misses this loop
                 // Enemy combat AI is NODE-DRIVEN now (enemy BP: On Update -> Ai Sense +
                 // state dispatch). It runs in script_tick(), not here.
                 // True box: half-extents (hx,hy,hz) + center offset (cx,cy,cz),
@@ -4392,6 +4657,10 @@ int main(void)
         static float s_camFollowY;             // smoothed player-Y follow (NDS s_camYSmooth)
         static float s_camPosPitch;            // eased POSITION pitch (rad) — view pitch snaps
         static int   s_camEyeInit = 0;
+        // Scene (re)start: drop the init flag so the eye/pitch/Y statics below SNAP to the
+        // player's spawn pose this frame instead of easing in from the previous run's stale
+        // camera (which read as a weird rotate, especially into the intro cutscene).
+        if (afn_cam_reinit) { s_camEyeInit = 0; afn_cam_reinit = 0; }
 
         {   // Smooth Y follow — AFN_JUMP_CAM_LAND grounded / AFN_JUMP_CAM_AIR airborne.
             if (!s_camEyeInit) s_camFollowY = playerY;
@@ -4615,14 +4884,29 @@ int main(void)
             // current segment's per-keyframe speed multiplier.
             float fpt = (afn_cam_anim_speed[an] > 0)
                         ? ((float)afn_cam_anim_step[an] / (float)afn_cam_anim_speed[an]) : 1.0f;
-            fpt *= afn_cam_seg_speed(an, afn_cam_cut_fframe);
+            if (!afn_cam_anim_smooth[an]) fpt *= afn_cam_seg_speed(an, afn_cam_cut_fframe);   // smooth path ignores per-keyframe Speed
             afn_cam_cut_fframe += fpt;
             if (afn_cam_cut_fframe >= (float)last) {
                 if (afn_cam_cut_loop) { while (last > 0 && afn_cam_cut_fframe >= (float)last) afn_cam_cut_fframe -= (float)last; }
                 else { afn_cam_cut_fframe = (float)last; afn_cam_cut_done = 1;
-                       if (!afn_cam_cut_hold) { afn_cam_cut_active = 0; afn_player_frozen = 0; afn_enemy_frozen = 0; } }
+                       if (!afn_cam_cut_hold) { afn_cam_cut_active = 0; afn_player_frozen = 0; afn_enemy_frozen = 0; afn_cam_cut_face_lock = 0; } }
             }
             afn_cam_cut_frame = (int)afn_cam_cut_fframe;
+#ifdef AFN_HAS_PLAYER_RIG
+            // Player Clip pin: force the player rig onto the scripted clip (e.g. a 'winner'
+            // pose) for the whole cut. This runs AFTER script_tick + the locomotion blocks
+            // and BEFORE rigs_render (below), so it overrides the idle/move state machine
+            // and the blueprint's idle anim until the path ends, then play resumes.
+            if (afn_cam_cut_player_clip >= 0) afn_rig_clip = afn_cam_cut_player_clip;
+            // Snap facing lock: hold the player at the snapped facing for the whole cut,
+            // overriding the tank heading (which re-syncs to the rotated gameplay orbit each
+            // frame and otherwise spun the player's back to the victory cam). Uses the wired
+            // Face Angle if given, else the scene-default facing.
+            if (afn_cam_cut_face_lock)
+                playerYaw = afn_cam_cut_snap_has_face
+                    ? (float)afn_cam_cut_snap_face_deg
+                    : afn_cam_slots[0][0] * (180.0f / 3.14159265f);
+#endif
             float cex, cey, cez, cfx, cfy, cfz;
             afn_cam_anim_sample(an, afn_cam_cut_fframe, &cex, &cey, &cez, &cfx, &cfy, &cfz);
             ex = cex; ey = cey; ez = cez;
@@ -4722,13 +5006,32 @@ int main(void)
         // Cut the looping charge wind-up SFX the instant the enemy stops charging
         // (fired, interrupted, died) — detect the s_efbCharging 1->0 edge.
         { static int s_prevEfbCharging = 0;
-          if (s_prevEfbCharging && !s_efbCharging) { afn_stop_inst_voice(s_eChargeVoice, afn_ai_sfx_charge); s_eChargeVoice = -1; }
+          if (s_prevEfbCharging && !s_efbCharging) { afn_stop_inst_voice(s_eChargeVoice, afn_ai_sfx_charge); s_eChargeVoice = -1; afn_sfx_protect_voice = -1; }
           s_prevEfbCharging = s_efbCharging; }
         enemy_orb_render(view);   // HARDCODED: enemy projectile orb (charge spot / in flight)
 #endif
 
         }   // end 3D world (skipped in 2D menu mode)
 
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_CAM_LOCK)
+        // Pause: the lock-on reticle's anchor AND its spin layers are only (re)set by the L
+        // lock-toggle's Show HUD node, so while the graph is paused they lapse — the marker
+        // drops to its authored corner and the spin keyframe layer can go inactive (freezing
+        // the spin). Re-pin the anchor to the live lock target AND re-assert the reticle
+        // element's keyframe layers active each paused frame so the reticle keeps spinning.
+        // (Don't reset frame/tick — that would stutter the spin; the layer-advance in
+        // hud_render keeps looping it.) Anchor == afn_cam_lock_target, both set on the toggle.
+        if (afn_paused && afn_cam_lock_target >= 0) {
+            afn_hud_anchor_sprite[AFN_TARGET_ELEM] = afn_cam_lock_target;
+#ifdef AFN_HAS_HUD_ANIM
+            const AfnHudElem* _rel = &afn_hud_elems[AFN_TARGET_ELEM];
+            for (int _rk = 0; _rk < _rel->pieceCount; _rk++) {
+                int _rl = afn_hud_piece_layer[_rel->pieceStart + _rk];
+                if (_rl >= 0) afn_hud_layer_active[_rl] = 1;   // keep spinning; frame/tick untouched
+            }
+#endif
+        }
+#endif
 #ifdef AFN_HAS_HUD
         hud_render();   // 2D overlay (pieces/text/cursor) — always, on top of 3D or as the menu
 #endif

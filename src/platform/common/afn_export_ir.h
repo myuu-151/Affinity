@@ -164,8 +164,8 @@ struct AfnCameraExport
     // Keyframed camera animations (cutscenes) from the player. eye in WORLD/rail space;
     // yaw/pitch = look direction (radians); interp 0=Const,1=Lin,2=Smooth. The Play
     // Camera Anim node selects one path by index (Anim pin).
-    struct CamKf { int frame = 0; float ex = 0, ey = 0, ez = 0, yaw = 0, pitch = 0, fov = 45; int interp = 2; float speed = 1.0f; };
-    struct CamAnimExp { char name[32] = "Anim"; int fps = 30; std::vector<CamKf> keyframes; };
+    struct CamKf { int frame = 0; float ex = 0, ey = 0, ez = 0, yaw = 0, pitch = 0, fov = 45; int interp = 2; float speed = 1.0f; bool smoothIn = true, smoothOut = true; };
+    struct CamAnimExp { char name[32] = "Anim"; int fps = 30; bool smoothPath = false; std::vector<CamKf> keyframes; };
     std::vector<CamAnimExp> camAnims;
 };
 
@@ -567,6 +567,9 @@ enum class AfnScriptNodeType : int {
     EnemyAiTiming,   // action (enemy AI): set the remaining decision/timing knobs (de-aggro, strafe leg, etc.)
     AiClips,         // action (enemy AI): set the enemy anim clip indices (name-resolved -> drift-proof)
     PlayCameraAnim,  // action: take over the camera + play the player's keyframed cutscene path
+    TogglePause,     // gate: flips the global scene-pause; exec A = On Paused, B = On Unpaused
+    AiDodgeClips,    // action (enemy AI): set the enemy dodge + charge-dodge clip indices (name-resolved -> drift-proof)
+    LockPlayerFunctions, // action: while it runs, lock out player abilities (menu nav still works)
     COUNT
 };
 

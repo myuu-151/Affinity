@@ -369,13 +369,14 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
         if (nanim > 0 && total > 0) {
             f << "#define AFN_HAS_CAM_ANIM 1\n";
             f << "#define AFN_CAM_ANIM_COUNT " << nanim << "\n";   // the Play Camera Anim node's Anim pin indexes this
-            f << "typedef struct { short frame; float ex,ey,ez,yaw,pitch,fov; unsigned char interp; float speed; } AfnCamKf;\n";
+            f << "typedef struct { short frame; float ex,ey,ez,yaw,pitch,fov; unsigned char interp; float speed; unsigned char smoothIn, smoothOut; } AfnCamKf;\n";
             f << "static const AfnCamKf afn_cam_anim_kf[" << total << "] = {\n";
             for (const auto& a : camera.camAnims)
                 for (const auto& kf : a.keyframes)
                     f << "    { " << kf.frame << ", " << Flt(WX(kf.ex)) << ", " << Flt(WY(kf.ey)) << ", " << Flt(WX(kf.ez))
                       << ", " << Flt(kf.yaw) << ", " << Flt(kf.pitch) << ", " << Flt(kf.fov) << ", " << (kf.interp & 0xFF)
-                      << ", " << Flt(kf.speed > 0.0001f ? kf.speed : 1.0f) << " },\n";
+                      << ", " << Flt(kf.speed > 0.0001f ? kf.speed : 1.0f)
+                      << ", " << (kf.smoothIn ? 1 : 0) << ", " << (kf.smoothOut ? 1 : 0) << " },\n";
             f << "};\n";
             f << "static const int afn_cam_anim_start[" << nanim << "] = {";
             { int run = 0; for (const auto& a : camera.camAnims) { f << run << ","; run += (int)a.keyframes.size(); } }
@@ -388,6 +389,11 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             f << "};\n";
             f << "static const short afn_cam_anim_step[" << nanim << "] = {";
             for (const auto& a : camera.camAnims) { int fps = a.fps>0?a.fps:30; int st=(int)((fps/60.0f)+0.5f); if(st<1)st=1; f << st << ","; }
+            f << "};\n";
+            // Smooth-whole-path flag per anim: 1 = traverse all points as one continuous
+            // uniform Catmull-Rom motion (global ease), ignoring per-keyframe interp/ease/speed.
+            f << "static const unsigned char afn_cam_anim_smooth[" << nanim << "] = {";
+            for (const auto& a : camera.camAnims) f << (a.smoothPath ? 1 : 0) << ",";
             f << "};\n";
         }
     }

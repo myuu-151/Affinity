@@ -33,9 +33,14 @@ void EmitNodeScriptBodies(std::ostream& f,
     };
     // Translate a node's flat editor-layer index to the runtime afn_hud_layer[]
     // range [first, first+count). Identity (count 1) when no remap is supplied.
+    // When a remap IS supplied but F is out of range (e.g. a node was hand-wired
+    // or migrated with the ELEMENT index instead of the flat layer index), return
+    // -1 so the caller skips it — never fall through to identity, which would emit
+    // an out-of-bounds afn_hud_layer_*[F] write and clobber adjacent layers'
+    // active/tick flags (this silently froze the lock-on reticle's spin layer 0).
     auto remapLayer = [&](int F) -> int {
         if (F >= 0 && F < (int)hudLayerRemap.size()) return hudLayerRemap[F];
-        return F;
+        return hudLayerRemap.empty() ? F : -1;
     };
     auto remapCount = [&](int F) -> int {
         if (F >= 0 && F < (int)hudLayerCount.size()) return hudLayerCount[F];
@@ -1230,17 +1235,67 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << "; afn_aic_jump = " << clip(14,"jump",31) << "; afn_aic_jumpfall = " << clip(15,"jump_fall",32) << ";\n";
                 break;
             }
+            case AfnScriptNodeType::AiDodgeClips: {
+                // Enemy DODGE clips (standard sidestep + charge-dodge). Same name-resolve
+                // pattern as AiClips: an unwired pin resolves the clip NAME -> current rig
+                // index at export (drift-proof); a wired SkelAnim node overrides. These are
+                // kept OFF the AiClips node (which is full at 16 pins) and decoupled from the
+                // player's volatile afn_dodge_clip_* (block/launch/charge rewrite those).
+                auto clip = [&](int pin, const char* nm, int fb) -> int {
+                    auto* d = findDataIn(a->id, pin);
+                    return d ? resolveInt(d) : resolveClipName(nm, fb);
+                };
+                f << "    afn_ai_chgdodge_clip_l = " << clip(0,"atk_spc_chg_dodge_L",9)
+                  << "; afn_ai_chgdodge_clip_r = " << clip(1,"atk_spc_chg_dodge_R",10) << ";\n";
+                f << "    afn_ai_dodge_clip_l = " << clip(2,"DodgeL",28) << "; afn_ai_dodge_clip_r = " << clip(3,"DodgeR",29) << ";\n";
+                f << "    afn_ai_dodge_clip_f = " << clip(4,"DodgeFW",27) << "; afn_ai_dodge_clip_b = " << clip(5,"DodgeBWD",26) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::LockPlayerFunctions:
+                // Lock out player combat functions for this frame. The runtime masks HELD
+                // keys (so On-Key-Held abilities like Charge Up don't run — kills the energy
+                // fill at its source) + clears the per-frame ability triggers after the graph.
+                // Menu nav (On Key Pressed) is unaffected. Drive On Update -> Is Hud Visible.
+                f << "    afn_lock_functions = 1;\n";
+                break;
             case AfnScriptNodeType::PlayCameraAnim: {
                 // Take over the camera + play the keyframed cutscene path. The runtime
                 // ticks + samples it while active and feeds look_at directly.
                 auto* an = findDataIn(a->id, 0); auto* fz = findDataIn(a->id, 1); auto* lp = findDataIn(a->id, 2); auto* hd = findDataIn(a->id, 3);
-                auto* fe = findDataIn(a->id, 4);
+                auto* fe = findDataIn(a->id, 4); auto* pc = findDataIn(a->id, 5); auto* cry = findDataIn(a->id, 6);
+                auto* sn = findDataIn(a->id, 7);
+                auto* sx = findDataIn(a->id, 8); auto* sz = findDataIn(a->id, 9); auto* fa = findDataIn(a->id, 10);
+                auto* fi = findDataIn(a->id, 11);
                 f << "#ifdef AFN_HAS_CAM_ANIM\n";
                 f << "    afn_cam_cut_anim = " << (an ? resolveInt(an) : 0) << ";\n";
                 f << "    afn_cam_cut_active = 1; afn_cam_cut_timer = 0; afn_cam_cut_frame = 0; afn_cam_cut_fframe = 0.0f; afn_cam_cut_done = 0;\n";
                 f << "    afn_cam_cut_loop = " << (lp ? resolveInt(lp) : 0) << "; afn_cam_cut_hold = " << (hd ? resolveInt(hd) : 0) << ";\n";
+                // Player Clip: force the player rig onto this clip for the whole cut (e.g. a
+                // 'winner' pose). Unwired = -1 = no override (idle/move state machine wins).
+                f << "    afn_cam_cut_player_clip = " << (pc ? resolveInt(pc) : -1) << ";\n";
                 if (fz) f << "    if (" << resolveInt(fz) << ") afn_player_frozen = 1;\n";
                 if (fe) f << "    if (" << resolveInt(fe) << ") afn_enemy_frozen = 1;\n";
+                // Cry Sound: one-shot SFX instance at the cutscene start (only when wired).
+                if (cry) f << "    afn_play_sound(" << resolveInt(cry) << ", 0);\n";
+                // Snap Player: teleport the player to the scene-start pose the path was
+                // authored around, so a mid-fight cutscene frames the player (only when wired).
+                if (sn) f << "    if (" << resolveInt(sn) << ") afn_cam_cut_snap = 1;\n";
+                // Snap pose overrides (only used when Snap Player fires). Snap X/Z = world
+                // position to snap to (Y stays at spawn ground); Face Angle = facing degrees.
+                // _has flags are set EVERY trigger (reset to 0 when unwired) so a prior cut's
+                // override can't leak; unwired = scene spawn / default facing (back-compat).
+                if (sx || sz)
+                    f << "    afn_cam_cut_snap_has_pos = 1; afn_cam_cut_snap_x = " << (sx ? resolveInt(sx) : 0)
+                      << "; afn_cam_cut_snap_z = " << (sz ? resolveInt(sz) : 0) << ";\n";
+                else
+                    f << "    afn_cam_cut_snap_has_pos = 0;\n";
+                if (fa)
+                    f << "    afn_cam_cut_snap_has_face = 1; afn_cam_cut_snap_face_deg = " << resolveInt(fa) << ";\n";
+                else
+                    f << "    afn_cam_cut_snap_has_face = 0;\n";
+                // Freeze Input: mask all buttons while the path animates (set EVERY trigger
+                // so it can't leak from a prior cut). 0/unwired = input stays live.
+                f << "    afn_cam_cut_freeze_input = " << (fi ? resolveInt(fi) : 0) << ";\n";
                 f << "#endif\n";
                 break;
             }
@@ -1558,6 +1613,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == AfnScriptNodeType::CheckFlag ||
                    t == AfnScriptNodeType::IsFlagSet ||
                    t == AfnScriptNodeType::FlipFlop ||
+                   t == AfnScriptNodeType::TogglePause ||
                    t == AfnScriptNodeType::OnRise ||
                    t == AfnScriptNodeType::Countdown ||
                    t == AfnScriptNodeType::IsLockedOn ||
@@ -1619,6 +1675,28 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    { static int afn_ff_" << a->id << " = 0;\n";
                 f << "      afn_ff_" << a->id << " = !afn_ff_" << a->id << ";\n";
                 f << "      if (afn_ff_" << a->id << ") {\n";
+                walkExec(a->id, 0);
+                f << "      } else {\n";
+                walkExec(a->id, 1);
+                f << "      } }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::TogglePause) {
+                // Flip the global scene pause. Gated so you can't pause mid-cutscene or
+                // once someone's dead (victory cut is Hold-Last so afn_cam_cut_active stays
+                // set; loss/death is caught by afn_health). A = On Paused, B = On Unpaused.
+                f << "#ifdef AFN_HAS_CAM_ANIM\n";
+                f << "    if (!afn_cam_cut_active && afn_health > 0) {\n";
+                f << "#else\n";
+                f << "    if (afn_health > 0) {\n";
+                f << "#endif\n";
+                f << "      afn_paused = !afn_paused;\n";
+                f << "      if (afn_paused) {\n";
+                // Capture the key that triggered this pause so the runtime input-mask
+                // lets ONLY that key through while paused (the resume key auto-matches
+                // whatever On Key Pressed drives this node — Select, Start, etc.). Fall back
+                // to KEY_START (64) if a non-key event paused, so you can never get stuck.
+                f << "        afn_pause_key = afn_keys_pressed ? afn_keys_pressed : 64;\n";
                 walkExec(a->id, 0);
                 f << "      } else {\n";
                 walkExec(a->id, 1);
@@ -1878,6 +1956,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                             if (dn) keys.push_back(dn->paramInt[0]);
                         }
                     if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+                    // Drop the "None" sentinel (key < 0): a key event with NO key set
+                    // must fire on NOTHING, not silently fall through to KEY_A/Cross
+                    // (keyName(-1) -> "KEY_A"). A chain left with no real key is skipped
+                    // entirely. Param-based keys (e.g. Select=5, Start=4 with no wire)
+                    // stay valid; only the unset default (-1) is filtered.
+                    { std::vector<int> valid; for (int k : keys) if (k >= 0) valid.push_back(k);
+                      keys.swap(valid); }
+                    if (keys.empty()) continue;   // None key: emit no chain
                     f << "    if (";
                     for (size_t ki = 0; ki < keys.size(); ki++) {
                         if (ki) f << " || ";

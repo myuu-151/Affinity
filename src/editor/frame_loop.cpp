@@ -903,6 +903,9 @@ enum class VsNodeType : int {
     EnemyAiTiming,   // action (enemy AI): set the remaining decision/timing knobs (de-aggro, strafe leg, etc.)
     AiClips,         // action (enemy AI): set the enemy anim clip indices (name-resolved -> drift-proof)
     PlayCameraAnim,  // action: take over the camera + play the player's keyframed cutscene path
+    TogglePause,     // gate: flips the global scene-pause; exec A = On Paused, B = On Unpaused
+    AiDodgeClips,    // action (enemy AI): set the enemy dodge + charge-dodge clip indices (name-resolved -> drift-proof)
+    LockPlayerFunctions, // action: while it runs, lock out player abilities (charge/dodge/quick-attack/focus/block) — menu nav still works (for game-over / menu screens)
     COUNT
 };
 
@@ -1314,7 +1317,10 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Ai Quick Attack", 0xFFAA5566, 1, 1, 12, 0, {"Dash Range", "Trigger /1000", "Dash Speed", "Contact Range", "Damage", "Cooldown", "Jump Vel x100", "Jump % (unused)", "Jump Cooldown", "Whoosh SFX", "Trail Alpha", "Trail Length"}, {}, {} },
     { "AI Timing",       0xFF55AA66, 1, 1, 10, 0, {"De-Aggro Frames", "Strafe Leg", "Yaw Ease x100", "Tap Windup", "Fire Recover", "Dodge Frames", "Dodge Cooldown", "Dodge Speed (-1=player)", "Dodge Ramp (-1=player)", "Dodge Falloff (-1=player)"}, {}, {} },
     { "AI Clips",        0xFF55AA66, 1, 1, 16, 0, {"Move", "Idle", "Strafe L", "Strafe LD", "Strafe LDFW", "Strafe R", "Strafe RD", "Strafe RDFW", "Backpeddle", "Block", "Charge Pose", "Launch", "Lunge", "Skid", "Jump", "Jump Fall"}, {}, {} },
-    { "Play Camera Anim",0xFF3355AA, 1, 1, 5, 0, {"Anim (int)", "Freeze Player (int)", "Loop (int)", "Hold Last (int)", "Freeze Enemy (int)"}, {}, {} },
+    { "Play Camera Anim",0xFF3355AA, 1, 1, 12, 0, {"Anim (int)", "Freeze Player (int)", "Loop (int)", "Hold Last (int)", "Freeze Enemy (int)", "Player Clip (int)", "Cry Sound (int)", "Snap Player (int)", "Snap X (int)", "Snap Z (int)", "Face Angle (int)", "Freeze Input (int)"}, {}, {} },
+    { "Toggle Pause",    0xFF4488CC, 1, 2, 0, 0, {}, {}, {"On Paused", "On Unpaused"} },
+    { "AI Dodge Clips",  0xFF55AA66, 1, 1, 6, 0, {"Chg Dodge L", "Chg Dodge R", "Dodge L", "Dodge R", "Dodge FW", "Dodge BWD"}, {}, {} },
+    { "Lock Player Functions", 0xFF4488CC, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1400,6 +1406,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
     case VsNodeType::DoOnce:        desc = "Only passes execution through once. Subsequent triggers are ignored."; break;
     case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
+    case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
     case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
     case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
     case VsNodeType::Sequence:      desc = "Fires Then 0, then Then 1 in order each trigger."; break;
@@ -1607,7 +1614,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AiDodgeBegin: desc = "Starts a side-roll dodge (picks a side, sets the roll vector/frames/cooldown). Fire once on the dodge-ready edge: Is AI Flag(dodge_ready) -> On Rise -> AI Dodge Begin + Set AI State(Dodge)."; break;
     case VsNodeType::AiDodgeStep: desc = "Integrates the dodge roll (ease-in/out, wall collision) and sets 'dodge_done' when finished. Run under Is AI State(Dodge); on dodge_done -> Set AI State(Strafe)."; break;
     case VsNodeType::AiChargeBegin: desc = "Starts a shot wind-up: rolls Charge % (full charge vs quick tap) and sets the wind-up length. Fire once on entering Charge. Charge SFX = the sound instance played (looped, proximity-gained, voice-tracked) during a full charge — default 4 ('charge'); set it from a Sound Instance node, or -1 for silent."; break;
-    case VsNodeType::AiChargeStep: desc = "Holds the charge pose and grows the orb at the muzzle bone; sets 'charge_done' when the wind-up elapses. Run under Is AI State(Charge); on charge_done -> AI Fire Beam + Set AI State(Fire)."; break;
+    case VsNodeType::AiChargeStep: desc = "Holds the charge pose and grows the orb at the muzzle bone; sets 'charge_done' when the wind-up elapses. Run under Is AI State(Charge); on charge_done -> AI Fire Beam + Set AI State(Fire). Charge-dodge: an incoming blast in Dodge Range makes the enemy sidestep WITHOUT dropping the charge (orb keeps growing, plays the charge-dodge clips) — so it no longer cancels the charge to dodge."; break;
     case VsNodeType::AiFireBeam: desc = "Launches the enemy projectile from the muzzle toward the player (sets damage/speed/homing and the full-beam flag for clashes), and starts the recovery + attack cooldown. Charged SFX / Tap SFX = the launch sound instances, played at proximity gain — defaults 5 ('shoot', for a full charge) and 6 ('smallblast', for a tap)."; break;
     case VsNodeType::AiFireRecover: desc = "Holds the launch clip and sets 'fire_done' when the recovery timer elapses. Run under Is AI State(Fire); on fire_done -> Set AI State(Strafe)."; break;
     case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000), Dodge Range (px from an incoming blast — homing OR forward — at which it reacts), Block % (chance to block instead of dodge an incoming blast), Block Dmg % (damage taken while blocking — 20 = take 20%; applies to BOTH the enemy and your block), Charge Speed + Tap Speed (the enemy's projectile launch speeds in TENTHS of px/frame, like your Fire Charge Shot — 20 = 2.0 full charge, 25 = 2.5 tap). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800/24/30/20/20/25."; break;
@@ -1620,8 +1627,10 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::QuickAttackStarted: desc = "Gate: passes on the SINGLE frame a Quick Attack dash ACTUALLY begins (after the cooldown/energy/charge gate, unlike the raw key press). Drive On Update -> Quick Attack Started -> Play Sound for a swing-whoosh that never fires on a blocked press."; break;
     case VsNodeType::AiQuickAttack: desc = "Enemy AI melee reflex (run every frame from the enemy's On Update, AFTER its movement/state nodes so it can override pose + position). Two behaviours: (1) Quick Attack — when the player is within Dash Range and off cooldown, it rolls Trigger /1000 per frame to dash in at Dash Speed, dealing Damage on contact within Contact Range (a connect ends the dash; only a whiff plays the skid). (2) Jump-evade — ALWAYS hops a player Quick Attack dashing straight at it (Jump Vel x100 launch, same gravity arc as the player), even mid-charge. Auto-suppressed during the beam-clash struggle. Jump % is reserved (unused) for a future chance-gated evade. Tunables match the old #defines: Dash Range 70, Trigger 12/1000, Dash Speed 34, Contact Range 14, Damage 8, Cooldown 90, Jump Vel 150 (=1.5), Jump Cooldown 40. Whoosh SFX = the dash sound instance (proximity-gained), default 17 ('quicksweep'). Trail Alpha (afterimage peak alpha, default 96; 0 = off) and Trail Length (white ghost count 0-6, default 6)."; break;
     case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
-    case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Drive from On Start or any event."; break;
+    case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Player Clip = wire a Skeletal Animation node to force the player rig onto that clip (e.g. a 'winner' pose) for the WHOLE cutscene — it overrides the idle/move state machine until the path ends, then normal animation resumes; leave unwired for no override. Cry Sound = wire a Sound Instance index to play once at the cutscene start (e.g. a Pokémon cry); unwired = silent. Snap Player (1) = teleport the player to the scene-START pose the camera path was authored around (and clear lock-on/tank facing) at cut start, so a cutscene triggered MID-FIGHT (e.g. the victory cam) frames the player correctly instead of animating at the authored spot while the player is elsewhere; leave 0/unwired if the player is already in place (e.g. the intro). Snap X / Snap Z (int, world units) = an explicit snap spot instead of the scene spawn (wire BOTH; Y stays at spawn ground); leave unwired to snap to spawn. Face Angle (int, degrees 0-359) = the facing to hold for the whole cut instead of the scene-default heading; leave unwired for the default. Snap X/Z + Face Angle only apply when Snap Player is on. Freeze Input (1) = mask ALL buttons while the path is animating so no ability/lock-on/charge/dodge/movement fires during the shot — pair with Freeze Player; it auto-releases the instant the path completes (so a Hold-Last cut's results menu still gets input); 0/unwired = input stays live. Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
+    case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
+    case VsNodeType::AiDodgeClips: desc = "Sets the enemy's DODGE animation clips — the only enemy clips the AI Clips node doesn't cover. Run once from On Update (alongside AI Clips). Two sets: the standard sidestep/roll (Dodge L/R, Dodge FW/BWD = DodgeL/DodgeR/DodgeFW/DodgeBWD) used when reacting to an incoming blast, and the charge-dodge (Chg Dodge L/R = atk_spc_chg_dodge_L/_R) it plays when it sidesteps WITHOUT dropping a charge. Like AI Clips, each UNWIRED pin is name-resolved AT EXPORT to the rig's current index so a glTF re-sort can't drift them (defaults: Chg Dodge L/R = 9/10, Dodge L/R/FW/BWD = 28/29/27/26). The L/R clip the runtime picks is facing-relative (it projects the dodge move onto the enemy's actual render facing), so wire L=DodgeL and R=DodgeR straight. Wire a pin to a Skeletal Animation node to override. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::ChargeUp: desc = "Hold-to-charge. While this runs each frame, it REVEALS the player's hidden attached effect models (the charge aura) and adds Energy/Frame to the Energy meter (clamped to max). The aura auto-hides the frame you stop running it. Drive it from On Key Held(Circle) so holding the button charges; release hides the aura and stops filling. Give the aura mesh 'Hidden (effect)' so it stays invisible until charging."; break;
     case VsNodeType::AiBlockBegin: desc = "Enemy raises its guard — plays the block clip and sets the blocking flag for a short window, so your blast deals only Block Dmg % to it. Fire once on the Should AI Block edge."; break;
     case VsNodeType::AiBlockStep: desc = "Holds the enemy block stance (clip + blocking flag), counts the window down, and sets the block_done flag at the end. Run under Is AI State(Block); on block_done -> Set AI State(Strafe)."; break;
@@ -6149,6 +6158,13 @@ static std::vector<int> s3DSelCamKfs;   // ALL selected cam-kf indices (shift-cl
 static bool  s3DGrabIsCamKf     = false; // current G grab moves a camera-keyframe eye
 static int   s3DCamKfSprite     = -1;   // player sprite whose cam-kf eyes are being grabbed
 static std::vector<s3DGrabSnap> s3DCamKfGrabOrigs;  // pre-grab eye positions (idx = keyframe index)
+// Camera-anim Edit Mode: the viewport camera DRIVES the selected keyframe (eye+yaw+pitch
+// sync live as you orbit/R-rotate/dolly), and scene-object G/scale/R is locked so you can
+// freely frame shots without nudging the player. Snaps camera->keyframe on enter/select.
+static bool  s3DCamKfEditMode   = false;
+static int   s3DCamKfEditLastSel = -2;   // last keyframe synced to (snap when this changes)
+static bool  s3DCamRotMode      = false; // R (in edit mode): mouse rotates the viewport orbit camera
+static ImVec2 s3DCamRotStartMouse = {};
 static bool  s3DWireframe       = false; // 3D tab: render placed meshes as wireframe
 static bool  s3DHideVertexColors = false; // 3D tab: stop showing painted vertex colors (view only; export unaffected)
 
@@ -6194,6 +6210,38 @@ static CameraAnim* curCamAnim(FloorSprite& sp) {
     if (sp.cameraAnims.empty()) return nullptr;
     if (sp.cameraAnimSel < 0 || sp.cameraAnimSel >= (int)sp.cameraAnims.size()) sp.cameraAnimSel = 0;
     return &sp.cameraAnims[sp.cameraAnimSel];
+}
+
+// ---- Camera-keyframe undo/redo (Ctrl+Z / Ctrl+Shift+Z, Meshes tab) ----
+// Snapshots the selected animation's whole keyframe list before each edit
+// (add/remove/retime/move/rotate, and once per Edit-Mode camera-drive session).
+struct CamKfUndoSnap { int spriteIdx; int animIdx; std::vector<CameraKeyframe> kfs; };
+static std::vector<CamKfUndoSnap> sCamUndoStack;
+static std::vector<CamKfUndoSnap> sCamRedoStack;
+static void CamUndoSnapshot(std::vector<CamKfUndoSnap>& stack) {
+    for (int i = 0; i < sSpriteCount; i++) if (sSprites[i].type == SpriteType::Player) {
+        CameraAnim* c = curCamAnim(sSprites[i]);
+        if (c) { stack.push_back({ i, sSprites[i].cameraAnimSel, c->keyframes });
+                 if (stack.size() > 64) stack.erase(stack.begin()); }
+        return;
+    }
+}
+static void CamUndoPush() { CamUndoSnapshot(sCamUndoStack); sCamRedoStack.clear(); }
+static void CamUndoApply(bool redo) {
+    std::vector<CamKfUndoSnap>& from = redo ? sCamRedoStack : sCamUndoStack;
+    std::vector<CamKfUndoSnap>& to   = redo ? sCamUndoStack : sCamRedoStack;
+    if (from.empty()) return;
+    CamKfUndoSnap s = from.back(); from.pop_back();
+    if (s.spriteIdx >= 0 && s.spriteIdx < sSpriteCount) {
+        FloorSprite& sp = sSprites[s.spriteIdx];
+        if (s.animIdx >= 0 && s.animIdx < (int)sp.cameraAnims.size()) {
+            to.push_back({ s.spriteIdx, s.animIdx, sp.cameraAnims[s.animIdx].keyframes });  // current -> opposite stack
+            sp.cameraAnims[s.animIdx].keyframes = s.kfs;
+            sp.cameraAnimSel = s.animIdx;
+            s3DSelCamKf = -1; s3DSelCamKfs.clear(); s3DCamKfEditLastSel = -2;  // re-snap on next edit-mode frame
+            sProjectDirty = true;
+        }
+    }
 }
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
@@ -7810,7 +7858,7 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
         if (sp.riggedMeshIdx >= 0)
-            fprintf(f, "spriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
+            fprintf(f, "spriteRig=%d,%d,%d,%.2f\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0, sp.modelYaw);
         // Player camera presets (Mode 4): one line per slot.
         for (const auto& cs : sp.cameraSlots)
             fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
@@ -7818,10 +7866,11 @@ static bool SaveProject(const std::string& path)
                     cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
         // Keyframed camera animations (cutscenes): one camAnim= per path, then its camKf= keyframes.
         for (const auto& anim : sp.cameraAnims) {
-            fprintf(f, "camAnim=%s|%d\n", anim.name[0] ? anim.name : "Anim", anim.fps);
+            fprintf(f, "camAnim=%s|%d|%d\n", anim.name[0] ? anim.name : "Anim", anim.fps, anim.smoothPath ? 1 : 0);
             for (const auto& kf : anim.keyframes)
-                fprintf(f, "camKf=%d|%.4f|%.4f|%.4f|%.6f|%.6f|%.4f|%d|%.4f\n",
-                        kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed);
+                fprintf(f, "camKf=%d|%.4f|%.4f|%.4f|%.6f|%.6f|%.4f|%d|%.4f|%d|%d\n",
+                        kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed,
+                        kf.smoothIn ? 1 : 0, kf.smoothOut ? 1 : 0);
         }
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
@@ -8343,17 +8392,18 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
             if (sp.riggedMeshIdx >= 0)
-                fprintf(f, "msSpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
+                fprintf(f, "msSpriteRig=%d,%d,%d,%.2f\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0, sp.modelYaw);
             for (const auto& cs : sp.cameraSlots)
                 fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
                         cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset);
             // Keyframed camera animations (cutscenes), per scene sprite.
             for (const auto& anim : sp.cameraAnims) {
-                fprintf(f, "msCamAnim=%s|%d\n", anim.name[0] ? anim.name : "Anim", anim.fps);
+                fprintf(f, "msCamAnim=%s|%d|%d\n", anim.name[0] ? anim.name : "Anim", anim.fps, anim.smoothPath ? 1 : 0);
                 for (const auto& kf : anim.keyframes)
-                    fprintf(f, "msCamKf=%d|%.4f|%.4f|%.4f|%.6f|%.6f|%.4f|%d|%.4f\n",
-                            kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed);
+                    fprintf(f, "msCamKf=%d|%.4f|%.4f|%.4f|%.6f|%.6f|%.4f|%d|%.4f|%d|%d\n",
+                            kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed,
+                            kf.smoothIn ? 1 : 0, kf.smoothOut ? 1 : 0);
             }
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
@@ -8506,7 +8556,7 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
             if (sp.riggedMeshIdx >= 0)
-                fprintf(f, "m7SpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
+                fprintf(f, "m7SpriteRig=%d,%d,%d,%.2f\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0, sp.modelYaw);
             for (const auto& cs : sp.cameraSlots)
                 fprintf(f, "m7CamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
@@ -9082,13 +9132,14 @@ static bool LoadProject(const std::string& path)
                 for (int i = 0; i < sp2.subModelCount; i++) sp2.subModels[i].meshIdx = -2;  // pending (filled by subModel= lines)
             }
             else if (strncmp(line, "spriteRig=", 10) == 0 && sSpriteCount > 0) {
-                int rIdx = -1, aIdx = 0, play = 1;
-                sscanf(line + 10, "%d,%d,%d", &rIdx, &aIdx, &play);
+                int rIdx = -1, aIdx = 0, play = 1; float myaw = 0.0f;
+                sscanf(line + 10, "%d,%d,%d,%f", &rIdx, &aIdx, &play, &myaw);
                 FloorSprite& sp2 = sSprites[sSpriteCount - 1];
                 sp2.riggedMeshIdx = rIdx;
                 sp2.rigAnimIdx = aIdx;
                 sp2.rigAnimPlay = (play != 0);
                 sp2.rigAnimClock = 0.0f;
+                sp2.modelYaw = myaw;
             }
             else if (strncmp(line, "camSlot=", 8) == 0 && sSpriteCount > 0) {
                 char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0, cly = 0, cla = 0, cho = 0, cdo = 0, clp = 0, cvo = 0;
@@ -9099,15 +9150,18 @@ static bool LoadProject(const std::string& path)
                 }
             }
             else if (strncmp(line, "camAnim=", 8) == 0 && sSpriteCount > 0) {
-                CameraAnim anim; char nm[32] = {}; int fps = 30;
-                if (sscanf(line + 8, "%31[^|]|%d", nm, &fps) >= 1) { snprintf(anim.name, sizeof(anim.name), "%s", nm[0] ? nm : "Anim"); anim.fps = fps; }
+                CameraAnim anim; char nm[32] = {}; int fps = 30, smp = 0;
+                if (sscanf(line + 8, "%31[^|]|%d|%d", nm, &fps, &smp) >= 1) { snprintf(anim.name, sizeof(anim.name), "%s", nm[0] ? nm : "Anim"); anim.fps = fps; anim.smoothPath = (smp != 0); }
                 FloorSprite& sp2 = sSprites[sSpriteCount - 1];
                 if ((int)sp2.cameraAnims.size() < FloorSprite::kMaxCameraAnims) sp2.cameraAnims.push_back(anim);
             }
             else if (strncmp(line, "camKf=", 6) == 0 && sSpriteCount > 0) {
-                CameraKeyframe kf; int fr = 0, ip = 2; float spd = 1.0f;
-                if (sscanf(line + 6, "%d|%f|%f|%f|%f|%f|%f|%d|%f", &fr, &kf.ex, &kf.ey, &kf.ez, &kf.yaw, &kf.pitch, &kf.fov, &ip, &spd) >= 4) {
+                CameraKeyframe kf; int fr = 0, ip = 2; float spd = 1.0f; int si = -1, so = -1;
+                if (sscanf(line + 6, "%d|%f|%f|%f|%f|%f|%f|%d|%f|%d|%d", &fr, &kf.ex, &kf.ey, &kf.ez, &kf.yaw, &kf.pitch, &kf.fov, &ip, &spd, &si, &so) >= 4) {
                     kf.frame = fr; kf.interp = ip; kf.speed = (spd > 0.0001f) ? spd : 1.0f;
+                    // Old files lack the smooth flags: derive from interp (Smooth=eased both ways).
+                    kf.smoothIn  = (si >= 0) ? (si != 0) : (ip == 2);
+                    kf.smoothOut = (so >= 0) ? (so != 0) : (ip == 2);
                     FloorSprite& sp2 = sSprites[sSpriteCount - 1];
                     if (!sp2.cameraAnims.empty() && (int)sp2.cameraAnims.back().keyframes.size() < FloorSprite::kMaxCameraKeyframes)
                         sp2.cameraAnims.back().keyframes.push_back(kf);   // append to the current animation
@@ -10442,11 +10496,12 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "msSpriteRig=", 12) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
-                    int rIdx = -1, aIdx = 0, play = 1;
-                    sscanf(line + 12, "%d,%d,%d", &rIdx, &aIdx, &play);
+                    int rIdx = -1, aIdx = 0, play = 1; float myaw = 0.0f;
+                    sscanf(line + 12, "%d,%d,%d,%f", &rIdx, &aIdx, &play, &myaw);
                     FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                     sp2.riggedMeshIdx = rIdx; sp2.rigAnimIdx = aIdx;
                     sp2.rigAnimPlay = (play != 0); sp2.rigAnimClock = 0.0f;
+                    sp2.modelYaw = myaw;
                 }
             }
             else if (strncmp(line, "msCamSlot=", 10) == 0 && !sMapScenes.empty()) {
@@ -10463,8 +10518,8 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "msCamAnim=", 10) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
-                    CameraAnim anim; char nm[32] = {}; int fps = 30;
-                    if (sscanf(line + 10, "%31[^|]|%d", nm, &fps) >= 1) { snprintf(anim.name, sizeof(anim.name), "%s", nm[0] ? nm : "Anim"); anim.fps = fps; }
+                    CameraAnim anim; char nm[32] = {}; int fps = 30, smp = 0;
+                    if (sscanf(line + 10, "%31[^|]|%d|%d", nm, &fps, &smp) >= 1) { snprintf(anim.name, sizeof(anim.name), "%s", nm[0] ? nm : "Anim"); anim.fps = fps; anim.smoothPath = (smp != 0); }
                     FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                     if ((int)sp2.cameraAnims.size() < FloorSprite::kMaxCameraAnims) sp2.cameraAnims.push_back(anim);
                 }
@@ -10472,9 +10527,11 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "msCamKf=", 8) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
-                    CameraKeyframe kf; int fr = 0, ip = 2; float spd = 1.0f;
-                    if (sscanf(line + 8, "%d|%f|%f|%f|%f|%f|%f|%d|%f", &fr, &kf.ex, &kf.ey, &kf.ez, &kf.yaw, &kf.pitch, &kf.fov, &ip, &spd) >= 4) {
+                    CameraKeyframe kf; int fr = 0, ip = 2; float spd = 1.0f; int si = -1, so = -1;
+                    if (sscanf(line + 8, "%d|%f|%f|%f|%f|%f|%f|%d|%f|%d|%d", &fr, &kf.ex, &kf.ey, &kf.ez, &kf.yaw, &kf.pitch, &kf.fov, &ip, &spd, &si, &so) >= 4) {
                         kf.frame = fr; kf.interp = ip; kf.speed = (spd > 0.0001f) ? spd : 1.0f;
+                        kf.smoothIn  = (si >= 0) ? (si != 0) : (ip == 2);
+                        kf.smoothOut = (so >= 0) ? (so != 0) : (ip == 2);
                         FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                         if (!sp2.cameraAnims.empty() && (int)sp2.cameraAnims.back().keyframes.size() < FloorSprite::kMaxCameraKeyframes)
                             sp2.cameraAnims.back().keyframes.push_back(kf);
@@ -10970,11 +11027,12 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "m7SpriteRig=", 12) == 0 && !sM7Scenes.empty()) {
                 MapScene& ms = sM7Scenes.back();
                 if (ms.spriteCount > 0) {
-                    int rIdx = -1, aIdx = 0, play = 1;
-                    sscanf(line + 12, "%d,%d,%d", &rIdx, &aIdx, &play);
+                    int rIdx = -1, aIdx = 0, play = 1; float myaw = 0.0f;
+                    sscanf(line + 12, "%d,%d,%d,%f", &rIdx, &aIdx, &play, &myaw);
                     FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                     sp2.riggedMeshIdx = rIdx; sp2.rigAnimIdx = aIdx;
                     sp2.rigAnimPlay = (play != 0); sp2.rigAnimClock = 0.0f;
+                    sp2.modelYaw = myaw;
                 }
             }
             else if (strncmp(line, "m7CamSlot=", 10) == 0 && !sM7Scenes.empty()) {
@@ -11910,17 +11968,44 @@ static void DrawColorBox(ImDrawList* dl, ImVec2 pos, ImVec2 size, uint32_t col, 
 static float Scaled(float base) { return base * sUiScale; }
 
 // Sample a keyframed camera path at a (fractional) frame -> eye position + look
-// forward vector + fov. Catmull-Rom on the eye path; angle-unwrapped, smoothstep-eased
-// yaw/pitch (never Catmull-Rom on angles — risks ±PI overshoot). The per-keyframe
-// `interp` is the mode used LEAVING that keyframe. This is mirrored line-for-line by
+// forward vector + fov. Catmull-Rom on the eye path; angle-unwrapped yaw/pitch (never
+// Catmull-Rom on angles — risks ±PI overshoot). Time easing is per-keyframe Smooth In/Out
+// (decel arriving / accel leaving), applied to all eye modes. The per-keyframe
+// `interp` is the eye-path shape used LEAVING that keyframe. This is mirrored line-for-line by
 // afn_cam_anim_sample() in the PSV runtime, so both stay in sync. Returns false if empty.
 static bool SampleCameraAnim(const std::vector<CameraKeyframe>& kf, float frame,
-                             float eye[3], float fwd[3], float* fovOut)
+                             bool smoothPath, float eye[3], float fwd[3], float* fovOut)
 {
     int n = (int)kf.size();
     if (n == 0) return false;
     auto fwdFrom = [](float yaw, float pitch, float* o){ float cp = cosf(pitch); o[0]=sinf(yaw)*cp; o[1]=sinf(pitch); o[2]=cosf(yaw)*cp; };
     if (n == 1) { eye[0]=kf[0].ex; eye[1]=kf[0].ey; eye[2]=kf[0].ez; fwdFrom(kf[0].yaw,kf[0].pitch,fwd); if (fovOut) *fovOut=kf[0].fov; return true; }
+    if (smoothPath) {
+        // Whole-path smooth travel: ONE continuous motion from the first keyframe to the
+        // last. A single global smoothstep eases the overall timeline (gentle start/stop),
+        // then a UNIFORM-knot Catmull-Rom through every eye keeps velocity continuous at
+        // each interior point — no per-keyframe ramp/stop (the jitter source). Per-keyframe
+        // interp / Smooth In-Out / Speed are intentionally ignored in this mode. Mirrored
+        // by afn_cam_anim_sample() (smooth branch) in the PSV runtime.
+        float first = (float)kf[0].frame, lastf = (float)kf[n-1].frame;
+        float p = (lastf > first) ? (frame - first) / (lastf - first) : 0.0f;
+        if (p < 0.0f) p = 0.0f; if (p > 1.0f) p = 1.0f;
+        float P = p*p*(3.0f-2.0f*p);                       // global ease in/out
+        float u = P * (float)(n-1);
+        int si = (int)u; if (si > n-2) si = n-2; if (si < 0) si = 0;
+        float t = u - (float)si, t2 = t*t, t3 = t2*t;
+        const CameraKeyframe& A = kf[si]; const CameraKeyframe& B = kf[si+1];
+        const CameraKeyframe& P0 = kf[si>0 ? si-1 : si];
+        const CameraKeyframe& P3 = kf[(si+2)<n ? si+2 : si+1];
+        auto cr = [&](float a,float b,float c,float d){ return 0.5f*((2.0f*b) + (-a+c)*t + (2.0f*a-5.0f*b+4.0f*c-d)*t2 + (-a+3.0f*b-3.0f*c+d)*t3); };
+        eye[0]=cr(P0.ex,A.ex,B.ex,P3.ex); eye[1]=cr(P0.ey,A.ey,B.ey,P3.ey); eye[2]=cr(P0.ez,A.ez,B.ez,P3.ez);
+        float dyaw = B.yaw - A.yaw;
+        while (dyaw >  3.14159265f) dyaw -= 6.28318531f;
+        while (dyaw < -3.14159265f) dyaw += 6.28318531f;
+        fwdFrom(A.yaw + dyaw*t, A.pitch + (B.pitch-A.pitch)*t, fwd);
+        if (fovOut) *fovOut = A.fov + (B.fov-A.fov)*t;
+        return true;
+    }
     int i = 0;
     if (frame <= (float)kf[0].frame) i = 0;
     else if (frame >= (float)kf[n-1].frame) i = n-2;
@@ -11931,7 +12016,13 @@ static bool SampleCameraAnim(const std::vector<CameraKeyframe>& kf, float frame,
     if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
     int mode = A.interp;
     if (mode == 0) t = 0.0f;                                   // Constant: hold A
-    float te = (mode == 2) ? t*t*(3.0f-2.0f*t) : t;           // smoothstep for Smooth
+    // Per-keyframe time ease: smooth-OUT of A (slow start) and smooth-IN to B (slow stop)
+    // are independent toggles that work in Linear eye mode too. Cubic Hermite on the time
+    // parameter with endpoint slopes s0/s1 (0 = eased/flat, 1 = linear): te(0)=0, te(1)=1,
+    // te'(0)=s0, te'(1)=s1. Both eased = smoothstep; both linear = t.
+    float s0 = A.smoothOut ? 0.0f : 1.0f;
+    float s1 = B.smoothIn  ? 0.0f : 1.0f;
+    float te = (s0+s1-2.0f)*t*t*t + (3.0f-2.0f*s0-s1)*t*t + s0*t;
     if (mode == 2) {                                          // Catmull-Rom eye
         const CameraKeyframe& P0 = kf[i>0 ? i-1 : i];
         const CameraKeyframe& P3 = kf[(i+2)<n ? i+2 : i+1];
@@ -11985,6 +12076,15 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     // Vertex paint mode hijacks left-drag for painting (see below), so don't let it
     // start a camera orbit. Middle-drag pan and wheel zoom still work while painting.
     bool paintActive = s3DVtxPaint && sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size();
+
+    // Ctrl+Z / Ctrl+Shift+Z: undo / redo camera-keyframe edits (when not vertex
+    // painting and a camera keyframe is selected or Edit Mode is on). The 2D
+    // editor's global sprite-undo is suppressed in this context (see UndoPop site).
+    if (!s3DVtxPaint && (s3DSelCamKf >= 0 || s3DCamKfEditMode)
+        && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false))
+    {
+        if (ImGui::GetIO().KeyShift) CamUndoApply(true); else CamUndoApply(false);
+    }
 
     // Ctrl+Z undoes the last vertex-paint stroke (or a Clear) while paint mode is on.
     if (s3DVtxPaint && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)
@@ -12789,7 +12889,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 s3DGrabMode = true;
                 s3DGrabAxis = 0;
                 s3DGrabStartMouse = mpos;
-            } else {
+            } else if (!s3DCamKfEditMode) {   // Edit Mode locks scene-object grab (no accidental player move)
                 s3DGrabIsRailPoint = false;
                 s3DGrabOrig.clear();
                 for (int i = 0; i < sSpriteCount; i++)
@@ -13049,20 +13149,43 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     // ---- R rotate: Blender-style spin of the whole selection ----
     {
         ImGuiIO& io = ImGui::GetIO();
-        // Enter rotate mode on R (default axis = Z so R alone spins around Z).
-        if (hovered && !s3DRotMode && !s3DGrabMode
+        // Enter rotate mode on R. In Camera Edit Mode, R rotates the VIEWPORT
+        // CAMERA (orbit) so you can aim the selected keyframe's shot; otherwise it
+        // rotates the selected scene objects (locked while Edit Mode is on).
+        if (hovered && !s3DRotMode && !s3DCamRotMode && !s3DGrabMode
             && ImGui::IsKeyPressed(ImGuiKey_R, false)
             && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
         {
-            s3DRotOrig.clear();
-            for (int i = 0; i < sSpriteCount; i++)
-                if (sSprites[i].selected)
-                    s3DRotOrig.push_back({ i, sSprites[i].rotationX, sSprites[i].rotation, sSprites[i].rotationZ });
-            if (!s3DRotOrig.empty()) {
-                s3DRotMode = true;
-                s3DRotAxis = 'Z';
-                s3DRotStartMouse = mpos;
+            if (s3DCamKfEditMode) {
+                s3DCamRotMode = true;
+                s3DCamRotStartMouse = mpos;
+            } else {
+                s3DRotOrig.clear();
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].selected)
+                        s3DRotOrig.push_back({ i, sSprites[i].rotationX, sSprites[i].rotation, sSprites[i].rotationZ });
+                if (!s3DRotOrig.empty()) {
+                    s3DRotMode = true;
+                    s3DRotAxis = 'Z';
+                    s3DRotStartMouse = mpos;
+                }
             }
+        }
+        // Camera rotate (Edit Mode): mouse motion orbits the viewport camera; the
+        // live sync in the Camera Animations panel writes the new pose into the
+        // selected keyframe each frame (its Yaw/Pitch/Eye update in real time).
+        if (s3DCamRotMode)
+        {
+            float dx = mpos.x - s3DCamRotStartMouse.x;
+            float dy = mpos.y - s3DCamRotStartMouse.y;
+            s3DOrbitYaw   -= dx * 0.005f;
+            s3DOrbitPitch -= dy * 0.005f;
+            if (s3DOrbitPitch < -1.5f) s3DOrbitPitch = -1.5f;
+            if (s3DOrbitPitch >  1.5f) s3DOrbitPitch =  1.5f;
+            s3DCamRotStartMouse = mpos;
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+                ImGui::IsKeyPressed(ImGuiKey_R, false) || ImGui::IsKeyPressed(ImGuiKey_Escape))
+                s3DCamRotMode = false;
         }
         if (s3DRotMode)
         {
@@ -13989,9 +14112,13 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             // character faces. Added to ALL yaw (authored + movement-facing) —
             // set 180 if the rig walks backwards ("moonwalks") on device.
             ImGui::PushItemWidth(Scaled(110));
-            if (ImGui::DragFloat("Model Yaw##rigyawoff", &rmR.yawOffset, 1.0f, -180.0f, 180.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::DragFloat("Rig Yaw (shared)##rigyawoff", &rmR.yawOffset, 1.0f, -180.0f, 180.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward-axis correction for the rig ASSET — added to EVERY object using this glTF (editor + device). If the model moonwalks, set 180. Changing this rotates all objects that share the rig.");
+            // Per-object yaw: rotates THIS placed object only, so two objects sharing
+            // the same glTF can face different ways without dragging each other.
+            if (ImGui::DragFloat("Model Yaw (this obj)##objyaw", &sp.modelYaw, 1.0f, -180.0f, 180.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-OBJECT yaw correction — rotates only this placed object (added on top of the shared Rig Yaw). Use this to orient two objects that share a glTF independently, instead of Rig Yaw which moves both.");
             ImGui::PopItemWidth();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward-axis correction added to every yaw this rig is drawn with (editor + device). If the model faces backwards while walking (moonwalk), set 180.");
         }
 
         // ---- Collision (rigged glTF) ----
@@ -16090,8 +16217,19 @@ static void DrawCameraAnimChunk(FloorSprite& sp)
     auto restorePreview = [&]() { if (savedValid) { s3DOrbitYaw=savedYaw; s3DOrbitPitch=savedPitch; s3DOrbitDist=savedDist; s3DTargetX=savedTX; s3DTargetY=savedTY; s3DTargetZ=savedTZ; savedValid=false; } previewing = false; playing = false; };
 
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.65f, 0.95f, 0.8f, 1.0f), "Camera Animations (cutscenes)");
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keyframed camera paths for cutscenes (e.g. intro / victory / failure). Add or pick an animation below, then aim the viewport and 'Add Keyframe from Camera'.\nEdit eye points in the 3D viewport (right-click pick, G move). Play one in-game with the Play Camera Anim node (its Anim pin = the index shown).");
+    // Click the header to LOCK scene-object editing: while locked you can right-click
+    // a keyframe dot and G-move it without the player tagging along, and R rotates the
+    // viewport camera. Direct dot/field editing stays fully available (no camera-drive).
+    {
+        bool locked = s3DCamKfEditMode;
+        ImGui::PushStyleColor(ImGuiCol_Text, locked ? ImVec4(1.0f, 0.55f, 0.30f, 1.0f) : ImVec4(0.65f, 0.95f, 0.8f, 1.0f));
+        char hdr[96];
+        snprintf(hdr, sizeof(hdr), "%s Camera Animations (cutscenes)%s",
+                 locked ? "[LOCKED]" : "[ unlocked ]", locked ? "   -- player edits OFF, R = rotate cam --" : "");
+        if (ImGui::Selectable(hdr, false)) { s3DCamKfEditMode = !s3DCamKfEditMode; if (!s3DCamKfEditMode) s3DCamRotMode = false; }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("CLICK to lock/unlock scene-object editing.\nWhile LOCKED: the player/objects can't be grabbed, scaled or rotated, so right-click + G on a keyframe dot moves ONLY the dot (the player no longer tags along), and R rotates the viewport camera. Direct keyframe editing (G the dots, edit the fields, Ctrl+Z) all still work.\n\nKeyframed camera paths for cutscenes — add/pick an animation, aim the viewport and 'Add Keyframe from Camera'. Play one in-game with the Play Camera Anim node.");
+    }
 
     // ---- Animation list: add / select / rename / delete ----
     if (ImGui::Button("+ Add Animation##caa")) {
@@ -16124,6 +16262,7 @@ static void DrawCameraAnimChunk(FloorSprite& sp)
 
     if (ImGui::Button("+ Add Keyframe from Camera##cak")) {
         if ((int)ca.keyframes.size() < FloorSprite::kMaxCameraKeyframes) {
+            CamUndoPush();
             CameraKeyframe kf;
             captureEyeLook(kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch);
             kf.frame = ca.keyframes.empty() ? 0 : ca.keyframes.back().frame + ca.fps;  // +1s
@@ -16134,6 +16273,8 @@ static void DrawCameraAnimChunk(FloorSprite& sp)
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Capture the current viewport camera position + angle as a new keyframe (1 second after the last).");
 
     if (ImGui::DragInt("Path FPS##cakfps", &ca.fps, 1, 1, 60)) { if (ca.fps < 1) ca.fps = 1; if (ca.fps > 60) ca.fps = 60; sProjectDirty = true; }
+    if (ImGui::Checkbox("Smooth whole path##caksmooth", &ca.smoothPath)) { CamUndoPush(); sProjectDirty = true; }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Travel from the first point to the last as ONE continuous motion\n(uniform Catmull-Rom + a single ease in/out), instead of ramping/stopping\nat every keyframe. Best for smooth fly-throughs. Ignores the per-keyframe\nEye Path / Smooth In-Out / Speed settings while on.");
     if (ca.keyframes.empty()) { ImGui::TextDisabled("(no keyframes yet — aim + add)"); return; }
 
     int lastFrame = ca.keyframes.back().frame;
@@ -16144,25 +16285,42 @@ static void DrawCameraAnimChunk(FloorSprite& sp)
         bool sel = (ci == s3DSelCamKf);
         if (sel) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.2f, 1.0f));
         bool open = ImGui::TreeNode(hdr);
+        if (ImGui::IsItemClicked()) { s3DSelCamKf = ci; s3DSelCamKfs.clear(); s3DSelCamKfs.push_back(ci); }  // pick this keyframe (Edit Mode snaps camera to it)
         if (sel) ImGui::PopStyleColor();
         if (open) {
             if (ImGui::DragInt("Frame##cakf", &kf.frame, 1, 0, 1000000)) { if (kf.frame < 0) kf.frame = 0; sProjectDirty = true; }
+            if (ImGui::IsItemActivated()) CamUndoPush();
             if (ImGui::DragFloat3("Eye##cake", &kf.ex, 0.5f)) sProjectDirty = true;
+            if (ImGui::IsItemActivated()) CamUndoPush();
             if (ImGui::SliderAngle("Yaw##caky", &kf.yaw, -180.0f, 180.0f)) sProjectDirty = true;
+            if (ImGui::IsItemActivated()) CamUndoPush();
             if (ImGui::SliderAngle("Pitch##cakp", &kf.pitch, -89.0f, 89.0f)) sProjectDirty = true;
-            const char* im[] = { "Constant", "Linear", "Smooth" };
-            if (ImGui::Combo("Interp##caki", &kf.interp, im, 3)) sProjectDirty = true;
+            if (ImGui::IsItemActivated()) CamUndoPush();
+            const char* im[] = { "Constant", "Linear", "Curved" };
+            int tmpInterp = kf.interp;
+            if (ImGui::Combo("Eye Path##caki", &tmpInterp, im, 3)) { CamUndoPush(); kf.interp = tmpInterp; sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shape of the eye PATH leaving this keyframe:\nConstant = hold, Linear = straight line, Curved = Catmull-Rom spline.\nTiming smoothness is the separate Smooth In/Out toggles below.");
+            // Per-endpoint TIME easing — independent of the eye-path shape, so they ease
+            // Linear paths too. Smooth In = decelerate arriving; Smooth Out = ease away.
+            bool si = kf.smoothIn, so = kf.smoothOut;
+            if (ImGui::Checkbox("Smooth In##caksi", &si)) { CamUndoPush(); kf.smoothIn = si; sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ease the camera as it ARRIVES at this keyframe (decelerate).\nApplies in Linear mode too.");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Smooth Out##cakso", &so)) { CamUndoPush(); kf.smoothOut = so; sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ease the camera as it LEAVES this keyframe (accelerate gently).\nApplies in Linear mode too.");
             bool isLast = (ci == (int)ca.keyframes.size() - 1);
             ImGui::BeginDisabled(isLast);
             if (ImGui::DragFloat("Speed##caksp", &kf.speed, 0.01f, 0.05f, 10.0f, "%.2fx")) { if (kf.speed < 0.05f) kf.speed = 0.05f; sProjectDirty = true; }
+            if (ImGui::IsItemActivated()) CamUndoPush();
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(isLast
                 ? "Speed has no effect on the last keyframe (no segment follows it)."
                 : "Playback-rate multiplier for the leg from this keyframe to the next.\n2.0 = twice as fast, 0.5 = half speed. Frame numbers are unchanged.");
-            if (ImGui::SmallButton("Set from Camera##cakset")) { captureEyeLook(kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch); sProjectDirty = true; }
+            if (ImGui::SmallButton("Set from Camera##cakset")) { CamUndoPush(); captureEyeLook(kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch); sProjectDirty = true; }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-snapshot this keyframe from the current viewport camera.");
             ImGui::SameLine();
             if (ImGui::SmallButton("Remove##cakrm")) {
+                CamUndoPush();
                 ca.keyframes.erase(ca.keyframes.begin() + ci);
                 s3DSelCamKf = -1; s3DSelCamKfs.clear();
                 sProjectDirty = true;
@@ -16193,12 +16351,12 @@ static void DrawCameraAnimChunk(FloorSprite& sp)
         int sf = (int)previewFrame;
         if (ImGui::SliderInt("Frame##cakscrub", &sf, 0, lastFrame > 0 ? lastFrame : 1)) { previewFrame = (float)sf; playing = false; }
         if (playing) {
-            previewFrame += ImGui::GetIO().DeltaTime * (float)ca.fps * CameraSegSpeed(ca.keyframes, previewFrame);
+            previewFrame += ImGui::GetIO().DeltaTime * (float)ca.fps * (ca.smoothPath ? 1.0f : CameraSegSpeed(ca.keyframes, previewFrame));
             if (previewFrame >= (float)lastFrame) { previewFrame = (float)lastFrame; playing = false; }
         }
         // Drive the orbit camera so the viewport shows the sampled shot (eye + look fwd).
         float eye[3], fwd[3], fov;
-        if (SampleCameraAnim(ca.keyframes, previewFrame, eye, fwd, &fov)) {
+        if (SampleCameraAnim(ca.keyframes, previewFrame, ca.smoothPath, eye, fwd, &fov)) {
             float D = s3DOrbitDist; if (D < 1.0f) D = 50.0f;
             s3DTargetX = eye[0] + fwd[0]*D; s3DTargetY = eye[1] + fwd[1]*D; s3DTargetZ = eye[2] + fwd[2]*D;
             s3DOrbitYaw = atan2f(-fwd[0], -fwd[2]);
@@ -19039,9 +19197,9 @@ void FrameTick(float dt)
                         exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch, cs.lookYaw, (cs.lockAware ? 1.0f : 0.0f), cs.hOffset, cs.depthOffset, cs.lookPitch, cs.vOffset });
                     // Keyframed camera animations (cutscenes) — copy as-is (eye stays world space).
                     for (const auto& anim : fsCam.cameraAnims) {
-                        AfnCameraExport::CamAnimExp ea; snprintf(ea.name, sizeof(ea.name), "%s", anim.name); ea.fps = anim.fps;
+                        AfnCameraExport::CamAnimExp ea; snprintf(ea.name, sizeof(ea.name), "%s", anim.name); ea.fps = anim.fps; ea.smoothPath = anim.smoothPath;
                         for (const auto& kf : anim.keyframes)
-                            ea.keyframes.push_back({ kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed });
+                            ea.keyframes.push_back({ kf.frame, kf.ex, kf.ey, kf.ez, kf.yaw, kf.pitch, kf.fov, kf.interp, kf.speed, kf.smoothIn, kf.smoothOut });
                         exportCam.camAnims.push_back(ea);
                     }
                     break;
@@ -20614,8 +20772,10 @@ void FrameTick(float dt)
 
             bool wantKeys = !ImGui::GetIO().WantCaptureKeyboard || sGrabMode;
 
-            // Ctrl+Z / Ctrl+Y: undo/redo
-            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
+            // Ctrl+Z / Ctrl+Y: undo/redo. Suppressed while editing camera keyframes
+            // in the Meshes tab — Draw3DView's cam-undo handles Ctrl+Z there.
+            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)
+                && !(sActiveTab == EditorTab::ThreeD && (s3DSelCamKf >= 0 || s3DCamKfEditMode)))
                 UndoPop();
             if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
                 RedoPush();
@@ -20627,7 +20787,10 @@ void FrameTick(float dt)
             // whole mesh alongside the point.
             if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_G) && !sGrabMode && !sScaleMode
                 && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
-                && s3DSelRailPoint < 0 && !s3DGrabIsRailPoint)
+                && s3DSelRailPoint < 0 && !s3DGrabIsRailPoint
+                // Camera Animations LOCKED (or a keyframe is selected) in the Meshes tab:
+                // don't grab the player here — G belongs to the camera-keyframe dots.
+                && !(sActiveTab == EditorTab::ThreeD && (s3DSelCamKf >= 0 || s3DCamKfEditMode)))
             {
                 UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
                 sGrabMode = true;
@@ -20716,7 +20879,8 @@ void FrameTick(float dt)
 
             // S key: enter scale mode (mouse Y to scale, like G for grab)
             if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_S) && !sGrabMode && !sScaleMode
-                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
+                && !(sActiveTab == EditorTab::ThreeD && (s3DSelCamKf >= 0 || s3DCamKfEditMode)))  // Camera Anim locked: no player scale
             {
                 UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
                 sScaleMode = true;
@@ -22985,8 +23149,14 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::Key:
-                    if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount)
-                        sub = sVsKeyNames[n.paramInt[0]];
+                    sub = (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount) ? sVsKeyNames[n.paramInt[0]] : "None";
+                    break;
+                case VsNodeType::OnKeyPressed:
+                case VsNodeType::OnKeyReleased:
+                case VsNodeType::OnKeyHeld:
+                    // Show the event's own key (or None) so an unconfigured key event
+                    // is obvious on the canvas. A wired Key node overrides at codegen.
+                    sub = (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount) ? sVsKeyNames[n.paramInt[0]] : "None";
                     break;
                 case VsNodeType::Direction:
                     if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsAxisCount)
@@ -23923,6 +24093,7 @@ void FrameTick(float dt)
                 case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
                 case VsNodeType::DoOnce:        desc = "Only passes execution through once. Subsequent triggers are ignored."; break;
                 case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
+    case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
                 case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
                 case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
                 case VsNodeType::Sequence:      desc = "Fires Then 0, then Then 1 in order each trigger."; break;
@@ -25254,10 +25425,14 @@ void FrameTick(float dt)
                         "    afn_move_speed = 0;\n"
                         "    afn_bp_def_frozen[<blueprint>] = 1;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // MovePlayer: if (!afn_player_frozen && key_is_down(...))\n"
+                        "    // Mode 0 MovePlayer: if (!afn_player_frozen && key_is_down(...))\n"
                         "    //   skips input, facing (tm_player_facing), and movement\n"
-                        "    // Anim: if (!afn_player_frozen) { tm_anim_timer++; }\n"
-                        "    //   frame cycling frozen, holds current sprite frame\n"
+                        "    // Mode 4 (rig): while afn_player_frozen, a guard zeros EVERY action\n"
+                        "    //   trigger before the blocks consume it — afn_input_fwd/right,\n"
+                        "    //   player_vy (jump), afn_dodge_trigger, afn_qa_trigger,\n"
+                        "    //   afn_fb_charge_req/fire_req, afn_charging_up, afn_player_blocking —\n"
+                        "    //   so NO ability (move/jump/dodge/Quick Attack/Focus Blast/charge/block)\n"
+                        "    //   can fire during a cutscene; in-progress steps are also !frozen-gated.\n"
                         "    // Anim index: afn_play_anim from other nodes ignored while frozen\n"
                         "    // Dispatch: afn_bp_def_frozen[bpIdx] skips blueprint dispatch");
                     break;
@@ -25676,6 +25851,38 @@ void FrameTick(float dt)
                         "    //   a wired Skeletal Animation node overrides that clip.");
                     break;
                 }
+                case VsNodeType::AiDodgeClips: {
+                    editorCode = "// Set the enemy DODGE clip indices (unwired pins name-resolve at export)";
+                    setActionFunc(infoNode, "_ai_dodge_clips",
+                        "    afn_ai_chgdodge_clip_l = <Chg Dodge L>; afn_ai_chgdodge_clip_r = <Chg Dodge R>;   // atk_spc_chg_dodge_L/_R (9/10)\n"
+                        "    afn_ai_dodge_clip_l = <Dodge L>; afn_ai_dodge_clip_r = <Dodge R>;   // DodgeL/DodgeR (28/29)\n"
+                        "    afn_ai_dodge_clip_f = <Dodge FW>; afn_ai_dodge_clip_b = <Dodge BWD>;   // DodgeFW/DodgeBWD (27/26)\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_dodge_begin picks L/R by projecting the dodge move onto the enemy's\n"
+                        "    //   render facing (cdDotR>0 -> _l else _r); locked = perpendicular strafe with\n"
+                        "    //   afn_ai_dodge_clip_l/r, out-of-lock = back/forth with _f/_b. The charge-dodge\n"
+                        "    //   in afn_ai_charge_step sidesteps WITHOUT dropping the charge -> afn_ai_chgdodge_clip_l/r.\n"
+                        "    // Codegen: an UNWIRED pin emits resolveClipName(\"<name>\", <fallback>) at export;\n"
+                        "    //   a wired Skeletal Animation node overrides that clip. Decoupled from the player's\n"
+                        "    //   volatile afn_dodge_clip_* (block/launch/charge rewrite those).");
+                    break;
+                }
+                case VsNodeType::LockPlayerFunctions:
+                    editorCode = "// Lock out player combat functions (charge/dodge/quick-attack/focus/block) — menu nav still works";
+                    setActionFunc(infoNode, "_lock_player_functions",
+                        "    afn_lock_functions = 1;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Before script_tick (using last frame's flag): if (afn_lock_functions) afn_keys_held = 0;\n"
+                        "    //   -> On-Key-HELD abilities (Charge Up's afn_energy += rate + aura, Focus Blast\n"
+                        "    //   charge) never RUN, killing the energy fill at its source. On-Key-PRESSED menu\n"
+                        "    //   nav (Cursor Up/Down, confirm) is untouched, so the results menu still works.\n"
+                        "    // After script_tick (before the charge-aura render): if (afn_lock_functions) clears\n"
+                        "    //   afn_charging_up, afn_fb_charge_req/fire_req, afn_qa_trigger, afn_dodge_trigger,\n"
+                        "    //   afn_player_blocking -> the pressed/released abilities + aura don't fire either,\n"
+                        "    //   AND afn_stop_looping_sfx() silences the charge LOOP sound (it's On-Key-Pressed\n"
+                        "    //   Down, the menu nav's key, so the held-mask can't catch it; one-shot beeps stay).\n"
+                        "    // Drive per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions.");
+                    break;
                 case VsNodeType::PlayCameraAnim: {
                     editorCode = "// Take over the camera + play the player's keyframed cutscene path";
                     setActionFunc(infoNode, "_play_camera_anim",
@@ -25683,16 +25890,32 @@ void FrameTick(float dt)
                         "    afn_cam_cut_anim = <Anim>;   // which path (0-based, matches the Meshes-tab list)\n"
                         "    afn_cam_cut_active = 1; afn_cam_cut_timer = 0; afn_cam_cut_frame = 0; afn_cam_cut_fframe = 0.0f; afn_cam_cut_done = 0;\n"
                         "    afn_cam_cut_loop = <Loop>; afn_cam_cut_hold = <Hold Last>;\n"
+                        "    afn_cam_cut_player_clip = <Player Clip>;   // -1 when unwired = no clip override\n"
                         "    if (<Freeze Player>) afn_player_frozen = 1;\n"
                         "    if (<Freeze Enemy>) afn_enemy_frozen = 1;\n"
+                        "    if (<Cry Sound wired>) afn_play_sound(<Cry Sound>, 0);   // one-shot at cut start\n"
+                        "    if (<Snap Player>) afn_cam_cut_snap = 1;   // teleport player to spawn pose at cut start\n"
+                        "    afn_cam_cut_snap_has_pos = <Snap X|Z wired? 1:0>; afn_cam_cut_snap_x = <Snap X>; afn_cam_cut_snap_z = <Snap Z>;\n"
+                        "    afn_cam_cut_snap_has_face = <Face Angle wired? 1:0>; afn_cam_cut_snap_face_deg = <Face Angle>;\n"
+                        "    afn_cam_cut_freeze_input = <Freeze Input>;   // mask all buttons while the path animates\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c camera block) ---\n"
                         "    // Each frame while active: advance the float playhead afn_cam_cut_fframe by\n"
                         "    //   (AFN_CAM_ANIM_STEP/AFN_CAM_ANIM_SPEED) * afn_cam_seg_speed(frame)\n"
                         "    // so each keyframe's per-segment Speed multiplier warps that leg's playback\n"
-                        "    // rate; then sample the Catmull-Rom eye + smoothstep yaw/pitch and feed it\n"
+                        "    // rate; then sample the Catmull-Rom eye + eased yaw/pitch and feed it\n"
                         "    // straight into look_at, bypassing the orbit. At the end: loop, or hold the\n"
                         "    // last frame, or clear active (+ unfreeze player+enemy) so play resumes.\n"
+                        "    // Player Clip: while active, the block forces afn_rig_clip = afn_cam_cut_player_clip\n"
+                        "    //   AFTER script_tick + the locomotion blocks (and before rigs_render), so the\n"
+                        "    //   forced clip (e.g. 'winner') wins for the whole cut, then play resumes.\n"
+                        "    // Snap Player: at cut start, teleport player to AFN_PLAYER_START (or the wired\n"
+                        "    //   Snap X/Z world spot, Y at spawn ground) + reset heading to the scene-default\n"
+                        "    //   (or the wired Face Angle degrees) and clear lock-on/tank facing, so a mid-fight\n"
+                        "    //   cut frames the player right. Face Angle is held for the whole cut (face_lock).\n"
+                        "    // Freeze Input: right after input_update each frame, while (afn_cam_cut_active &&\n"
+                        "    //   !afn_cam_cut_done) the main loop zeroes afn_keys_held/pressed/released, so NO\n"
+                        "    //   node fires from a button for the ANIMATION's duration only; releases on done.\n"
                         "    // Freeze Enemy: afn_enemy_frozen gates afn_ai_sense/roam/chase/strafe +\n"
                         "    // dodge/quick-attack/charge/fire — the enemy holds idle until the cut ends.");
                     break;
@@ -25763,7 +25986,14 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AiChargeStep: {
                     editorCode = "// Grow the charge orb at the muzzle (sets 'charge_done' when wound up)";
-                    setActionFunc(infoNode, "_ai_charge_step", "    afn_ai_charge_step();   // charge pose + orb at muzzle bone; afn_ai_charge_done at 0");
+                    setActionFunc(infoNode, "_ai_charge_step",
+                        "    afn_ai_charge_step();   // charge pose + orb at muzzle bone; afn_ai_charge_done at 0\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Charge-dodge: while charging, an incoming blast in Dodge Range (+ Dodge %)\n"
+                        "    //   makes the enemy SIDESTEP without dropping the charge — the orb keeps\n"
+                        "    //   growing and it plays atk_spc_chg_dodge_L/R (afn_ai_chgdodge_clip_l/r)\n"
+                        "    //   instead of the static pose. Is Blast Incoming returns 0 while charging\n"
+                        "    //   so the node-driven dodge (a state switch) can't cancel the charge.");
                     break;
                 }
                 case VsNodeType::AiFireBeam: {
@@ -26327,9 +26557,11 @@ void FrameTick(float dt)
                         "    // Right after script_tick, while afn_charging_up the player is LOCKED:\n"
                         "    //   afn_input_fwd = afn_input_right = 0;        // stand still\n"
                         "    //   afn_qa_trigger = afn_dodge_trigger = 0;     // no Quick Attack / Dodge\n"
-                        "    //   player_vy = 0;                              // no Jump\n"
                         "    //   afn_fb_charge_req = afn_fb_fire_req = 0;     // no Focus Blast\n"
                         "    //   afn_rig_clip = afn_charge_clip;             // play the charge anim (default clip 23)\n"
+                        "    // EXCEPTION - Jump cancels the charge: if player_vy != 0 (a Jump node fired),\n"
+                        "    //   afn_charging_up = 0 and the jump is LET THROUGH (player_vy kept) instead of\n"
+                        "    //   eaten, so a mid-charge Jump bails out cleanly rather than dead-pressing.\n"
                         "    // Then every HIDDEN attached-model mesh instance (the charge aura) is\n"
                         "    // shown while charging, hidden otherwise:\n"
                         "    //   for each aura si: afn_sprite_visible[afn_mesh_inst_sprite[si]] = afn_charging_up;");
@@ -27046,6 +27278,30 @@ void FrameTick(float dt)
                         "    else { /* exec B */ }\n"
                         "    // --- Runtime (main.c) ---\n"
                         "    // Static toggle; alternates output chain each invocation");
+                    break;
+                case VsNodeType::TogglePause:
+                    editorCode = "// Flip the global scene pause (On Paused / On Unpaused)";
+                    setActionFunc(infoNode, "_toggle_pause",
+                        "#ifdef AFN_HAS_CAM_ANIM\n"
+                        "    if (!afn_cam_cut_active && afn_health > 0) {   // not mid-cutscene, not dead\n"
+                        "#else\n"
+                        "    if (afn_health > 0) {\n"
+                        "#endif\n"
+                        "      afn_paused = !afn_paused;\n"
+                        "      if (afn_paused) {\n"
+                        "        afn_pause_key = afn_keys_pressed ? afn_keys_pressed : 64; // capture the\n"
+                        "        // key that paused (KEY_START=64 fallback) so the resume key matches it\n"
+                        "        /* exec A: On Paused */\n"
+                        "      } else { /* exec B: On Unpaused */ }\n"
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_paused gates the whole scene: script_tick() runs ONLY the key-pressed\n"
+                        "    // graph while paused (so this node can resume), the freeze block zeros all\n"
+                        "    // player input, the enemy AI + projectiles (node-driven On Update) and the\n"
+                        "    // NPC physics loop are skipped, and rigs_render holds every rig's frame.\n"
+                        "    // While paused the input mask passes ONLY afn_pause_key, so the resume key\n"
+                        "    // auto-matches whatever On Key Pressed drives this node (Select, Start, ...).\n"
+                        "    // Wire ShowHUD/PlaySound to On Paused and HideHUD/PlaySound to On Unpaused.");
                     break;
                 case VsNodeType::Gate: {
                     editorCode = "// Blocks execution if Open == 0";
@@ -29755,6 +30011,13 @@ void FrameTick(float dt)
                 VsNode n;
                 n.id = sVsNextId++;
                 n.type = t;
+                // Key events + Key data nodes default to "None" (-1): an UNSET key must
+                // fire on NOTHING, not silently on Cross (KEY_A — keyName(0)). The user
+                // wires a Key node or picks a key; until then the chain is skipped at
+                // codegen. (Old default 0 = Cross stole the jump button / toggled cams.)
+                if (t == VsNodeType::OnKeyPressed || t == VsNodeType::OnKeyReleased ||
+                    t == VsNodeType::OnKeyHeld   || t == VsNodeType::Key)
+                    n.paramInt[0] = -1;
                 n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
                 n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
                 n.groupId = sVsEditingGroup;
@@ -30202,7 +30465,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite || n.type == VsNodeType::LockOnTarget || n.type == VsNodeType::Jump) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite || n.type == VsNodeType::LockOnTarget || n.type == VsNodeType::Jump || n.type == VsNodeType::OnKeyPressed || n.type == VsNodeType::OnKeyReleased || n.type == VsNodeType::OnKeyHeld) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -30327,9 +30590,35 @@ void FrameTick(float dt)
                     memcpy(&n.paramInt[0], &fv, sizeof(float));
                 break;
             }
+            case VsNodeType::OnKeyPressed:
+            case VsNodeType::OnKeyReleased:
+            case VsNodeType::OnKeyHeld: {
+                // The event's own key (fallback when no Key data node is wired). "None"
+                // (-1) = fires on nothing — the safe default so an unset event can't
+                // silently trigger on Cross. A wired Key node still overrides this.
+                ImGui::Text("Key");
+                const char* evkPrev = (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount) ? sVsKeyNames[n.paramInt[0]] : "None";
+                if (ImGui::BeginCombo("##EvKey", evkPrev)) {
+                    if (ImGui::Selectable("None", n.paramInt[0] < 0)) n.paramInt[0] = -1;
+                    for (int k = 0; k < kVsKeyCount; k++)
+                        if (ImGui::Selectable(sVsKeyNames[k], n.paramInt[0] == k)) n.paramInt[0] = k;
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("Wire a Key node to override / OR multiple keys.");
+                break;
+            }
             case VsNodeType::Key:
                 ImGui::Text("Key");
-                ImGui::Combo("##Key2", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
+                {
+                    // None-aware combo: paramInt[0] < 0 = "None" (event fires on nothing).
+                    const char* keyPrev = (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount) ? sVsKeyNames[n.paramInt[0]] : "None";
+                    if (ImGui::BeginCombo("##Key2", keyPrev)) {
+                        if (ImGui::Selectable("None", n.paramInt[0] < 0)) n.paramInt[0] = -1;
+                        for (int k = 0; k < kVsKeyCount; k++)
+                            if (ImGui::Selectable(sVsKeyNames[k], n.paramInt[0] == k)) n.paramInt[0] = k;
+                        ImGui::EndCombo();
+                    }
+                }
                 if (n.paramInt[0] >= 12) {
                     // Stick directions: tunable analog trip point. Stored in
                     // paramInt[1] (0 = unset -> default 64% = the old fixed
@@ -37117,7 +37406,7 @@ void Render3DViewport()
                 float rigYawDeg = fs.rotation;
                 if (sEditorMode == EditorMode::Play && fs.type == SpriteType::Player && s3DPlayerFaceValid)
                     rigYawDeg = s3DPlayerFaceYaw;
-                glRotatef(rigYawDeg + rm.yawOffset, 0,1,0);   // + Model Yaw forward correction
+                glRotatef(rigYawDeg + rm.yawOffset + fs.modelYaw, 0,1,0);   // rig forward correction + per-object Model Yaw
                 glRotatef(fs.rotationX, 1,0,0);
                 glRotatef(fs.rotationZ, 0,0,1);
                 glScalef(fs.scale, fs.scale, fs.scale);
@@ -37235,7 +37524,7 @@ void Render3DViewport()
                         float lx = pose[sm.boneIdx].px * fs.scale;
                         float ly = pose[sm.boneIdx].py * fs.scale;
                         float lz = pose[sm.boneIdx].pz * fs.scale;
-                        float yr = (rigYawDeg + rm.yawOffset) * 3.14159265f / 180.0f;
+                        float yr = (rigYawDeg + rm.yawOffset + fs.modelYaw) * 3.14159265f / 180.0f;
                         float c = cosf(yr), s = sinf(yr);
                         bxw = sx + (lx * c + lz * s);
                         byw = sy + ly;
@@ -37374,7 +37663,7 @@ void Render3DViewport()
                 for (int s = 0; s <= steps; s++) {
                     float fr = f0 + (f1 - f0) * (float)s / (float)steps;
                     float eye[3], fwd[3], fov;
-                    if (SampleCameraAnim(kfs, fr, eye, fwd, &fov))
+                    if (SampleCameraAnim(kfs, fr, pca->smoothPath, eye, fwd, &fov))
                         glVertex3f(eye[0], eye[1], eye[2]);
                 }
                 glEnd();
