@@ -2188,6 +2188,26 @@ static void afn_beam_resolve(float px, float py, float pz, float yawDeg) {
     afn_beam_spline = 0; afn_beam_spline_n = 0; afn_beam_travel = 0; afn_beam_travel_bounces = 3; afn_beam_travel_persist = 0.30f; afn_beam_travel_fade = 0.35f;   // one-shot: don't leak into the next plain bolt
 }
 
+// Cast a bolt between two EXPLICIT world points (vs afn_beam_resolve which picks
+// source/target from the player). Uses the current afn_beam_* params. For the Thunder
+// strike: source = cloud above the reticle, target = the floor reticle.
+static void afn_beam_cast(float sx, float sy, float sz, float tx, float ty, float tz) {
+    int slot = -1;
+    for (int b = 0; b < AFN_BEAM_POOL; b++) if (!s_beams[b].active) { slot = b; break; }
+    if (slot < 0) slot = 0;
+    AfnBeam* bm = &s_beams[slot];
+    bm->active = 1; bm->life = bm->maxLife = afn_beam_life;
+    bm->sx = sx; bm->sy = sy; bm->sz = sz; bm->tx = tx; bm->ty = ty; bm->tz = tz;
+    bm->width = afn_beam_width; bm->bow = afn_beam_bow; bm->jitter = afn_beam_jitter;
+    bm->segs = afn_beam_segs; bm->col = afn_beam_col;
+    bm->bounces = afn_beam_bounces; bm->decay = afn_beam_decay; bm->pulse = afn_beam_pulse;
+    bm->spts = 0; bm->nspts = 0;
+    bm->travel = afn_beam_travel; bm->travelBounces = afn_beam_travel_bounces; bm->travelPersist = afn_beam_travel_persist; bm->travelFade = afn_beam_travel_fade;
+    bm->filaments = afn_beam_filaments < 1 ? 1 : (afn_beam_filaments > AFN_BEAM_FILAMENTS_MAX ? AFN_BEAM_FILAMENTS_MAX : afn_beam_filaments);
+    bm->orbSize = afn_beam_orb;
+    afn_beam_travel = 0;
+}
+
 // Catmull-Rom sample of an authored effect spline (normalised x,y,th) at param s in
 // 0..1 across all segments. Returns the interpolated x,y (and thickness th if want).
 static void fx_spline_sample(const float (*p)[3], int n, float s, float* ox, float* oy, float* oth) {
@@ -2356,6 +2376,105 @@ static void afn_beam_render(const float* view) {
                 glDrawArrays(GL_TRIANGLE_FAN, 0, 10);
             }
         }
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// THUNDER spell (HARDCODED prototype, Select): hold to charge — a plane of dark
+// rainclouds gathers overhead + a glowing reticle tracks the aim on the floor;
+// release to call down a vertical lightning strike at the reticle. Pure-code:
+// clouds = soft dark puff billboards, reticle = additive floor ring, strike = the
+// lightning bundle (bow 0 = straight) via afn_beam_cast.
+// ---------------------------------------------------------------------------
+#define THUNDER_CLOUD_H 56.0f
+#define THUNDER_AIM     60.0f
+#define THUNDER_PUFFS   18
+static int   s_thCharging = 0, s_thCharge = 0, s_thStrike = 0;
+static float s_thRetX = 0.0f, s_thRetZ = 0.0f;
+
+// One soft radial billboard (bright/opaque centre -> transparent rim), camera-facing.
+static void thunder_fan(float cx,float cy,float cz, float Rx,float Ry,float Rz,float Ux,float Uy,float Uz,
+                        float rad, unsigned ctr, unsigned rim) {
+    AfnVertex fan[10];
+    fan[0].u=0.5f; fan[0].v=0.5f; fan[0].color=ctr; fan[0].x=cx; fan[0].y=cy; fan[0].z=cz;
+    for (int j=0;j<=8;j++){ float a=(float)j*(6.2831853f/8.0f), ca=cosf(a), sa=sinf(a);
+        float rx=(Rx*ca+Ux*sa)*rad, ry=(Ry*ca+Uy*sa)*rad, rz=(Rz*ca+Uz*sa)*rad;
+        fan[1+j].u=0; fan[1+j].v=0; fan[1+j].color=rim; fan[1+j].x=cx+rx; fan[1+j].y=cy+ry; fan[1+j].z=cz+rz; }
+    glColorPointer(4,GL_UNSIGNED_BYTE,sizeof(AfnVertex),&fan->color);
+    glVertexPointer(3,GL_FLOAT,sizeof(AfnVertex),&fan->x);
+    glDrawArrays(GL_TRIANGLE_FAN,0,10);
+}
+
+static void afn_thunder_step(const float* view, float px, float py, float pz, float yawDeg) {
+    int held = (afn_keys_held & KEY_SELECT) != 0;
+    if (held) {
+        if (!s_thCharging) { s_thCharging = 1; s_thCharge = 0; }
+        s_thCharge++;
+        float yr = yawDeg * (3.14159265f/180.0f);
+        s_thRetX = px + sinf(yr)*THUNDER_AIM;   // aim ahead of the player's facing
+        s_thRetZ = pz + cosf(yr)*THUNDER_AIM;
+    } else if (s_thCharging) {
+        s_thCharging = 0;
+        // STRIKE: straight (bow 0) jagged bundle, cloud -> reticle.
+        afn_beam_bounces = 1; afn_beam_bow = 0.0f; afn_beam_width = 0.8f; afn_beam_jitter = 2.4f;
+        afn_beam_segs = 18; afn_beam_decay = 1.0f; afn_beam_pulse = 0.0f; afn_beam_life = 12;
+        afn_beam_travel = 0; afn_beam_col = 0xFFFFD0A0u; afn_beam_filaments = 6; afn_beam_orb = 0.5f;
+        afn_beam_cast(s_thRetX, py+THUNDER_CLOUD_H, s_thRetZ, s_thRetX, py+1.0f, s_thRetZ);
+        // impact sparks
+        afn_part_frame=-1; afn_part_blend=1; afn_part_speed=2.4f; afn_part_spread=1.3f;
+        afn_part_life=26; afn_part_grav=0.06f; afn_part_size0=0.5f; afn_part_size1=0.0f;
+        afn_part_col0=0xFFFFE0B0u; afn_part_col1=0x00FFFFFFu; afn_part_spawn=26;
+        afn_particles_emit(s_thRetX, py+1.0f, s_thRetZ);
+        s_thStrike = 16;
+    }
+    if (!s_thCharging && s_thStrike <= 0) return;
+
+    float Rwx=view[0],Rwy=view[4],Rwz=view[8], Uwx=view[1],Uwy=view[5],Uwz=view[9];
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+
+    if (s_thCharging) {
+        float chg = (float)s_thCharge/90.0f; if (chg>1.0f) chg=1.0f;   // ramps over ~1.5s
+        // raincloud mass: dark soft puffs over the reticle (alpha-blended)
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for (int i=0;i<THUNDER_PUFFS;i++){
+            unsigned h = (unsigned)((i+1)*2654435761u) ^ 0x9E3779B9u;
+            float ang = (float)(h & 0xFFFF)/65536.0f * 6.2831853f;
+            float rr  = 6.0f + (float)((h>>16)&0xFF)/255.0f * 26.0f;
+            float drift = sinf((float)afn_frame_count*0.02f + (float)i)*2.0f;
+            float cx=s_thRetX+cosf(ang)*rr+drift, cy=py+THUNDER_CLOUD_H+((float)((h>>8)&7)-3.0f), cz=s_thRetZ+sinf(ang)*rr;
+            unsigned a = (unsigned)(150.0f*chg)+30u;
+            thunder_fan(cx,cy,cz, Rwx,Rwy,Rwz,Uwx,Uwy,Uwz, 12.0f, 0x00483028u|(a<<24), 0x00483028u);
+        }
+        // internal charge flickers (additive) building toward the strike
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        if (((afn_frame_count>>2) & 3)==0) {
+            int fi=(afn_frame_count/4)%THUNDER_PUFFS; unsigned h=(unsigned)((fi+1)*2654435761u)^0x9E3779B9u;
+            float ang=(float)(h&0xFFFF)/65536.0f*6.2831853f, rr=6.0f+(float)((h>>16)&0xFF)/255.0f*26.0f;
+            unsigned a=(unsigned)(190.0f*chg);
+            thunder_fan(s_thRetX+cosf(ang)*rr, py+THUNDER_CLOUD_H, s_thRetZ+sinf(ang)*rr, Rwx,Rwy,Rwz,Uwx,Uwy,Uwz, 9.0f, 0x00FFE0B0u|(a<<24), 0x00FFE0B0u);
+        }
+        // floor reticle: glowing additive ring (XZ plane) + pulsing centre
+        float ry=py+0.3f, r0=4.0f+chg*1.0f, r1=r0+1.3f, spin=(float)afn_frame_count*0.03f;
+        AfnVertex ring[2*25];
+        for (int j=0;j<=24;j++){ float a=spin+(float)j*(6.2831853f/24.0f), ca=cosf(a), sa=sinf(a);
+            unsigned col=0x00FFC060u|(200u<<24);
+            ring[2*j].u=0; ring[2*j].v=0; ring[2*j].color=col; ring[2*j].x=s_thRetX+ca*r0; ring[2*j].y=ry; ring[2*j].z=s_thRetZ+sa*r0;
+            ring[2*j+1].u=1; ring[2*j+1].v=0; ring[2*j+1].color=col; ring[2*j+1].x=s_thRetX+ca*r1; ring[2*j+1].y=ry; ring[2*j+1].z=s_thRetZ+sa*r1; }
+        glColorPointer(4,GL_UNSIGNED_BYTE,sizeof(AfnVertex),&ring->color);
+        glVertexPointer(3,GL_FLOAT,sizeof(AfnVertex),&ring->x);
+        glDrawArrays(GL_TRIANGLE_STRIP,0,2*25);
+        float pls=0.5f+0.5f*sinf((float)afn_frame_count*0.2f);
+        thunder_fan(s_thRetX,ry,s_thRetZ, Rwx,Rwy,Rwz,Uwx,Uwy,Uwz, 1.5f+pls, 0x00FFE0A0u|((120u+(unsigned)(100.0f*pls))<<24), 0x00FFE0A0u);
+    }
+    if (s_thStrike>0) {
+        s_thStrike--;
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        float f=(float)s_thStrike/16.0f; unsigned a=(unsigned)(230.0f*f);
+        thunder_fan(s_thRetX, py+1.0f, s_thRetZ, Rwx,Rwy,Rwz,Uwx,Uwy,Uwz, 7.0f*(1.2f-f), 0x00FFFFFFu|(a<<24), 0x00FFC080u);
     }
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
@@ -5475,12 +5594,12 @@ int main(void)
         }
 #endif
 #ifdef AFN_HAS_FX
-        // TEST: Select plays effect instance 0 (the authored "jolt" layer) — data-driven from
-        // the Effects tab, exactly mirroring the 3D viewport. Drop once it's on a Play Effect node.
-        if (key_hit(KEY_SELECT)) afn_fx_play_req = 1;   // instance 0 (+1)
         // Play Effect node queued an authored effect instance this frame.
         if (afn_fx_play_req > 0) { afn_fx_play(afn_fx_play_req - 1, playerX, playerY, playerZ, playerYaw); afn_fx_play_req = 0; }
 #endif
+        // HARDCODED TEST: hold Select to charge the Thunder spell (rainclouds + floor reticle),
+        // release to strike. Casts a vertical bolt at the reticle, drawn by afn_beam_render below.
+        afn_thunder_step(view, playerX, playerY, playerZ, playerYaw);
         afn_beam_resolve(playerX, playerY, playerZ, playerYaw);
         afn_beam_render(view);
 

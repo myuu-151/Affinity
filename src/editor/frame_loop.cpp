@@ -31652,24 +31652,28 @@ void FrameTick(float dt)
         ImGui::BeginChild("##fxcanvas", ImVec2(0,fxMidH), true);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         static bool  sFxPlay = true; static float sFxClk = 0.0f;
-        static float sFxYaw = 0.8f, sFxPitch = 0.42f, sFxZoom = 1.0f;
+        static float sFxYaw = 0.8f, sFxPitch = 0.30f, sFxScale = 1.6f;   // sFxScale: PREVIEW-ONLY zoom (no export effect)
         if (ImGui::Button(sFxPlay ? "Pause" : "Play")) sFxPlay = !sFxPlay;
         ImGui::SameLine(); if (ImGui::Button("Restart")) sFxClk = 0.0f;
-        ImGui::SameLine(); if (ImGui::Button("Reset view")) { sFxYaw=0.8f; sFxPitch=0.42f; sFxZoom=1.0f; }
-        ImGui::SameLine(); ImGui::TextDisabled("LMB drag = orbit | wheel = zoom");
+        ImGui::SameLine(); if (ImGui::Button("Reset view")) { sFxYaw=0.8f; sFxPitch=0.30f; sFxScale=1.6f; }
+        ImGui::SameLine(); ImGui::TextDisabled("Preview scale");
+        ImGui::SameLine(); ImGui::SetNextItemWidth(Scaled(120));
+        ImGui::SliderFloat("##fxscale", &sFxScale, 0.3f, 8.0f, "%.2fx");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Editor-only zoom to inspect the bounce/orb up close.\nDoes NOT change any exported value — purely the preview camera.");
+        ImGui::SameLine(); ImGui::TextDisabled("| LMB = orbit, wheel = scale");
         ImVec2 cp = ImGui::GetCursorScreenPos();
         ImVec2 cs = ImGui::GetContentRegionAvail(); if (cs.y < 40) cs.y = 40;
         dl->AddRectFilled(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), IM_COL32(8,9,16,255));
         ImGui::InvisibleButton("##fxcnv", cs);
         if (ImGui::IsItemActive()) { ImVec2 dd = ImGui::GetIO().MouseDelta; sFxYaw -= dd.x*0.01f; sFxPitch += dd.y*0.01f; if(sFxPitch>1.45f)sFxPitch=1.45f; if(sFxPitch<-1.45f)sFxPitch=-1.45f; }
-        if (ImGui::IsItemHovered()) { float w=ImGui::GetIO().MouseWheel; if(w!=0){ sFxZoom *= (w>0?0.9f:1.1f); if(sFxZoom<0.2f)sFxZoom=0.2f; if(sFxZoom>5.0f)sFxZoom=5.0f; } }
+        if (ImGui::IsItemHovered()) { float w=ImGui::GetIO().MouseWheel; if(w!=0){ sFxScale *= (w>0?1.1f:0.9f); if(sFxScale<0.3f)sFxScale=0.3f; if(sFxScale>8.0f)sFxScale=8.0f; } }
         if (sFxPlay) sFxClk += 1.0f;   // 1 frame/tick (matches the runtime's fixed 60 Hz step)
         ImGui::PushClipRect(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), true);
 
         // frame the content + build the orbit camera basis (looks at the origin)
         float maxRange = 8.0f;
         for (auto& Q : Inst.layers) if (Q.visible && Q.kind==1) { float r=Q.bArcLen*(Q.bBounces<1?1:Q.bBounces); if(r>maxRange)maxRange=r; }
-        float dist = (maxRange*0.95f + 8.0f) * sFxZoom;
+        float dist = (maxRange*0.95f + 8.0f) / sFxScale;   // bigger scale = closer camera = bigger preview
         float cyaw=cosf(sFxYaw), syaw=sinf(sFxYaw), cpit=cosf(sFxPitch), spit=sinf(sFxPitch);
         float ex=dist*cpit*syaw, ey=dist*spit, ez=dist*cpit*cyaw;        // eye
         float el=sqrtf(ex*ex+ey*ey+ez*ez); if(el<0.001f)el=0.001f;
