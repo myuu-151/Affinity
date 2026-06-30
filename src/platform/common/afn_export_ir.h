@@ -175,14 +175,17 @@ struct AfnCameraExport
     struct FxLayerExp {
         int   kind = 1;            // 0 = particle, 1 = lightning
         int   pCount = 10; float pSpeed=1.6f,pSpread=0.6f,pLife=45,pGrav=0.05f,pSize=10;
-        float bWidth=3,bBow=90,bJitter=10,bDecay=0.78f,bPulse=0.018f; int bSegs=14,bBounces=3;
-        bool  bSurge=false; float bTaperS=0,bTaperE=0,bLifeIn=0,bLifeOut=0,bFalloffS=0,bFalloffE=0;
-        bool  bTravel=false;       // crawl a bright packet source->target over the bolt's life
-        int   bTravelBounces=3;    // how many times the spline tiles across the floor (decaying) before it fizzles
-        float bTravelLife=45;      // frames the jolt takes to course across (enter->exit) in travel mode
-        float bTravelPersist=0.30f;// fraction of the path the lit ribbon trails behind the head
-        float bTravelFade=0.35f;   // fade only over this last fraction of the life (0 = no fade)
-        float bArcLen=14;          // world units each bounce spans (reach = bArcLen * bounces)
+        float bWidth=0.55f,bBow=7,bJitter=1.3f,bDecay=0.97f,bPulse=0.0f; int bSegs=14,bBounces=12;  // WORLD units
+        bool  bSurge=false; float bTaperS=0,bTaperE=0,bLifeIn=0,bLifeOut=0,bFalloffS=0,bFalloffE=0;  // legacy
+        bool  bTravel=true;
+        int   bTravelBounces=3;
+        float bTravelLife=150;
+        float bTravelPersist=0.55f;
+        float bTravelFade=0.30f;
+        float bArcLen=13;          // world units each bounce spans (reach = bArcLen * bounces)
+        int   bFilaments=5;        // bundled crackling strands
+        float bOrbSize=1.0f;       // head-orb radius multiplier
+        float bColR=0.376f,bColG=0.690f,bColB=1.0f;
         std::vector<FxPt> spline;
     };
     // An instance = one node-callable effect = a set of layers composited together.

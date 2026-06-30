@@ -187,15 +187,19 @@ struct FxLayer {
     bool  visible = true;
     // particle params
     int   pCount=10; float pSpeed=1.6f,pSpread=0.6f,pLife=45.0f,pGrav=0.05f,pSize=10.0f; bool pStream=true;
-    // lightning params
-    float bWidth=3.0f,bBow=90.0f,bJitter=10.0f,bDecay=0.78f,bPulse=0.018f; int bSegs=14,bBounces=3;
-    bool  bSurge=false; float bTaperS=0,bTaperE=0,bLifeIn=0,bLifeOut=0,bFalloffS=0,bFalloffE=0;
-    bool  bTravel=false;       // crawl a bright packet source->target over the bolt's life
-    int   bTravelBounces=3;    // how many times the spline tiles across the floor (decaying) before it fizzles
-    float bTravelLife=45.0f;   // frames the jolt takes to course across (enter->exit) in travel mode
-    float bTravelPersist=0.30f;// fraction of the path the lit ribbon trails behind the head
-    float bTravelFade=0.35f;   // fade only over this last fraction of the life (0 = no fade)
-    float bArcLen=14.0f;       // world units each bounce spans (reach = bArcLen * bounces)
+    // lightning params — WORLD UNITS (same as the runtime beam), defaults = the hardcoded
+    // 12-bounce blue floor-jolt so a new lightning layer looks right out of the box.
+    float bWidth=0.55f,bBow=7.0f,bJitter=1.3f,bDecay=0.97f,bPulse=0.0f; int bSegs=14,bBounces=12;
+    bool  bSurge=false; float bTaperS=0,bTaperE=0,bLifeIn=0,bLifeOut=0,bFalloffS=0,bFalloffE=0;  // legacy (unused)
+    bool  bTravel=true;        // crawl a bright head across, bundle trailing
+    int   bTravelBounces=3;    // legacy spline tiling (unused by the parametric bundle)
+    float bTravelLife=150.0f;  // frames the jolt takes to course across (enter->exit)
+    float bTravelPersist=0.55f;// fraction of ONE arc the lit bundle trails behind the head
+    float bTravelFade=0.30f;   // head->tail comet ramp (0 = uniform)
+    float bArcLen=13.0f;       // world units each bounce spans (reach = bArcLen * bounces)
+    int   bFilaments=5;        // bundled crackling strands
+    float bOrbSize=1.0f;       // head-orb radius multiplier (0 = no orb)
+    float bColR=0.376f,bColG=0.690f,bColB=1.0f;  // bolt colour (light blue)
     std::vector<ImVec2> spline; std::vector<float> thick;
     // transient (not serialized)
     float lifeClk=0,anim=0,surgeAnim=0; int pBurst=0; FxPart parts[160] = {};
@@ -7841,10 +7845,11 @@ static bool SaveProject(const std::string& path)
     for (const auto& In : sFxInstances) {
         fprintf(f, "fxInstance=%s|%d\n", In.name, (int)In.layers.size());
         for (const auto& Lf : In.layers) {
-            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g\n",
+            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g\n",
                 Lf.name, Lf.kind, Lf.visible?1:0, Lf.pCount, Lf.pSpeed, Lf.pSpread, Lf.pLife, Lf.pGrav, Lf.pSize, Lf.pStream?1:0,
                 Lf.bWidth, Lf.bBow, Lf.bJitter, Lf.bDecay, Lf.bPulse, Lf.bSegs, Lf.bBounces, Lf.bSurge?1:0,
-                Lf.bTaperS, Lf.bTaperE, Lf.bLifeIn, Lf.bLifeOut, Lf.bFalloffS, Lf.bFalloffE, Lf.bTravel?1:0, Lf.bTravelBounces, Lf.bTravelLife, Lf.bTravelPersist, Lf.bTravelFade, Lf.bArcLen);
+                Lf.bTaperS, Lf.bTaperE, Lf.bLifeIn, Lf.bLifeOut, Lf.bFalloffS, Lf.bFalloffE, Lf.bTravel?1:0, Lf.bTravelBounces, Lf.bTravelLife, Lf.bTravelPersist, Lf.bTravelFade, Lf.bArcLen,
+                Lf.bFilaments, Lf.bOrbSize, Lf.bColR, Lf.bColG, Lf.bColB);
             fprintf(f, "fxSpline=%d", (int)Lf.spline.size());
             for (size_t i = 0; i < Lf.spline.size(); i++)
                 fprintf(f, " %g,%g,%g", Lf.spline[i].x, Lf.spline[i].y, i < Lf.thick.size() ? Lf.thick[i] : 1.0f);
@@ -9050,10 +9055,11 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "fxLayerCount=", 13) == 0) { sFxInstances.clear(); sFxInst = 0; sFxActive = 0; sFxSel = -1; fxFlatLegacy = true; }  // legacy flat list
             else if (strncmp(line, "fxLayer=", 8) == 0) {
                 FxLayer Lf; int vis = 1, str = 1, surge = 0, travel = 0;
-                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g",
+                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g",
                     Lf.name, &Lf.kind, &vis, &Lf.pCount, &Lf.pSpeed, &Lf.pSpread, &Lf.pLife, &Lf.pGrav, &Lf.pSize, &str,
                     &Lf.bWidth, &Lf.bBow, &Lf.bJitter, &Lf.bDecay, &Lf.bPulse, &Lf.bSegs, &Lf.bBounces, &surge,
-                    &Lf.bTaperS, &Lf.bTaperE, &Lf.bLifeIn, &Lf.bLifeOut, &Lf.bFalloffS, &Lf.bFalloffE, &travel, &Lf.bTravelBounces, &Lf.bTravelLife, &Lf.bTravelPersist, &Lf.bTravelFade, &Lf.bArcLen);
+                    &Lf.bTaperS, &Lf.bTaperE, &Lf.bLifeIn, &Lf.bLifeOut, &Lf.bFalloffS, &Lf.bFalloffE, &travel, &Lf.bTravelBounces, &Lf.bTravelLife, &Lf.bTravelPersist, &Lf.bTravelFade, &Lf.bArcLen,
+                    &Lf.bFilaments, &Lf.bOrbSize, &Lf.bColR, &Lf.bColG, &Lf.bColB);
                 Lf.visible = vis != 0; Lf.pStream = str != 0; Lf.bSurge = surge != 0; Lf.bTravel = travel != 0;
                 if (fxFlatLegacy || sFxInstances.empty()) {   // legacy: each layer is its own instance
                     FxInstance In; snprintf(In.name, sizeof(In.name), "%s", Lf.name); sFxInstances.push_back(In);
@@ -19303,6 +19309,7 @@ void FrameTick(float dt)
                         fe.bWidth=fl.bWidth; fe.bBow=fl.bBow; fe.bJitter=fl.bJitter; fe.bDecay=fl.bDecay; fe.bPulse=fl.bPulse; fe.bSegs=fl.bSegs; fe.bBounces=fl.bBounces;
                         fe.bSurge=fl.bSurge; fe.bTaperS=fl.bTaperS; fe.bTaperE=fl.bTaperE; fe.bLifeIn=fl.bLifeIn; fe.bLifeOut=fl.bLifeOut; fe.bFalloffS=fl.bFalloffS; fe.bFalloffE=fl.bFalloffE;
                         fe.bTravel=fl.bTravel; fe.bTravelBounces=fl.bTravelBounces; fe.bTravelLife=fl.bTravelLife; fe.bTravelPersist=fl.bTravelPersist; fe.bTravelFade=fl.bTravelFade; fe.bArcLen=fl.bArcLen;
+                        fe.bFilaments=fl.bFilaments; fe.bOrbSize=fl.bOrbSize; fe.bColR=fl.bColR; fe.bColG=fl.bColG; fe.bColB=fl.bColB;
                         for (size_t i=0;i<fl.spline.size();i++) fe.spline.push_back({ fl.spline[i].x, fl.spline[i].y, (i<fl.thick.size()?fl.thick[i]:1.0f) });
                         ie.layers.push_back(fe);
                     }
@@ -31578,12 +31585,6 @@ void FrameTick(float dt)
         FxLayer& L = Inst.layers[sFxActive];
         // The controls + canvas fill the middle, leaving room for the bottom Instances bar.
         float fxMidH = ImGui::GetContentRegionAvail().y - fxBarH - ImGui::GetStyle().ItemSpacing.y;
-        static unsigned pvRng = 0x9E3779B9u;
-        auto rnd = [&]() -> float { pvRng ^= pvRng<<13; pvRng ^= pvRng>>17; pvRng ^= pvRng<<5; return (float)(pvRng & 0xFFFF) / 65536.0f; };
-        auto sym = [&]() -> float { return rnd()*2.0f - 1.0f; };
-        auto seedSpline = [](FxLayer& Q) { Q.spline.clear(); int nb = Q.bBounces<1?1:Q.bBounces; float fy = 0.85f, ph = 0.08f + (Q.bBow/170.0f)*0.6f;
-            for (int k = 0; k <= 2*nb; k++) { float nx = (float)k/(2.0f*nb); float dF = 1.0f; for (int j = 0; j < k/2; j++) dF *= Q.bDecay; float ny = (k%2==0)?fy:fy-ph*dF; Q.spline.push_back(ImVec2(nx,ny)); }
-            Q.thick.assign(Q.spline.size(), 1.0f); };
 
         // ---- controls (left): edit the active layer ----
         ImGui::BeginChild("##fxctrl", ImVec2(Scaled(210), fxMidH), true);
@@ -31605,139 +31606,144 @@ void FrameTick(float dt)
             ImGui::Checkbox("Stream", &L.pStream);
             if (ImGui::Button("Burst")) L.pBurst = L.pCount;
         } else {
+            // ---- Lightning bundle — every value is in WORLD units (same as the runtime),
+            // so the 3D viewport is an exact mirror of how it casts in-game. ----
+            ImGui::TextDisabled("Shape");
             ImGui::PushItemWidth(Scaled(110));
-            ImGui::SliderFloat("Width", &L.bWidth, 0.5f, 12.0f, "%.1f");
-            ImGui::SliderFloat("Arch", &L.bBow, 5.0f, 170.0f, "%.0f");
-            ImGui::SliderInt("Bounces", &L.bBounces, 1, 8);
-            ImGui::SliderFloat("Decay", &L.bDecay, 0.4f, 1.0f, "%.2f");
-            ImGui::SliderFloat("Pulse", &L.bPulse, 0.0f, 0.06f, "%.3f");
-            ImGui::SliderFloat("Jitter", &L.bJitter, 0.0f, 200.0f, "%.0f");
-            ImGui::SliderInt("Segments", &L.bSegs, 2, 24);
-            ImGui::Spacing();
+            if (ImGui::SliderInt("Bounces", &L.bBounces, 1, 12)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Parabolic arches the bolt makes across the floor.");
+            if (ImGui::SliderFloat("Arc length", &L.bArcLen, 3.0f, 40.0f, "%.1f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World units each bounce spans. Reach = arc length x bounces.");
+            if (ImGui::SliderFloat("Arch height", &L.bBow, 0.0f, 30.0f, "%.1f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How high each bounce rises off the floor.");
+            if (ImGui::SliderFloat("Decay", &L.bDecay, 0.5f, 1.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each bounce reaches this fraction of the previous height.");
+            if (ImGui::SliderInt("Segments", &L.bSegs, 4, 24)) sProjectDirty = true;
+            ImGui::PopItemWidth();
+            ImGui::Spacing(); ImGui::TextDisabled("Bundle");
+            ImGui::PushItemWidth(Scaled(110));
+            if (ImGui::SliderInt("Filaments", &L.bFilaments, 1, 12)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("# crackling strands bundled around the centerline.");
+            if (ImGui::SliderFloat("Filament width", &L.bWidth, 0.05f, 3.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::SliderFloat("Spread / crackle", &L.bJitter, 0.0f, 5.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bundle tube radius + per-segment crackle (world units).");
+            if (ImGui::SliderFloat("Orb size", &L.bOrbSize, 0.0f, 3.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bright head 'ball' radius. 0 = no orb.");
+            ImGui::PopItemWidth();
+            float col3[3] = { L.bColR, L.bColG, L.bColB };
+            if (ImGui::ColorEdit3("Colour", col3, ImGuiColorEditFlags_NoInputs)) { L.bColR=col3[0]; L.bColG=col3[1]; L.bColB=col3[2]; sProjectDirty = true; }
+            ImGui::Spacing(); ImGui::TextDisabled("Travel");
             if (ImGui::Checkbox("Travel across floor", &L.bTravel)) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("A bright packet crawls source->target over the bolt's\nlife, bouncing along the spline (instead of the whole arc\nappearing at once). Off = the static arc you have now.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Crawl a bright head across, bundle trailing.\nOff = the whole bolt strikes at once.");
             ImGui::PushItemWidth(Scaled(110));
-            if (ImGui::SliderInt("Bounces (fizzle)", &L.bTravelBounces, 1, 12)) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How many times the arc repeats across the map — its\nshape stays the same, it just bounces that many times\n(each shorter by Decay) before fizzling. 1 = a single arc.");
-            if (ImGui::SliderFloat("Arc length", &L.bArcLen, 3.0f, 60.0f, "%.0f")) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World units each bounce spans (DISTANCE). Total reach =\narc length x bounces. Lower = tighter, less-stretched arcs\nand a shorter trip across the map.");
             if (ImGui::SliderFloat("Travel life", &L.bTravelLife, 8.0f, 400.0f, "%.0f f")) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames the jolt takes to course across (enter -> exit) in\nTravel mode. Higher = the packet crawls across slower (SPEED).\nIf it looks instant, raise this and/or lower Persistence.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames to course across (speed). Higher = slower.");
             if (ImGui::SliderFloat("Persistence", &L.bTravelPersist, 0.03f, 1.0f, "%.2f")) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much of ONE arc the lit ribbon occupies behind the\nhead. The packet rides up-and-over each arc in turn, so this\nis per-arc. Low = a short spark; 1.0 = a whole arc stays lit.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much of ONE arc the lit bundle trails behind the head.");
             if (ImGui::SliderFloat("Fade falloff", &L.bTravelFade, 0.0f, 1.0f, "%.2f")) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much the trailing ribbon dims from head to tail.\n0 = no fade (the whole streak is uniform full-bright);\n1 = a comet that fades to nothing behind the head.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform bright streak; 1 = comet fading to nothing.");
             ImGui::PopItemWidth();
-            ImGui::Checkbox("Surge (old shape)", &L.bSurge);
-            ImGui::SliderFloat("Life in", &L.bLifeIn, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Life out", &L.bLifeOut, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Taper start", &L.bTaperS, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Taper end", &L.bTaperE, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Thick falloff S", &L.bFalloffS, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Thick falloff E", &L.bFalloffE, 0.0f, 0.5f, "%.2f");
-            ImGui::PopItemWidth();
-            ImGui::Spacing();
-            ImGui::TextDisabled("Middle-click a dot = thickness.\nDrag = shape, dbl-click = add,\nright-click = remove.");
-            if (ImGui::Button("Reset to bounce", ImVec2(-1,0))) { seedSpline(L); sFxSel = -1; sProjectDirty = true; }
         }
         ImGui::EndChild();
         ImGui::SameLine();
 
-        // ---- canvas (right): composite all visible layers ----
+        // ---- 3D viewport: an exact mirror of the runtime lightning render. Hold LEFT-drag
+        // to orbit, mouse wheel to zoom, Play to simulate the travel exactly as it casts. ----
         ImGui::BeginChild("##fxcanvas", ImVec2(0,fxMidH), true);
-        ImVec2 cp = ImGui::GetCursorScreenPos();
-        ImVec2 cs = ImGui::GetContentRegionAvail();
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), IM_COL32(6,6,12,255));
-        float floorY = cp.y + cs.y*0.86f;
-        dl->AddLine(ImVec2(cp.x, floorY), ImVec2(cp.x+cs.x, floorY), IM_COL32(55,55,75,255), 1.5f);
-        auto toScr = [&](ImVec2 n) { return ImVec2(cp.x + n.x*cs.x, cp.y + n.y*cs.y); };
-        auto toNrm = [&](ImVec2 s) { float x=(s.x-cp.x)/cs.x, y=(s.y-cp.y)/cs.y; x=x<0?0:x>1?1:x; y=y<0?0:y>1?1:y; return ImVec2(x,y); };
-        auto cr = [](float p0,float p1,float p2,float p3,float t) { float t2=t*t,t3=t2*t; return 0.5f*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3); };
-
-        // input: the ACTIVE lightning layer's spline is editable (drag / dbl-click add / right-click remove / middle-click thickness)
+        static bool  sFxPlay = true; static float sFxClk = 0.0f;
+        static float sFxYaw = 0.8f, sFxPitch = 0.42f, sFxZoom = 1.0f;
+        if (ImGui::Button(sFxPlay ? "Pause" : "Play")) sFxPlay = !sFxPlay;
+        ImGui::SameLine(); if (ImGui::Button("Restart")) sFxClk = 0.0f;
+        ImGui::SameLine(); if (ImGui::Button("Reset view")) { sFxYaw=0.8f; sFxPitch=0.42f; sFxZoom=1.0f; }
+        ImGui::SameLine(); ImGui::TextDisabled("LMB drag = orbit | wheel = zoom");
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        ImVec2 cs = ImGui::GetContentRegionAvail(); if (cs.y < 40) cs.y = 40;
+        dl->AddRectFilled(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), IM_COL32(8,9,16,255));
         ImGui::InvisibleButton("##fxcnv", cs);
-        bool hov = ImGui::IsItemHovered(); ImVec2 ms = ImGui::GetIO().MousePos;
-        static int dragIdx = -1;
-        if (L.kind == 1) {
-            if (L.spline.size() < 2) seedSpline(L);
-            if (L.thick.size() != L.spline.size()) L.thick.assign(L.spline.size(), 1.0f);
-            if (ImGui::IsItemActivated()) { dragIdx = -1; float best = 14.0f*14.0f;
-                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;dragIdx=i;} } }
-            if (ImGui::IsItemActive() && dragIdx>=0) { L.spline[dragIdx]=toNrm(ms); sProjectDirty=true; }
-            if (!ImGui::IsItemActive()) dragIdx = -1;
-            if (hov && ImGui::IsMouseDoubleClicked(0)) { ImVec2 n=toNrm(ms); float nd=1e9f;
-                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y; float d2=dx*dx+dy*dy; if(d2<nd)nd=d2; }
-                if (nd>16.0f*16.0f){ int ins=(int)L.spline.size(); for(int i=0;i<(int)L.spline.size();i++) if(L.spline[i].x>n.x){ins=i;break;} L.spline.insert(L.spline.begin()+ins,n); L.thick.insert(L.thick.begin()+ins,1.0f); sProjectDirty=true; } }
-            if (hov && ImGui::IsMouseClicked(1) && (int)L.spline.size()>2) { int ri=-1; float best=16.0f*16.0f;
-                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;ri=i;} }
-                if(ri>=0){ L.spline.erase(L.spline.begin()+ri); if(ri<(int)L.thick.size()) L.thick.erase(L.thick.begin()+ri); if(sFxSel==ri) sFxSel=-1; sProjectDirty=true; } }
-            if (hov && ImGui::IsMouseClicked(2)) { int mi=-1; float best=16.0f*16.0f;
-                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;mi=i;} }
-                if(mi>=0){ sFxSel=mi; ImGui::OpenPopup("##ptpanel"); } }
-            if (ImGui::BeginPopup("##ptpanel")) {
-                if (sFxSel>=0 && sFxSel<(int)L.thick.size()) { ImGui::Text("Point %d  thickness", sFxSel); ImGui::SetNextItemWidth(Scaled(170));
-                    if (ImGui::SliderFloat("##pt", &L.thick[sFxSel], 0.0f, 4.0f, "%.2f x")) sProjectDirty=true; }
-                else ImGui::TextDisabled("(point removed)");
-                ImGui::EndPopup();
-            }
-        }
+        if (ImGui::IsItemActive()) { ImVec2 dd = ImGui::GetIO().MouseDelta; sFxYaw -= dd.x*0.01f; sFxPitch += dd.y*0.01f; if(sFxPitch>1.45f)sFxPitch=1.45f; if(sFxPitch<-1.45f)sFxPitch=-1.45f; }
+        if (ImGui::IsItemHovered()) { float w=ImGui::GetIO().MouseWheel; if(w!=0){ sFxZoom *= (w>0?0.9f:1.1f); if(sFxZoom<0.2f)sFxZoom=0.2f; if(sFxZoom>5.0f)sFxZoom=5.0f; } }
+        if (sFxPlay) sFxClk += 1.0f;   // 1 frame/tick (matches the runtime's fixed 60 Hz step)
+        ImGui::PushClipRect(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), true);
 
-        static ImVec2 sm[1024]; static float thA[1024];
-        for (int li = 0; li < (int)Inst.layers.size(); li++) {
-            FxLayer& Q = Inst.layers[li];
-            if (!Q.visible) continue;
-            bool isAct = (li == sFxActive);
-            if (Q.kind == 0) {
-                const float PX = 6.0f; float ox = cp.x + cs.x*0.5f, oy = cp.y + cs.y*0.82f;
-                int toEmit = (Q.pStream ? Q.pCount : 0) + Q.pBurst; Q.pBurst = 0;
-                for (int e=0;e<toEmit;e++){ int s=-1; for(int i=0;i<160;i++) if(!Q.parts[i].active){s=i;break;} if(s<0)break;
-                    Q.parts[s].active=true; Q.parts[s].x=ox; Q.parts[s].y=oy; Q.parts[s].vx=sym()*Q.pSpread*Q.pSpeed*PX; Q.parts[s].vy=-(0.4f+rnd()*0.6f)*Q.pSpeed*PX; Q.parts[s].maxLife=Q.parts[s].life=Q.pLife*(0.7f+rnd()*0.6f); }
-                for (int i=0;i<160;i++){ if(!Q.parts[i].active)continue; Q.parts[i].vy+=Q.pGrav*PX; Q.parts[i].x+=Q.parts[i].vx; Q.parts[i].y+=Q.parts[i].vy;
-                    if((Q.parts[i].life-=1.0f)<=0){Q.parts[i].active=false;continue;}
-                    float age=1.0f-Q.parts[i].life/Q.parts[i].maxLife; float sz=Q.pSize*(1.0f-age); if(sz<0.5f)sz=0.5f; int al=(int)(235*(1.0f-age));
-                    dl->AddCircleFilled(ImVec2(Q.parts[i].x,Q.parts[i].y), sz, IM_COL32(255,225,150,al)); }
-                continue;
+        // frame the content + build the orbit camera basis (looks at the origin)
+        float maxRange = 8.0f;
+        for (auto& Q : Inst.layers) if (Q.visible && Q.kind==1) { float r=Q.bArcLen*(Q.bBounces<1?1:Q.bBounces); if(r>maxRange)maxRange=r; }
+        float dist = (maxRange*0.95f + 8.0f) * sFxZoom;
+        float cyaw=cosf(sFxYaw), syaw=sinf(sFxYaw), cpit=cosf(sFxPitch), spit=sinf(sFxPitch);
+        float ex=dist*cpit*syaw, ey=dist*spit, ez=dist*cpit*cyaw;        // eye
+        float el=sqrtf(ex*ex+ey*ey+ez*ez); if(el<0.001f)el=0.001f;
+        float fwx=-ex/el, fwy=-ey/el, fwz=-ez/el;                        // forward
+        float crx=fwy*0.0f-fwz*1.0f, cry=fwz*0.0f-fwx*0.0f, crz=fwx*1.0f-fwy*0.0f;  // cross(fwd,(0,1,0))
+        float cl=sqrtf(crx*crx+cry*cry+crz*crz); if(cl<0.001f)cl=0.001f; crx/=cl;cry/=cl;crz/=cl;  // right
+        float cux=cry*fwz-crz*fwy, cuy=crz*fwx-crx*fwz, cuz=crx*fwy-cry*fwx;        // cam up
+        float focal = cs.y * 0.9f;
+        ImVec2 ctr = ImVec2(cp.x+cs.x*0.5f, cp.y+cs.y*0.5f);
+        auto proj = [&](float Px,float Py,float Pz, float* outVz)->ImVec2 {
+            float rlx=Px-ex, rly=Py-ey, rlz=Pz-ez;
+            float vz = rlx*fwx+rly*fwy+rlz*fwz; if(outVz)*outVz=vz; if(vz<0.05f)vz=0.05f;
+            float vx = rlx*crx+rly*cry+rlz*crz, vy = rlx*cux+rly*cuy+rlz*cuz;
+            return ImVec2(ctr.x + vx/vz*focal, ctr.y - vy/vz*focal);
+        };
+        // floor grid (y=0)
+        { int G=8; float step=maxRange/8.0f; if(step<1.0f)step=1.0f; float ext=step*G;
+          for(int gi=-G; gi<=G; gi++){ float a=gi*step; float vza,vzb;
+            ImVec2 p0=proj(a,0,-ext,&vza), p1=proj(a,0,ext,&vzb); if(vza>0.05f&&vzb>0.05f) dl->AddLine(p0,p1,IM_COL32(38,42,58,160),1.0f);
+            ImVec2 q0=proj(-ext,0,a,&vza), q1=proj(ext,0,a,&vzb); if(vza>0.05f&&vzb>0.05f) dl->AddLine(q0,q1,IM_COL32(38,42,58,160),1.0f); } }
+
+        // ---- each visible lightning layer: mirror afn_beam_render (smooth centerline +
+        // filament bundle + head orb), projected through the orbit camera ----
+        for (auto& Q : Inst.layers) {
+            if (!Q.visible || Q.kind != 1) continue;
+            int nb = Q.bBounces<1?1:Q.bBounces;
+            int N = Q.bSegs; { int need=nb*8; if(need>N)N=need; } if(N<2)N=2; if(N>48)N=48;   // matches runtime cap
+            float range = Q.bArcLen*nb, s0x=-range*0.5f;
+            float CX[49],CY[49],CZ[49];
+            for(int i=0;i<=N;i++){ float t=(float)i/(float)N; float seg=t*(float)nb; int bi=(int)seg; if(bi>=nb)bi=nb-1; float lt=seg-(float)bi;
+                float hump=4.0f*lt*(1.0f-lt); float decF=1.0f; for(int kk=0;kk<bi;kk++) decF*=Q.bDecay;
+                CX[i]=s0x+range*t; CY[i]=Q.bBow*decF*hump; CZ[i]=0.0f; }
+            // path frame: dir=+X, hs=+Z(0,0,1), hu=+Y. screen-perp of dir (mirror runtime):
+            float pr=crx, pu=cux; float pl=sqrtf(pr*pr+pu*pu); if(pl<0.001f)pl=0.001f;
+            float sscx=(-pu/pl)*crx+(pr/pl)*cux, sscy=(-pu/pl)*cry+(pr/pl)*cuy, sscz=(-pu/pl)*crz+(pr/pl)*cuz;
+            float headT = 1.0f;
+            if (Q.bTravel) { float life=Q.bTravelLife<1.0f?1.0f:Q.bTravelLife; headT=fmodf(sFxClk, life)/life; }
+            float win = (Q.bTravelPersist>0.01f?Q.bTravelPersist:0.01f)/(float)nb;
+            float hw=Q.bWidth, fw=hw*0.55f; if(fw<0.02f)fw=0.02f;
+            int colR=(int)(Q.bColR*255), colG=(int)(Q.bColG*255), colB=(int)(Q.bColB*255);
+            int coR=(colR+255)/2, coG=(colG+255)/2;   // brightened core toward white
+            int nfil=Q.bFilaments<1?1:Q.bFilaments;
+            unsigned fseed=(unsigned)((int)sFxClk)*2654435761u ^ 0xA53C9E1Du;
+            for(int k=0;k<nfil;k++){
+                unsigned frng=fseed ^ ((unsigned)(k+1)*0x9E3779B9u);
+                float phk=(float)k*(6.2831853f/(float)nfil), cph=cosf(phk), sph=sinf(phk);
+                ImVec2 prevS(0,0); int prevOk=0;
+                for(int i=0;i<=N;i++){ float t=(float)i/(float)N; float aMul=1.0f;
+                    if(Q.bTravel){ float hT=headT*(1.0f+win); float d=hT-t; if(t>hT||d>win||d<0.0f) aMul=0.0f; else { float bb=1.0f-d/win; bb*=bb; aMul=1.0f-Q.bTravelFade*(1.0f-bb);} }
+                    float edge=t<0.5f?t:(1.0f-t); float endRamp=edge*6.0f<1.0f?edge*6.0f:1.0f;
+                    float rad=Q.bJitter*(0.35f+0.65f*t)*endRamp;
+                    frng^=frng<<13;frng^=frng>>17;frng^=frng<<5; float c1=((float)(frng&0xFFFF)/32768.0f)-1.0f;
+                    frng^=frng<<13;frng^=frng>>17;frng^=frng<<5; float c2=((float)(frng&0xFFFF)/32768.0f)-1.0f;
+                    float ox=cph*rad+c1*Q.bJitter*0.8f*endRamp, oy=sph*rad+c2*Q.bJitter*0.8f*endRamp;
+                    float Px=CX[i]+sscx*ox, Py=CY[i]+sscy*ox, Pz=CZ[i]+sscz*ox + oy;   // hs=+Z so oy adds to Z
+                    float vz; ImVec2 S=proj(Px,Py,Pz,&vz); int ok=(vz>0.05f && aMul>0.01f);
+                    if(ok && prevOk){ int a=(int)(235*aMul); if(a>255)a=255; float th=fw*focal/vz; if(th<1.0f)th=1.0f;
+                        dl->AddLine(prevS,S, IM_COL32(colR,colG,colB,(int)(a*0.28f)), th*2.6f);
+                        dl->AddLine(prevS,S, IM_COL32(coR,coG,255,a), th); }
+                    prevS=S; prevOk=ok;
+                }
             }
-            if (Q.spline.size() < 2) seedSpline(Q);
-            if (Q.thick.size() != Q.spline.size()) Q.thick.assign(Q.spline.size(), 1.0f);
-            Q.anim += Q.bPulse; Q.lifeClk += Q.bPulse; Q.surgeAnim += 0.05f;
-            int M = (int)Q.spline.size();
-            const int SUB = 14; int si = 0;
-            if (Q.bSurge) {
-                float lx=cp.x+cs.x*0.06f, rx=cp.x+cs.x*0.94f; int nb=Q.bBounces; int NS=nb*12; if(NS>900)NS=900;
-                for(int i=0;i<=NS && si<1000;i++){ float t=(float)i/(float)NS; float by=floorY - Q.bBow*fabsf(sinf((t*nb - Q.surgeAnim)*3.14159265f)); thA[si]=1.0f; sm[si++]=ImVec2(lx+(rx-lx)*t, by); }
-            } else {
-                // Show the single authored arc as-is (the Bounces count repeats THIS shape
-                // across the map at runtime — it doesn't change the shape you draw here).
-                for(int seg=0; seg<M-1 && si<1000; seg++){ ImVec2 p0=Q.spline[seg>0?seg-1:0],p1=Q.spline[seg],p2=Q.spline[seg+1],p3=Q.spline[seg<M-2?seg+2:M-1]; float t0=Q.thick[seg],t1=Q.thick[seg+1];
-                    for(int s=0;s<SUB;s++){ float t=(float)s/SUB; thA[si]=t0+(t1-t0)*t; sm[si++]=toScr(ImVec2(cr(p0.x,p1.x,p2.x,p3.x,t),cr(p0.y,p1.y,p2.y,p3.y,t))); } }
-                thA[si]=Q.thick[M-1]; sm[si++]=toScr(Q.spline[M-1]);
+            if(Q.bOrbSize>0.001f){
+                float ht=headT; if(ht>1)ht=1; if(ht<0)ht=0; float fi=ht*(float)N; int hi=(int)fi; if(hi>N-1)hi=N-1; if(hi<0)hi=0; int h2=hi+1<=N?hi+1:hi; float hf=fi-(float)hi;
+                float ox=CX[hi]+(CX[h2]-CX[hi])*hf, oy=CY[hi]+(CY[h2]-CY[hi])*hf, oz=CZ[hi]+(CZ[h2]-CZ[hi])*hf;
+                float vz; ImVec2 S=proj(ox,oy,oz,&vz);
+                if(vz>0.05f){ float pls=0.85f+0.15f*sinf(sFxClk*0.7f);
+                    float orad=(hw*4.0f+Q.bJitter*1.5f)*pls*Q.bOrbSize*focal/vz; if(orad<2)orad=2;
+                    for(int r=5;r>=1;r--){ float rr=orad*(float)r/5.0f; int aa=(int)(55*(1.0f-(float)r/6.0f))+18; dl->AddCircleFilled(S, rr, IM_COL32(colR,colG,colB,aa)); }
+                    dl->AddCircleFilled(S, orad*0.45f, IM_COL32(230,240,255,200));
+                    dl->AddCircleFilled(S, orad*0.22f, IM_COL32(255,255,255,235)); }
             }
-            int total = si;
-            for(int i=1;i<total-1;i++){ float jx=sm[i+1].y-sm[i-1].y, jy=-(sm[i+1].x-sm[i-1].x); float l=sqrtf(jx*jx+jy*jy); if(l<0.001f)l=0.001f; float off=Q.bJitter*sym(); sm[i].x+=jx/l*off; sm[i].y+=jy/l*off; }
-            float Lc = Q.lifeClk - floorf(Q.lifeClk); bool useLife = (Q.bPulse>0.0001f) && (Q.bLifeIn>0.001f || Q.bLifeOut>0.001f);
-            float head=1.0f, tail=0.0f; if (useLife){ head=(Q.bLifeIn>0.001f && Lc<Q.bLifeIn)?Lc/Q.bLifeIn:1.0f; tail=(Q.bLifeOut>0.001f && Lc>1.0f-Q.bLifeOut)?(Lc-(1.0f-Q.bLifeOut))/Q.bLifeOut:0.0f; }
-            float pp = (!useLife && Q.bPulse>0.0001f) ? (Q.anim-floorf(Q.anim)) : -1.0f;
-            float trvClk = Q.surgeAnim * (20.0f / (Q.bTravelLife > 1.0f ? Q.bTravelLife : 1.0f));   // loop period ~ Travel life frames
-            float trv = Q.bTravel ? (trvClk - floorf(trvClk)) : -1.0f;   // crawling packet head 0..1 (loops in preview)
-            for(int i=0;i<total-1;i++){ float tm=(float)i/(float)(total-1);
-                if (useLife && (tm<tail || tm>head)) continue;
-                int al=235;
-                if (trv>=0.0f){ float win=Q.bTravelPersist>0.03f?Q.bTravelPersist:0.03f; float head=trv*(1.0f+win); float d=head-tm; if(tm>head||d>win||d<0) continue;
-                    float bb=1.0f-d/win; bb*=bb; float fade=Q.bTravelFade; al=(int)(255*(1.0f-fade*(1.0f-bb))); if(al<0)al=0; }
-                else if (useLife){ float ed=2.0f; if(head<1.0f){float d=head-tm;if(d>=0&&d<ed)ed=d;} if(tail>0.0f){float d=tm-tail;if(d>=0&&d<ed)ed=d;} al=ed<0.10f?255:175; }
-                else if (pp>=0.0f){ float d=tm-pp;if(d<0)d=-d; float b=d<0.12f?(1.0f-d/0.12f):0.0f; al=(int)(120+135*b*b); if(al<120)al=120; if(al>255)al=255; }
-                float taper=1.0f; if(Q.bTaperS>0.001f&&tm<Q.bTaperS)taper=tm/Q.bTaperS; if(Q.bTaperE>0.001f&&tm>1.0f-Q.bTaperE){float te=(1.0f-tm)/Q.bTaperE;if(te<taper)taper=te;}
-                float fall=1.0f; if(Q.bFalloffS>0.001f&&tm<Q.bFalloffS){float f=tm/Q.bFalloffS;f=f*f*(3.0f-2.0f*f);if(f<fall)fall=f;} if(Q.bFalloffE>0.001f&&tm>1.0f-Q.bFalloffE){float f=(1.0f-tm)/Q.bFalloffE;f=f*f*(3.0f-2.0f*f);if(f<fall)fall=f;}
-                float w=Q.bWidth*thA[i]*taper*fall*(al>=255?1.6f:1.0f); if(w<0.15f)continue;
-                dl->AddLine(sm[i],sm[i+1], IM_COL32(110,170,255,(int)(al*0.30f)), w*2.4f);
-                dl->AddLine(sm[i],sm[i+1], IM_COL32(235,245,255,al), w);
-            }
-            if (isAct && !Q.bSurge) for(int i=0;i<M;i++){ ImVec2 sp=toScr(Q.spline[i]); bool act=(i==dragIdx||i==sFxSel); float r=3.5f+(i<(int)Q.thick.size()?Q.thick[i]*1.6f:1.6f);
-                dl->AddCircleFilled(sp, act?r+1.5f:r, act?IM_COL32(255,230,120,255):IM_COL32(120,200,255,220));
-                dl->AddCircle(sp, act?r+1.5f:r, IM_COL32(255,255,255,210), 0, 1.5f); }
         }
+        ImGui::PopClipRect();
         ImGui::EndChild();   // end canvas
 
         // ===== BOTTOM BAR: INSTANCES (horizontal) — each is a callable effect; the [n]

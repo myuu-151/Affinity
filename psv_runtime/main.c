@@ -356,7 +356,7 @@ float afn_part_ox = 0.0f, afn_part_oy = 14.0f, afn_part_oz = 0.0f;  // spawn off
 // ---------------------------------------------------------------------------
 #define AFN_BEAM_POOL 4
 #define AFN_BEAM_MAX_SEGS 48
-#define AFN_BEAM_FILAMENTS 5   // thin crackling lines bundled around the centerline (electric look)
+#define AFN_BEAM_FILAMENTS_MAX 12   // upper bound on bundled crackling strands
 typedef struct {
     int   active, life, maxLife;
     float sx, sy, sz, tx, ty, tz;     // source / target (world)
@@ -369,6 +369,8 @@ typedef struct {
     int   travelBounces;              // how many times the spline tiles across the floor (decaying) before it fizzles
     float travelPersist;              // fraction of the path the lit ribbon trails behind the head (0..1)
     float travelFade;                 // over what fraction of the END of its life it fades out (0 = no fade)
+    int   filaments;                  // # bundled crackling strands (1..AFN_BEAM_FILAMENTS_MAX)
+    float orbSize;                    // head-orb radius multiplier (0 = no orb)
 } AfnBeam;
 static AfnBeam s_beams[AFN_BEAM_POOL] = {{0}};
 
@@ -385,6 +387,8 @@ int   afn_beam_bounces = 3;          // arches the bolt makes across the floor (
 float afn_beam_decay  = 0.78f;       // each bounce reaches this fraction of the previous height (1 = even)
 float afn_beam_pulse  = 0.018f;      // animated "ball" travels along the arcs at this speed (frac/frame; 0 = none)
 unsigned afn_beam_col = 0xFFFFFFFFu; // core colour
+int   afn_beam_filaments = 5;        // # bundled crackling strands (electric bundle look)
+float afn_beam_orb = 1.0f;           // head-orb radius multiplier (0 = no orb)
 // Authored spline override (Play Effect node / effect layer) — when set, the bolt
 // follows these normalised control points (x 0..1 along path, y 0..1 height) instead
 // of the parametric parabolic bounce. Cleared by afn_beam_resolve after one cast.
@@ -2179,6 +2183,8 @@ static void afn_beam_resolve(float px, float py, float pz, float yawDeg) {
     bm->bounces = afn_beam_bounces; bm->decay = afn_beam_decay; bm->pulse = afn_beam_pulse;
     bm->spts = afn_beam_spline; bm->nspts = afn_beam_spline_n;
     bm->travel = afn_beam_travel; bm->travelBounces = afn_beam_travel_bounces; bm->travelPersist = afn_beam_travel_persist; bm->travelFade = afn_beam_travel_fade;
+    bm->filaments = afn_beam_filaments < 1 ? 1 : (afn_beam_filaments > AFN_BEAM_FILAMENTS_MAX ? AFN_BEAM_FILAMENTS_MAX : afn_beam_filaments);
+    bm->orbSize = afn_beam_orb;
     afn_beam_spline = 0; afn_beam_spline_n = 0; afn_beam_travel = 0; afn_beam_travel_bounces = 3; afn_beam_travel_persist = 0.30f; afn_beam_travel_fade = 0.35f;   // one-shot: don't leak into the next plain bolt
 }
 
@@ -2291,9 +2297,10 @@ static void afn_beam_render(const float* view) {
         float fw = hw * 0.55f; if (fw < 0.03f) fw = 0.03f;   // thin filament half-width
 
         // ---- the electric BUNDLE: thin crackling filaments around the centerline ----
-        for (int k = 0; k < AFN_BEAM_FILAMENTS; k++) {
+        int nfil = bm->filaments < 1 ? 1 : bm->filaments;
+        for (int k = 0; k < nfil; k++) {
             unsigned frng = rng ^ ((unsigned)(k+1) * 0x9E3779B9u);
-            float ph = (float)k * (6.2831853f / (float)AFN_BEAM_FILAMENTS);
+            float ph = (float)k * (6.2831853f / (float)nfil);
             float cph = cosf(ph), sph = sinf(ph);
             AfnVertex fil[2 * (AFN_BEAM_MAX_SEGS + 1)];
             for (int i = 0; i <= N; i++) {
@@ -2327,14 +2334,14 @@ static void afn_beam_render(const float* view) {
 
         // ---- bright HEAD ORB (the leading ball): a soft radial glow (blue halo + white core),
         // additive triangle fans so it's round without a texture ----
-        {
+        if (bm->orbSize > 0.001f) {
             float ht = headT; if (ht>1.0f) ht=1.0f; if (ht<0.0f) ht=0.0f;
             float fi = ht*(float)N; int hi=(int)fi; if(hi>N-1)hi=N-1; if(hi<0)hi=0; int h2=hi+1<=N?hi+1:hi; float hf=fi-(float)hi;
             float ox = cxA[hi]+(cxA[h2]-cxA[hi])*hf, oy = cyA[hi]+(cyA[h2]-cyA[hi])*hf, oz = czA[hi]+(czA[h2]-czA[hi])*hf;
             float pls = 0.85f + 0.15f*sinf((float)afn_frame_count*0.7f);
             // two fans: large blue halo, then small white-hot core
             for (int pass = 0; pass < 2; pass++) {
-                float orad = (pass==0 ? (hw*4.0f + bm->jitter*1.5f) : (hw*1.8f)) * pls;
+                float orad = (pass==0 ? (hw*4.0f + bm->jitter*1.5f) : (hw*1.8f)) * pls * bm->orbSize;
                 unsigned cc = (pass==0 ? rgb : 0x00FFFFFFu) | ((unsigned)baseA << 24);
                 unsigned rim = (pass==0 ? rgb : 0x00FFFFFFu);   // alpha 0 at rim
                 AfnVertex fan[11];
@@ -2368,26 +2375,25 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
         afn_part_col0 = 0xFFFFFFFFu; afn_part_col1 = 0x00FFFFFFu;
         afn_particles_emit(px, py + 14.0f, pz);
     } else {
-        afn_beam_width  = L->bWidth  * 0.06f;
-        afn_beam_bow    = L->bBow    * 0.06f;
-        afn_beam_jitter = L->bJitter * 0.04f;
-        afn_beam_segs   = L->bSegs > 1 ? L->bSegs : 14;
-        afn_beam_bounces= L->bBounces > 0 ? L->bBounces : 1;
-        afn_beam_decay  = L->bDecay; afn_beam_pulse = L->bPulse;
-        afn_beam_life   = (int)L->pLife > 5 ? (int)L->pLife : 18;
-        // Travel mode runs for its own duration (how long the jolt takes to course across).
-        if (L->travel && (int)L->bTravelLife > 5) afn_beam_life = (int)L->bTravelLife;
-        afn_beam_travel_bounces = L->bTravelBounces > 0 ? L->bTravelBounces : 1;
-        // Each bounce spans `bArcLen` world units; the forward cast distance = arc length x
-        // bounce count, so the SAME arc repeats N times across the map. Smaller arc length =
-        // tighter, less-stretched arcs AND a shorter total reach. (Lock-on uses the fixed
-        // player->enemy distance split into N instead.)
+        // Lightning bundle — all params are WORLD units straight from the layer (the editor's
+        // 3D sim authors in the same units, so it mirrors this exactly). No px scaling.
+        afn_beam_width   = L->bWidth;
+        afn_beam_bow     = L->bBow;
+        afn_beam_jitter  = L->bJitter;
+        afn_beam_segs    = L->bSegs > 1 ? L->bSegs : 14;
+        afn_beam_bounces = L->bBounces > 0 ? L->bBounces : 1;
+        afn_beam_decay   = L->bDecay; afn_beam_pulse = L->bPulse;
+        afn_beam_life    = (L->travel && (int)L->bTravelLife > 5) ? (int)L->bTravelLife
+                                                                  : ((int)L->pLife > 5 ? (int)L->pLife : 18);
+        // Forward reach = arc length x bounces (the SAME arc repeats N times across the map).
         { float al = L->bArcLen > 1.0f ? L->bArcLen : 1.0f;
-          afn_beam_range = (int)(al * afn_beam_travel_bounces); if (afn_beam_range < 2) afn_beam_range = 2; }
-        afn_beam_col = 0xFFFFFFFFu;
+          afn_beam_range = (int)(al * afn_beam_bounces); if (afn_beam_range < 2) afn_beam_range = 2; }
+        afn_beam_col = 0xFF000000u | ((unsigned)L->colb << 16) | ((unsigned)L->colg << 8) | (unsigned)L->colr;
+        afn_beam_filaments = L->filaments > 0 ? L->filaments : 1;
+        afn_beam_orb = L->orbSize;
         afn_beam_travel = L->travel; afn_beam_travel_persist = L->bTravelPersist > 0.01f ? L->bTravelPersist : 0.01f;
         afn_beam_travel_fade = L->bTravelFade;
-        if (L->splineCount >= 2) { afn_beam_spline = &afn_fx_pts[L->splineStart]; afn_beam_spline_n = L->splineCount; }
+        afn_beam_spline = 0; afn_beam_spline_n = 0;   // parametric bounce bundle
         afn_beam_spawn = 1;
         afn_beam_resolve(px, py, pz, yawDeg);
     }
@@ -5444,9 +5450,10 @@ int main(void)
         afn_particles_render(view);
         // Beam/lightning ribbons: tick life, cast any queued bolt, draw the strips.
         afn_beam_update();
-        // HARDCODED TEST (Pikachu-jolt look): Select casts a blue/white electric bundle that
-        // bounces 12 times across the floor, with a bright leading head orb. Iterate the
-        // numbers here, then reverse it back into the Effects tab once it looks right.
+        // BACKUP (UNHOOKED): the original hardcoded Pikachu-jolt cast — these are now the
+        // Effects-tab lightning DEFAULTS, so the layer/Play Effect node reproduces it. Kept
+        // here as a reference; flip `#if 0` to `#if 1` to re-bind it to the Select button.
+#if 0
         if (key_hit(KEY_SELECT)) {
             afn_beam_bounces = 12;          // parabolic arches across the floor
             afn_beam_range   = 156;         // total reach (~13 units / bounce)
@@ -5461,10 +5468,16 @@ int main(void)
             afn_beam_travel_persist = 0.55f;
             afn_beam_travel_fade    = 0.30f;
             afn_beam_col     = 0xFFFFB060u; // light blue (0xAABBGGRR: B=FF,G=B0,R=60)
+            afn_beam_filaments = 5;         // bundled crackling strands
+            afn_beam_orb     = 1.0f;        // head-orb radius multiplier
             afn_beam_spline  = 0; afn_beam_spline_n = 0;   // parametric bounce (no authored spline)
             afn_beam_spawn   = 1;
         }
+#endif
 #ifdef AFN_HAS_FX
+        // TEST: Select plays effect instance 0 (the authored "jolt" layer) — data-driven from
+        // the Effects tab, exactly mirroring the 3D viewport. Drop once it's on a Play Effect node.
+        if (key_hit(KEY_SELECT)) afn_fx_play_req = 1;   // instance 0 (+1)
         // Play Effect node queued an authored effect instance this frame.
         if (afn_fx_play_req > 0) { afn_fx_play(afn_fx_play_req - 1, playerX, playerY, playerZ, playerYaw); afn_fx_play_req = 0; }
 #endif
