@@ -1,4 +1,4 @@
-#include "frame_loop.h"
+﻿#include "frame_loop.h"
 #include "../viewport/mode7_preview.h"
 #include "../map/map_types.h"
 #include "rigged_gltf.h"
@@ -175,6 +175,39 @@ static bool sInitialized = false;
 enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events, Elements, Sound, Effects };
 static EditorTab sActiveTab = EditorTab::Map;
 static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
+
+// ---- Effects tab: a list of effect INSTANCES (each one is callable by index from
+// the Play Effect node). Each instance holds one or more LAYERS (a particle or
+// lightning preset) that composite together — so a single instance can be e.g. a
+// lightning bolt + 2 particle bursts. Persisted in the project. ----
+struct FxPart { float x,y,vx,vy,life,maxLife; bool active; };
+struct FxLayer {
+    char  name[24] = "Layer";
+    int   kind = 1;            // 0 = particles, 1 = lightning
+    bool  visible = true;
+    // particle params
+    int   pCount=10; float pSpeed=1.6f,pSpread=0.6f,pLife=45.0f,pGrav=0.05f,pSize=10.0f; bool pStream=true;
+    // lightning params
+    float bWidth=3.0f,bBow=90.0f,bJitter=10.0f,bDecay=0.78f,bPulse=0.018f; int bSegs=14,bBounces=3;
+    bool  bSurge=false; float bTaperS=0,bTaperE=0,bLifeIn=0,bLifeOut=0,bFalloffS=0,bFalloffE=0;
+    bool  bTravel=false;       // crawl a bright packet source->target over the bolt's life
+    int   bTravelBounces=3;    // how many times the spline tiles across the floor (decaying) before it fizzles
+    float bTravelLife=45.0f;   // frames the jolt takes to course across (enter->exit) in travel mode
+    float bTravelPersist=0.30f;// fraction of the path the lit ribbon trails behind the head
+    float bTravelFade=0.35f;   // fade only over this last fraction of the life (0 = no fade)
+    float bArcLen=14.0f;       // world units each bounce spans (reach = bArcLen * bounces)
+    std::vector<ImVec2> spline; std::vector<float> thick;
+    // transient (not serialized)
+    float lifeClk=0,anim=0,surgeAnim=0; int pBurst=0; FxPart parts[160] = {};
+};
+struct FxInstance {
+    char name[24] = "Effect 1";
+    std::vector<FxLayer> layers;   // composited layers; the node plays them all at once
+};
+static std::vector<FxInstance> sFxInstances;
+static int sFxInst = 0;       // selected instance (= the Play Effect node's "Layer" index)
+static int sFxActive = 0;     // selected layer WITHIN the current instance
+static int sFxSel = -1;       // selected spline point (active layer)
 // Live PSV compile log, streamed by the Vita build (psv_package.cpp) — shown in
 // the build popup's compile terminal.
 extern std::mutex g_psvBuildLogMtx;
@@ -908,6 +941,7 @@ enum class VsNodeType : int {
     LockPlayerFunctions, // action: while it runs, lock out player abilities (charge/dodge/quick-attack/focus/block) — menu nav still works (for game-over / menu screens)
     SpawnParticles,  // action: emit a burst of billboard particles (pure-code sim) at the player
     LightningBeam,   // action: cast a jittered ribbon (lightning/laser) from the player to the lock-on enemy / forward
+    PlayEffect,      // action: trigger an authored effect LAYER (from the Effects tab) by index at the player
     COUNT
 };
 
@@ -1325,6 +1359,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Lock Player Functions", 0xFF4488CC, 1, 1, 0, 0, {}, {}, {} },
     { "Spawn Particles",  0xFFCC6644, 1, 1, 7, 0, {"Sprite", "Count", "Speed x100", "Spread 0-100", "Life (frames)", "Size x100", "Gravity x1000"}, {}, {} },
     { "Lightning Beam",   0xFF66AAFF, 1, 1, 9, 0, {"Range", "Width x100", "Arch x100", "Jitter x100", "Segments", "Life (frames)", "Bounces", "Decay x100", "Pulse x1000"}, {}, {} },
+    { "Play Effect",      0xFFCC66AA, 1, 1, 1, 0, {"Instance"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1634,6 +1669,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Player Clip = wire a Skeletal Animation node to force the player rig onto that clip (e.g. a 'winner' pose) for the WHOLE cutscene — it overrides the idle/move state machine until the path ends, then normal animation resumes; leave unwired for no override. Cry Sound = wire a Sound Instance index to play once at the cutscene start (e.g. a Pokémon cry); unwired = silent. Snap Player (1) = teleport the player to the scene-START pose the camera path was authored around (and clear lock-on/tank facing) at cut start, so a cutscene triggered MID-FIGHT (e.g. the victory cam) frames the player correctly instead of animating at the authored spot while the player is elsewhere; leave 0/unwired if the player is already in place (e.g. the intro). Snap X / Snap Z (int, world units) = an explicit snap spot instead of the scene spawn (wire BOTH; Y stays at spawn ground); leave unwired to snap to spawn. Face Angle (int, degrees 0-359) = the facing to hold for the whole cut instead of the scene-default heading; leave unwired for the default. Snap X/Z + Face Angle only apply when Snap Player is on. Freeze Input (1) = mask ALL buttons while the path is animating so no ability/lock-on/charge/dodge/movement fires during the shot — pair with Freeze Player; it auto-releases the instant the path completes (so a Hold-Last cut's results menu still gets input); 0/unwired = input stays live. Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::LightningBeam: desc = "Casts a lightning bolt that BOUNCES across the floor — a connected jagged ribbon from the player's feet to the lock-on enemy's feet (or `Range` ahead if nothing's locked), made of `Bounces` arches that rise off the ground and touch back down between each, crawling forward as it crackles. Camera-facing, additive (glows on its own, no texture). Fire from On Key Pressed. Pins: Range = forward distance when unlocked; Width x100 = ribbon half-width ×100; Arch x100 = how high each bounce rises off the floor ×100; Jitter x100 = jagged crackle ×100 (0 = clean arches); Segments = base resolution (auto-raised so each arch is smooth); Life = frames the bolt lasts (flickering); Bounces = how many arches it skips across the floor; Decay x100 = how much SHORTER each successive bounce is (78 = each 78% of the last, like a ball losing energy; 100 = even arches); Pulse x1000 = speed of the bright 'ball' that travels the arcs to animate the bounce (0 = static glow). The bounce shape is a parabolic-arc spline (sharp at the floor contacts like a real bounce). The pink impact star is a separate Spawn Particles at the target."; break;
+    case VsNodeType::PlayEffect: desc = "Triggers an authored EFFECT INSTANCE (built in the Effects tab) by index, at the player. Each instance is a self-contained effect made of one or more composited LAYERS (e.g. a lightning bolt + 2 particle bursts) — each layer has its own emitter/lightning params and (for lightning) its own hand-dragged spline shape. Playing the instance fires ALL its layers at once. Pin: Instance = which effect instance to play (0-based, matches the [n] index in the Effects tab's Instances list). A particle layer fires a one-shot burst; a lightning layer casts a bolt that follows that layer's authored spline (the exact arc/bounce you dragged), scaling the editor's pixel params to world units. Fire from any event (On Key Pressed = one-shot, On Update = continuous). Authoring lives in the Effects tab; this node just plays an instance."; break;
     case VsNodeType::SpawnParticles: desc = "Emits a burst of billboard particles at the player — a pure-code sim: each particle integrates velocity + gravity per frame, fades over its life, and faces the camera. Fire it from any event: a one-shot On Key Pressed = a burst, On Update = a continuous stream (it emits Count particles every frame it runs). Pins: Sprite = graphic frame for the billboard (-1 = solid quad); Count = particles per emit; Speed x100 = initial speed in world-units/frame ×100 (150 = 1.5); Spread 0-100 = lateral cone width (0 = straight up); Life = lifetime in frames; Size x100 = start size ×100 (shrinks to 0); Gravity x1000 = downward pull ×1000 (40 = 0.04). Spawns at the player + a small height offset (spline pathing + emitter presets come from the Effects tab)."; break;
     case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
     case VsNodeType::AiDodgeClips: desc = "Sets the enemy's DODGE animation clips — the only enemy clips the AI Clips node doesn't cover. Run once from On Update (alongside AI Clips). Two sets: the standard sidestep/roll (Dodge L/R, Dodge FW/BWD = DodgeL/DodgeR/DodgeFW/DodgeBWD) used when reacting to an incoming blast, and the charge-dodge (Chg Dodge L/R = atk_spc_chg_dodge_L/_R) it plays when it sidesteps WITHOUT dropping a charge. Like AI Clips, each UNWIRED pin is name-resolved AT EXPORT to the rig's current index so a glTF re-sort can't drift them (defaults: Chg Dodge L/R = 9/10, Dodge L/R/FW/BWD = 28/29/27/26). The L/R clip the runtime picks is facing-relative (it projects the dodge move onto the enemy's actual render facing), so wire L=DodgeL and R=DodgeR straight. Wire a pin to a Skeletal Animation node to override. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
@@ -7798,7 +7834,24 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "[Affinity Project]\n");
     fprintf(f, "version=3\n");   // v3: HUD anim-layer keyframes are per-item tracks (elemLayerItemKf), not a single shared layer track
     fprintf(f, "activeTab=%d\n", (int)sActiveTab);
-    fprintf(f, "midiMasterDb=%.4f\n\n", sMidiMasterDb);
+    fprintf(f, "midiMasterDb=%.4f\n", sMidiMasterDb);
+    // Effects-tab instances (each node-callable by index). Each instance owns one or
+    // more layers (particle/lightning presets + per-layer spline points), composited.
+    fprintf(f, "fxInstanceCount=%d\n", (int)sFxInstances.size());
+    for (const auto& In : sFxInstances) {
+        fprintf(f, "fxInstance=%s|%d\n", In.name, (int)In.layers.size());
+        for (const auto& Lf : In.layers) {
+            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g\n",
+                Lf.name, Lf.kind, Lf.visible?1:0, Lf.pCount, Lf.pSpeed, Lf.pSpread, Lf.pLife, Lf.pGrav, Lf.pSize, Lf.pStream?1:0,
+                Lf.bWidth, Lf.bBow, Lf.bJitter, Lf.bDecay, Lf.bPulse, Lf.bSegs, Lf.bBounces, Lf.bSurge?1:0,
+                Lf.bTaperS, Lf.bTaperE, Lf.bLifeIn, Lf.bLifeOut, Lf.bFalloffS, Lf.bFalloffE, Lf.bTravel?1:0, Lf.bTravelBounces, Lf.bTravelLife, Lf.bTravelPersist, Lf.bTravelFade, Lf.bArcLen);
+            fprintf(f, "fxSpline=%d", (int)Lf.spline.size());
+            for (size_t i = 0; i < Lf.spline.size(); i++)
+                fprintf(f, " %g,%g,%g", Lf.spline[i].x, Lf.spline[i].y, i < Lf.thick.size() ? Lf.thick[i] : 1.0f);
+            fprintf(f, "\n");
+        }
+    }
+    fprintf(f, "\n");
 
     // Camera start object
     fprintf(f, "[CameraStart]\n");
@@ -8904,6 +8957,7 @@ static bool LoadProject(const std::string& path)
     char section[64] = {};
     int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
     int projectVersion = 1; // v1 = pre-IsFalling enum, v2 = current
+    bool fxFlatLegacy = false; // old projects stored a flat fxLayer list (1 layer == 1 instance)
 
     // Pre-pass: collect packed asset blobs into sPackedAssets so asset loaders
     // can find them when their reference lines (diranimdir=, m7FloorTex=) are
@@ -8987,6 +9041,33 @@ static bool LoadProject(const std::string& path)
                 sActiveTab = (EditorTab)std::clamp(ival, 0, (int)EditorTab::Effects);
             else if (sscanf(line, "midiMasterDb=%f", &fval) == 1)
                 sMidiMasterDb = fval;
+            else if (strncmp(line, "fxInstanceCount=", 16) == 0) { sFxInstances.clear(); sFxInst = 0; sFxActive = 0; sFxSel = -1; fxFlatLegacy = false; }
+            else if (strncmp(line, "fxInstance=", 11) == 0) {
+                FxInstance In; int lc = 0;
+                sscanf(line + 11, "%23[^|]|%d", In.name, &lc);
+                sFxInstances.push_back(In);
+            }
+            else if (strncmp(line, "fxLayerCount=", 13) == 0) { sFxInstances.clear(); sFxInst = 0; sFxActive = 0; sFxSel = -1; fxFlatLegacy = true; }  // legacy flat list
+            else if (strncmp(line, "fxLayer=", 8) == 0) {
+                FxLayer Lf; int vis = 1, str = 1, surge = 0, travel = 0;
+                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g",
+                    Lf.name, &Lf.kind, &vis, &Lf.pCount, &Lf.pSpeed, &Lf.pSpread, &Lf.pLife, &Lf.pGrav, &Lf.pSize, &str,
+                    &Lf.bWidth, &Lf.bBow, &Lf.bJitter, &Lf.bDecay, &Lf.bPulse, &Lf.bSegs, &Lf.bBounces, &surge,
+                    &Lf.bTaperS, &Lf.bTaperE, &Lf.bLifeIn, &Lf.bLifeOut, &Lf.bFalloffS, &Lf.bFalloffE, &travel, &Lf.bTravelBounces, &Lf.bTravelLife, &Lf.bTravelPersist, &Lf.bTravelFade, &Lf.bArcLen);
+                Lf.visible = vis != 0; Lf.pStream = str != 0; Lf.bSurge = surge != 0; Lf.bTravel = travel != 0;
+                if (fxFlatLegacy || sFxInstances.empty()) {   // legacy: each layer is its own instance
+                    FxInstance In; snprintf(In.name, sizeof(In.name), "%s", Lf.name); sFxInstances.push_back(In);
+                }
+                sFxInstances.back().layers.push_back(Lf);
+            }
+            else if (strncmp(line, "fxSpline=", 9) == 0 && !sFxInstances.empty() && !sFxInstances.back().layers.empty()) {
+                FxLayer& Lf = sFxInstances.back().layers.back(); Lf.spline.clear(); Lf.thick.clear();
+                int n = 0; const char* p = line + 9; sscanf(p, "%d", &n);
+                while (*p && *p != ' ') p++;
+                for (int i = 0; i < n && *p; i++) { while (*p == ' ') p++; float x, y, th;
+                    if (sscanf(p, "%g,%g,%g", &x, &y, &th) == 3) { Lf.spline.push_back(ImVec2(x, y)); Lf.thick.push_back(th); }
+                    while (*p && *p != ' ') p++; }
+            }
         }
         else if (strcmp(section, "CameraStart") == 0)
         {
@@ -19211,6 +19292,22 @@ void FrameTick(float dt)
                     }
                     break;
                 }
+                // Effects-tab instances (a Play Effect node triggers one by index; each
+                // instance plays ALL its composited layers at once).
+                for (const auto& inst : sFxInstances) {
+                    AfnCameraExport::FxInstanceExp ie;
+                    for (const auto& fl : inst.layers) {
+                        AfnCameraExport::FxLayerExp fe;
+                        fe.kind=fl.kind;
+                        fe.pCount=fl.pCount; fe.pSpeed=fl.pSpeed; fe.pSpread=fl.pSpread; fe.pLife=fl.pLife; fe.pGrav=fl.pGrav; fe.pSize=fl.pSize;
+                        fe.bWidth=fl.bWidth; fe.bBow=fl.bBow; fe.bJitter=fl.bJitter; fe.bDecay=fl.bDecay; fe.bPulse=fl.bPulse; fe.bSegs=fl.bSegs; fe.bBounces=fl.bBounces;
+                        fe.bSurge=fl.bSurge; fe.bTaperS=fl.bTaperS; fe.bTaperE=fl.bTaperE; fe.bLifeIn=fl.bLifeIn; fe.bLifeOut=fl.bLifeOut; fe.bFalloffS=fl.bFalloffS; fe.bFalloffE=fl.bFalloffE;
+                        fe.bTravel=fl.bTravel; fe.bTravelBounces=fl.bTravelBounces; fe.bTravelLife=fl.bTravelLife; fe.bTravelPersist=fl.bTravelPersist; fe.bTravelFade=fl.bTravelFade; fe.bArcLen=fl.bArcLen;
+                        for (size_t i=0;i<fl.spline.size();i++) fe.spline.push_back({ fl.spline[i].x, fl.spline[i].y, (i<fl.thick.size()?fl.thick[i]:1.0f) });
+                        ie.layers.push_back(fe);
+                    }
+                    exportCam.fxInstances.push_back(ie);
+                }
                 exportCam.walkSpeed = sCamObj.walkSpeed;
                 exportCam.sprintSpeed = sCamObj.sprintSpeed;
                 exportCam.walkEaseIn = sCamObj.walkEaseIn;
@@ -25909,7 +26006,9 @@ void FrameTick(float dt)
                         "    //   per bounce hump = 4*lt*(1-lt) (0 at contacts, peak mid), height *= decay^arch\n"
                         "    //   (energy loss), lifted along path-frame UP + jitter*rand crackle. A bright\n"
                         "    //   'ball' (pp = fmod(frame*pulse,1)) travels the arcs boosting per-point alpha\n"
-                        "    //   = the bounce animation. Ribbon = +/- local-tangent side*width, additive strip.");
+                        "    //   = the bounce animation. Ribbon = a CROSS of 2 perpendicular strips (camera-\n"
+                        "    //   facing side + tangent x side) so it has 3D volume from any angle — even when\n"
+                        "    //   the bolt points straight at/away from you it won't collapse to a sliver. Additive.");
                     break;
                 case VsNodeType::SpawnParticles:
                     editorCode = "// Emit a burst of billboard particles (pure-code sim) at the player";
@@ -25927,6 +26026,22 @@ void FrameTick(float dt)
                         "    //   randomized life, then clears afn_part_spawn. afn_particles_update() integrates\n"
                         "    //   each: vy -= grav; pos += vel; life--. afn_particles_render(view) billboards them\n"
                         "    //   camera-facing (view right/up basis), size + colour lerped over age, additive blend.");
+                    break;
+                case VsNodeType::PlayEffect:
+                    editorCode = "// Trigger an authored effect INSTANCE (Effects tab) by index at the player";
+                    setActionFunc(infoNode, "_play_effect",
+                        "#ifdef AFN_HAS_FX\n"
+                        "    afn_fx_play_req = <Instance> + 1;     // queue instance <Instance> (0 = none); main loop plays it\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // The 3D pass: if (afn_fx_play_req > 0) afn_fx_play(req-1, playerX,Y,Z, playerYaw).\n"
+                        "    // afn_fx_play(idx,..): reads afn_fx_instances[idx] (exported from the Effects tab) and\n"
+                        "    //   plays ALL its layers (afn_fx_layers[layerStart..layerStart+layerCount]):\n"
+                        "    //   kind 0 (particle): sets afn_part_* from the layer + afn_particles_emit() a burst.\n"
+                        "    //   kind 1 (lightning): sets afn_beam_* (width*0.1, bow*0.15, jitter*0.1 px->world),\n"
+                        "    //     points afn_beam_spline at the layer's authored control points (afn_fx_pts[start..]),\n"
+                        "    //     afn_beam_spawn=1 + afn_beam_resolve(). afn_beam_render then follows that exact\n"
+                        "    //     spline (Catmull-Rom: x = along-path, refY-y = height, th = per-point width).");
                     break;
                 case VsNodeType::PlayCameraAnim: {
                     editorCode = "// Take over the camera + play the player's keyframed cutscene path";
@@ -31416,208 +31531,236 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Effects)
     {
-        // Effects tab — LIVE PREVIEW sandbox. Mirrors the runtime pure-code sim
-        // (particle integration + beam jitter) with ImGui draw lists, so you can
-        // watch the behaviour and tune before wiring the Spawn Particles / Lightning
-        // Beam nodes. (Illustrative px scale — relative motion/jitter/fade match.)
+        // Effects tab — LAYERED preview sandbox. A stack of effect layers (particle /
+        // lightning presets), composited in the canvas and saved with the project.
         int flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
         ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
         ImGui::Begin("##EffectsTab", nullptr, flags);
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Effects — live preview");
-        ImGui::SameLine(); ImGui::TextDisabled("(behaviour sandbox; wire Spawn Particles / Lightning Beam nodes to use in-game)");
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Effects");
+        ImGui::SameLine(); ImGui::TextDisabled("(instances — saved with the project; play one with the Play Effect node)");
         ImGui::Separator();
-        static int pvKind = 1;   // 0 = particles, 1 = lightning
-        ImGui::RadioButton("Particles", &pvKind, 0); ImGui::SameLine(0, Scaled(16));
-        ImGui::RadioButton("Lightning", &pvKind, 1);
-        ImGui::Spacing();
 
-        // tiny xorshift for the preview sim
+        if (sFxInstances.empty()) { FxInstance I0; snprintf(I0.name, sizeof(I0.name), "Effect 1"); I0.layers.push_back(FxLayer()); sFxInstances.push_back(I0); }
+        if (sFxInst < 0 || sFxInst >= (int)sFxInstances.size()) sFxInst = 0;
+
+        FxInstance& Inst = sFxInstances[sFxInst];
+        if (Inst.layers.empty()) Inst.layers.push_back(FxLayer());
+        if (sFxActive < 0 || sFxActive >= (int)Inst.layers.size()) sFxActive = 0;
+
+        // ===== TOP BAR: LAYERS (horizontal) — the layers inside the selected instance;
+        // they all composite / play together when the instance is triggered. =====
+        float fxBarH = ImGui::GetFrameHeight() + ImGui::GetTextLineHeightWithSpacing() + Scaled(14);
+        ImGui::BeginChild("##fxlayerbar", ImVec2(0, fxBarH), true, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::AlignTextToFramePadding(); ImGui::TextColored(ImVec4(0.8f,0.85f,1.0f,1.0f), "Layers:"); ImGui::SameLine();
+        ImGui::SetNextItemWidth(Scaled(110));
+        if (ImGui::InputText("##iname", Inst.name, sizeof(Inst.name))) sProjectDirty = true;
+        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        for (int i = 0; i < (int)Inst.layers.size(); i++) {
+            ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
+            if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "%s %s%s",
+                Inst.layers[i].kind == 1 ? "\xE2\x9A\xA1" : "\xE2\x9C\xB1",   // ⚡ lightning / ✱ particle
+                Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
+            if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
+            if (sel) ImGui::PopStyleColor();
+            ImGui::PopID(); ImGui::SameLine();
+        }
+        if (ImGui::Button("+ Layer")) { FxLayer Ln; snprintf(Ln.name, sizeof(Ln.name), "Layer %d", (int)Inst.layers.size()+1); Inst.layers.push_back(Ln); sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true; }
+        ImGui::SameLine();
+        if (ImGui::Button("Dup")) { FxLayer Ln = Inst.layers[sFxActive]; snprintf(Ln.name, sizeof(Ln.name), "Layer %d", (int)Inst.layers.size()+1); Inst.layers.push_back(Ln); sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true; }
+        if ((int)Inst.layers.size() > 1) { ImGui::SameLine(); if (ImGui::Button("- Layer")) { Inst.layers.erase(Inst.layers.begin()+sFxActive); if (sFxActive >= (int)Inst.layers.size()) sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true; } }
+        ImGui::EndChild();
+
+        if (sFxActive < 0 || sFxActive >= (int)Inst.layers.size()) sFxActive = 0;
+        FxLayer& L = Inst.layers[sFxActive];
+        // The controls + canvas fill the middle, leaving room for the bottom Instances bar.
+        float fxMidH = ImGui::GetContentRegionAvail().y - fxBarH - ImGui::GetStyle().ItemSpacing.y;
         static unsigned pvRng = 0x9E3779B9u;
         auto rnd = [&]() -> float { pvRng ^= pvRng<<13; pvRng ^= pvRng>>17; pvRng ^= pvRng<<5; return (float)(pvRng & 0xFFFF) / 65536.0f; };
         auto sym = [&]() -> float { return rnd()*2.0f - 1.0f; };
+        auto seedSpline = [](FxLayer& Q) { Q.spline.clear(); int nb = Q.bBounces<1?1:Q.bBounces; float fy = 0.85f, ph = 0.08f + (Q.bBow/170.0f)*0.6f;
+            for (int k = 0; k <= 2*nb; k++) { float nx = (float)k/(2.0f*nb); float dF = 1.0f; for (int j = 0; j < k/2; j++) dF *= Q.bDecay; float ny = (k%2==0)?fy:fy-ph*dF; Q.spline.push_back(ImVec2(nx,ny)); }
+            Q.thick.assign(Q.spline.size(), 1.0f); };
 
-        // ---- controls (left) ----
-        static int   pvpCount=10; static float pvpSpeed=1.6f, pvpSpread=0.6f, pvpLife=45.0f, pvpGrav=0.05f, pvpSize=10.0f; static bool pvpStream=true; static int pvpBurst=0;
-        static float pvbWidth=3.0f, pvbBow=90.0f, pvbJitter=10.0f, pvbDecay=0.78f, pvbPulse=0.018f; static int pvbSegs=14, pvbBounces=3;
-        static std::vector<ImVec2> sFxSpline;   // draggable control points (normalised 0..1 in the canvas)
-        static std::vector<float> sFxThick;     // per-point thickness multiplier (middle-click a dot to edit)
-        static int sFxSel = -1;                 // point whose thickness panel is open
-        static bool sFxReseed = true;           // (re)build the points from the bounce sliders
-        static float pvbFalloffS=0.0f, pvbFalloffE=0.0f;   // thickness falloff length at each end (0 = none)
-        static bool pvbSurge=false;                                    // old scrolling-arch shape (compat)
-        static float pvbTaperS=0.0f, pvbTaperE=0.0f;                    // per-side taper length (0 = none)
-        static float pvbLifeIn=0.0f, pvbLifeOut=0.0f;                   // grow-in / retract-out lifetimes (0 = none)
-        static float pvbLifeClk=0.0f; pvbLifeClk += pvbPulse;          // lifecycle clock — Pulse drives its speed
-        ImGui::BeginChild("##fxctrl", ImVec2(Scaled(210), 0), true);
-        if (pvKind == 0) {
-            ImGui::TextColored(ImVec4(1,0.8f,0.5f,1), "Particles"); ImGui::Separator();
+        // ---- controls (left): edit the active layer ----
+        ImGui::BeginChild("##fxctrl", ImVec2(Scaled(210), fxMidH), true);
+        ImGui::SetNextItemWidth(Scaled(120));
+        if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
+        if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
+        if (ImGui::RadioButton("Particles", &L.kind, 0)) sProjectDirty = true; ImGui::SameLine();
+        if (ImGui::RadioButton("Lightning", &L.kind, 1)) sProjectDirty = true;
+        ImGui::Separator();
+        if (L.kind == 0) {
             ImGui::PushItemWidth(Scaled(110));
-            ImGui::SliderInt("Count", &pvpCount, 1, 40);
-            ImGui::SliderFloat("Speed", &pvpSpeed, 0.1f, 5.0f, "%.2f");
-            ImGui::SliderFloat("Spread", &pvpSpread, 0.0f, 1.5f, "%.2f");
-            ImGui::SliderFloat("Life", &pvpLife, 5.0f, 120.0f, "%.0f");
-            ImGui::SliderFloat("Gravity", &pvpGrav, -0.10f, 0.20f, "%.3f");
-            ImGui::SliderFloat("Size", &pvpSize, 1.0f, 30.0f, "%.0f");
+            ImGui::SliderInt("Count", &L.pCount, 1, 40);
+            ImGui::SliderFloat("Speed", &L.pSpeed, 0.1f, 5.0f, "%.2f");
+            ImGui::SliderFloat("Spread", &L.pSpread, 0.0f, 1.5f, "%.2f");
+            ImGui::SliderFloat("Life", &L.pLife, 5.0f, 120.0f, "%.0f");
+            ImGui::SliderFloat("Gravity", &L.pGrav, -0.10f, 0.20f, "%.3f");
+            ImGui::SliderFloat("Size", &L.pSize, 1.0f, 30.0f, "%.0f");
             ImGui::PopItemWidth();
-            ImGui::Checkbox("Stream", &pvpStream);
-            if (ImGui::Button("Burst")) pvpBurst = pvpCount;
+            ImGui::Checkbox("Stream", &L.pStream);
+            if (ImGui::Button("Burst")) L.pBurst = L.pCount;
         } else {
-            ImGui::TextColored(ImVec4(0.6f,0.8f,1,1), "Lightning (bounces)"); ImGui::Separator();
             ImGui::PushItemWidth(Scaled(110));
-            ImGui::SliderFloat("Width", &pvbWidth, 0.5f, 12.0f, "%.1f");
-            ImGui::SliderFloat("Arch", &pvbBow, 5.0f, 170.0f, "%.0f");
-            ImGui::SliderInt("Bounces", &pvbBounces, 1, 8);
-            ImGui::SliderFloat("Decay", &pvbDecay, 0.4f, 1.0f, "%.2f");
-            ImGui::SliderFloat("Pulse", &pvbPulse, 0.0f, 0.06f, "%.3f");
-            ImGui::SliderFloat("Jitter", &pvbJitter, 0.0f, 200.0f, "%.0f");
-            ImGui::SliderInt("Segments", &pvbSegs, 2, 24);
+            ImGui::SliderFloat("Width", &L.bWidth, 0.5f, 12.0f, "%.1f");
+            ImGui::SliderFloat("Arch", &L.bBow, 5.0f, 170.0f, "%.0f");
+            ImGui::SliderInt("Bounces", &L.bBounces, 1, 8);
+            ImGui::SliderFloat("Decay", &L.bDecay, 0.4f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Pulse", &L.bPulse, 0.0f, 0.06f, "%.3f");
+            ImGui::SliderFloat("Jitter", &L.bJitter, 0.0f, 200.0f, "%.0f");
+            ImGui::SliderInt("Segments", &L.bSegs, 2, 24);
+            ImGui::Spacing();
+            if (ImGui::Checkbox("Travel across floor", &L.bTravel)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("A bright packet crawls source->target over the bolt's\nlife, bouncing along the spline (instead of the whole arc\nappearing at once). Off = the static arc you have now.");
+            ImGui::PushItemWidth(Scaled(110));
+            if (ImGui::SliderInt("Bounces (fizzle)", &L.bTravelBounces, 1, 12)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How many times the arc repeats across the map — its\nshape stays the same, it just bounces that many times\n(each shorter by Decay) before fizzling. 1 = a single arc.");
+            if (ImGui::SliderFloat("Arc length", &L.bArcLen, 3.0f, 60.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World units each bounce spans (DISTANCE). Total reach =\narc length x bounces. Lower = tighter, less-stretched arcs\nand a shorter trip across the map.");
+            if (ImGui::SliderFloat("Travel life", &L.bTravelLife, 8.0f, 400.0f, "%.0f f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames the jolt takes to course across (enter -> exit) in\nTravel mode. Higher = the packet crawls across slower (SPEED).\nIf it looks instant, raise this and/or lower Persistence.");
+            if (ImGui::SliderFloat("Persistence", &L.bTravelPersist, 0.03f, 1.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much of ONE arc the lit ribbon occupies behind the\nhead. The packet rides up-and-over each arc in turn, so this\nis per-arc. Low = a short spark; 1.0 = a whole arc stays lit.");
+            if (ImGui::SliderFloat("Fade falloff", &L.bTravelFade, 0.0f, 1.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much the trailing ribbon dims from head to tail.\n0 = no fade (the whole streak is uniform full-bright);\n1 = a comet that fades to nothing behind the head.");
+            ImGui::PopItemWidth();
+            ImGui::Checkbox("Surge (old shape)", &L.bSurge);
+            ImGui::SliderFloat("Life in", &L.bLifeIn, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Life out", &L.bLifeOut, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Taper start", &L.bTaperS, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Taper end", &L.bTaperE, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Thick falloff S", &L.bFalloffS, 0.0f, 0.5f, "%.2f");
+            ImGui::SliderFloat("Thick falloff E", &L.bFalloffE, 0.0f, 0.5f, "%.2f");
             ImGui::PopItemWidth();
             ImGui::Spacing();
-            ImGui::Checkbox("Surge (old shape)", &pvbSurge);
-            ImGui::PushItemWidth(Scaled(110));
-            ImGui::SliderFloat("Life in", &pvbLifeIn, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Life out", &pvbLifeOut, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Taper start", &pvbTaperS, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Taper end", &pvbTaperE, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Thick falloff S", &pvbFalloffS, 0.0f, 0.5f, "%.2f");
-            ImGui::SliderFloat("Thick falloff E", &pvbFalloffE, 0.0f, 0.5f, "%.2f");
-            ImGui::PopItemWidth();
-            ImGui::Spacing();
-            ImGui::TextDisabled("Middle-click a dot to\nset its thickness.");
-            if (ImGui::Button("Reset to bounce", ImVec2(-1,0))) { sFxReseed = true; sFxSel = -1; }
-            ImGui::TextDisabled("Drag the dots to shape\nthe spline. Double-click\n= add point, Right-click\n= remove. Arch/Bounces/\nDecay only re-seed it.");
+            ImGui::TextDisabled("Middle-click a dot = thickness.\nDrag = shape, dbl-click = add,\nright-click = remove.");
+            if (ImGui::Button("Reset to bounce", ImVec2(-1,0))) { seedSpline(L); sFxSel = -1; sProjectDirty = true; }
         }
         ImGui::EndChild();
         ImGui::SameLine();
 
-        // ---- canvas (right) ----
-        ImGui::BeginChild("##fxcanvas", ImVec2(0,0), true);
+        // ---- canvas (right): composite all visible layers ----
+        ImGui::BeginChild("##fxcanvas", ImVec2(0,fxMidH), true);
         ImVec2 cp = ImGui::GetCursorScreenPos();
         ImVec2 cs = ImGui::GetContentRegionAvail();
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), IM_COL32(6,6,12,255));
-        if (pvKind == 0) {
-            // Particle 2D sim — mirrors runtime: vy += grav; pos += vel; life--; fade+shrink.
-            static struct { float x,y,vx,vy,life,maxLife; bool active; } pv[256] = {};
-            const float PX = 6.0f;
-            float ox = cp.x + cs.x*0.5f, oy = cp.y + cs.y*0.82f;   // fountain origin
-            int toEmit = (pvpStream ? pvpCount : 0) + pvpBurst; pvpBurst = 0;
-            for (int e=0;e<toEmit;e++){ int s=-1; for(int i=0;i<256;i++) if(!pv[i].active){s=i;break;} if(s<0)break;
-                pv[s].active=true; pv[s].x=ox; pv[s].y=oy;
-                pv[s].vx = sym()*pvpSpread*pvpSpeed*PX;
-                pv[s].vy = -(0.4f+rnd()*0.6f)*pvpSpeed*PX;
-                pv[s].maxLife = pv[s].life = pvpLife*(0.7f+rnd()*0.6f); }
-            for (int i=0;i<256;i++){ if(!pv[i].active)continue;
-                pv[i].vy += pvpGrav*PX; pv[i].x += pv[i].vx; pv[i].y += pv[i].vy;
-                if ((pv[i].life-=1.0f)<=0){ pv[i].active=false; continue; }
-                float age = 1.0f - pv[i].life/pv[i].maxLife;
-                float sz = pvpSize*(1.0f-age); if (sz<0.5f) sz=0.5f;
-                int al = (int)(235*(1.0f-age));
-                dl->AddCircleFilled(ImVec2(pv[i].x,pv[i].y), sz, IM_COL32(255,225,150,al));
-            }
-        } else {
-            // DRAGGABLE spline: control points (normalised) define a Catmull-Rom path; the
-            // ribbon (glow + core + travelling bounce ball + crackle) follows it. Drag the
-            // dots to shape the arc exactly; double-click adds a point, right-click removes.
-            static float pvbAnim = 0.0f; pvbAnim += pvbPulse;
-            float floorY = cp.y + cs.y*0.86f;
-            dl->AddLine(ImVec2(cp.x, floorY), ImVec2(cp.x+cs.x, floorY), IM_COL32(55,55,75,255), 1.5f);
-            auto toScr=[&](ImVec2 n){ return ImVec2(cp.x+n.x*cs.x, cp.y+n.y*cs.y); };
-            auto toNrm=[&](ImVec2 s){ float x=(s.x-cp.x)/cs.x,y=(s.y-cp.y)/cs.y; x=x<0?0:x>1?1:x; y=y<0?0:y>1?1:y; return ImVec2(x,y); };
-            // (re)seed control points from the bounce sliders
-            if (sFxReseed || sFxSpline.size()<2) {
-                sFxSpline.clear(); int nb=pvbBounces; float fy=0.85f, ph=0.08f + (pvbBow/170.0f)*0.6f;
-                for(int k=0;k<=2*nb;k++){ float nx=(float)k/(2.0f*nb); float dF=1.0f; for(int j=0;j<k/2;j++) dF*=pvbDecay;
-                    float ny=(k%2==0)? fy : fy - ph*dF; sFxSpline.push_back(ImVec2(nx,ny)); }
-                sFxThick.assign(sFxSpline.size(), 1.0f); sFxReseed=false;
-            }
-            if (sFxThick.size()!=sFxSpline.size()) sFxThick.assign(sFxSpline.size(), 1.0f);   // keep thickness in sync
-            // input: grab/drag nearest; double-click add; right-click remove; MIDDLE-click = thickness panel
-            ImGui::InvisibleButton("##fxcnv", cs);
-            bool hov = ImGui::IsItemHovered(); ImVec2 ms = ImGui::GetIO().MousePos;
-            static int dragIdx=-1;
-            if (ImGui::IsItemActivated()){ dragIdx=-1; float best=14.0f*14.0f;
-                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;dragIdx=i;} } }
-            if (ImGui::IsItemActive() && dragIdx>=0) sFxSpline[dragIdx]=toNrm(ms);
-            if (!ImGui::IsItemActive()) dragIdx=-1;
-            if (hov && ImGui::IsMouseDoubleClicked(0)){ ImVec2 n=toNrm(ms); float nd=1e9f;
-                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y; float d2=dx*dx+dy*dy; if(d2<nd)nd=d2; }
-                if (nd>16.0f*16.0f){ int ins=(int)sFxSpline.size(); for(int i=0;i<(int)sFxSpline.size();i++) if(sFxSpline[i].x>n.x){ins=i;break;} sFxSpline.insert(sFxSpline.begin()+ins,n); sFxThick.insert(sFxThick.begin()+ins,1.0f); } }
-            if (hov && ImGui::IsMouseClicked(1) && (int)sFxSpline.size()>2){ int ri=-1; float best=16.0f*16.0f;
-                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;ri=i;} }
-                if(ri>=0){ sFxSpline.erase(sFxSpline.begin()+ri); if(ri<(int)sFxThick.size()) sFxThick.erase(sFxThick.begin()+ri); if(sFxSel==ri) sFxSel=-1; } }
-            if (hov && ImGui::IsMouseClicked(2)){ int mi=-1; float best=16.0f*16.0f;
-                for(int i=0;i<(int)sFxSpline.size();i++){ ImVec2 sp=toScr(sFxSpline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;mi=i;} }
+        float floorY = cp.y + cs.y*0.86f;
+        dl->AddLine(ImVec2(cp.x, floorY), ImVec2(cp.x+cs.x, floorY), IM_COL32(55,55,75,255), 1.5f);
+        auto toScr = [&](ImVec2 n) { return ImVec2(cp.x + n.x*cs.x, cp.y + n.y*cs.y); };
+        auto toNrm = [&](ImVec2 s) { float x=(s.x-cp.x)/cs.x, y=(s.y-cp.y)/cs.y; x=x<0?0:x>1?1:x; y=y<0?0:y>1?1:y; return ImVec2(x,y); };
+        auto cr = [](float p0,float p1,float p2,float p3,float t) { float t2=t*t,t3=t2*t; return 0.5f*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3); };
+
+        // input: the ACTIVE lightning layer's spline is editable (drag / dbl-click add / right-click remove / middle-click thickness)
+        ImGui::InvisibleButton("##fxcnv", cs);
+        bool hov = ImGui::IsItemHovered(); ImVec2 ms = ImGui::GetIO().MousePos;
+        static int dragIdx = -1;
+        if (L.kind == 1) {
+            if (L.spline.size() < 2) seedSpline(L);
+            if (L.thick.size() != L.spline.size()) L.thick.assign(L.spline.size(), 1.0f);
+            if (ImGui::IsItemActivated()) { dragIdx = -1; float best = 14.0f*14.0f;
+                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;dragIdx=i;} } }
+            if (ImGui::IsItemActive() && dragIdx>=0) { L.spline[dragIdx]=toNrm(ms); sProjectDirty=true; }
+            if (!ImGui::IsItemActive()) dragIdx = -1;
+            if (hov && ImGui::IsMouseDoubleClicked(0)) { ImVec2 n=toNrm(ms); float nd=1e9f;
+                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y; float d2=dx*dx+dy*dy; if(d2<nd)nd=d2; }
+                if (nd>16.0f*16.0f){ int ins=(int)L.spline.size(); for(int i=0;i<(int)L.spline.size();i++) if(L.spline[i].x>n.x){ins=i;break;} L.spline.insert(L.spline.begin()+ins,n); L.thick.insert(L.thick.begin()+ins,1.0f); sProjectDirty=true; } }
+            if (hov && ImGui::IsMouseClicked(1) && (int)L.spline.size()>2) { int ri=-1; float best=16.0f*16.0f;
+                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;ri=i;} }
+                if(ri>=0){ L.spline.erase(L.spline.begin()+ri); if(ri<(int)L.thick.size()) L.thick.erase(L.thick.begin()+ri); if(sFxSel==ri) sFxSel=-1; sProjectDirty=true; } }
+            if (hov && ImGui::IsMouseClicked(2)) { int mi=-1; float best=16.0f*16.0f;
+                for (int i=0;i<(int)L.spline.size();i++){ ImVec2 sp=toScr(L.spline[i]); float dx=ms.x-sp.x,dy=ms.y-sp.y,d2=dx*dx+dy*dy; if(d2<best){best=d2;mi=i;} }
                 if(mi>=0){ sFxSel=mi; ImGui::OpenPopup("##ptpanel"); } }
-            if (ImGui::BeginPopup("##ptpanel")){
-                if (sFxSel>=0 && sFxSel<(int)sFxThick.size()){
-                    ImGui::Text("Point %d  thickness", sFxSel);
-                    ImGui::SetNextItemWidth(Scaled(170));
-                    ImGui::SliderFloat("##pt", &sFxThick[sFxSel], 0.0f, 4.0f, "%.2f x");
-                } else ImGui::TextDisabled("(point removed)");
+            if (ImGui::BeginPopup("##ptpanel")) {
+                if (sFxSel>=0 && sFxSel<(int)L.thick.size()) { ImGui::Text("Point %d  thickness", sFxSel); ImGui::SetNextItemWidth(Scaled(170));
+                    if (ImGui::SliderFloat("##pt", &L.thick[sFxSel], 0.0f, 4.0f, "%.2f x")) sProjectDirty=true; }
+                else ImGui::TextDisabled("(point removed)");
                 ImGui::EndPopup();
             }
-            // sample the centerline: SURGE = scrolling |sin| arches on the floor (compat),
-            // else the draggable Catmull-Rom spline.
-            int M=(int)sFxSpline.size();
-            auto cr=[](float p0,float p1,float p2,float p3,float t){ float t2=t*t,t3=t2*t;
-                return 0.5f*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3); };
-            const int SUB=14; static ImVec2 sm[1024]; static float thA[1024]; int si=0;
-            if (pvbSurge) {
-                static float surgeAnim=0.0f; surgeAnim += 0.05f;
-                float lx=cp.x+cs.x*0.06f, rx=cp.x+cs.x*0.94f; int nb=pvbBounces; int NS=nb*12; if(NS>900)NS=900;
-                for(int i=0;i<=NS && si<1000;i++){ float t=(float)i/(float)NS;
-                    float by=floorY - pvbBow*fabsf(sinf((t*nb - surgeAnim)*3.14159265f));
-                    thA[si]=1.0f; sm[si++]=ImVec2(lx+(rx-lx)*t, by); }
+        }
+
+        static ImVec2 sm[1024]; static float thA[1024];
+        for (int li = 0; li < (int)Inst.layers.size(); li++) {
+            FxLayer& Q = Inst.layers[li];
+            if (!Q.visible) continue;
+            bool isAct = (li == sFxActive);
+            if (Q.kind == 0) {
+                const float PX = 6.0f; float ox = cp.x + cs.x*0.5f, oy = cp.y + cs.y*0.82f;
+                int toEmit = (Q.pStream ? Q.pCount : 0) + Q.pBurst; Q.pBurst = 0;
+                for (int e=0;e<toEmit;e++){ int s=-1; for(int i=0;i<160;i++) if(!Q.parts[i].active){s=i;break;} if(s<0)break;
+                    Q.parts[s].active=true; Q.parts[s].x=ox; Q.parts[s].y=oy; Q.parts[s].vx=sym()*Q.pSpread*Q.pSpeed*PX; Q.parts[s].vy=-(0.4f+rnd()*0.6f)*Q.pSpeed*PX; Q.parts[s].maxLife=Q.parts[s].life=Q.pLife*(0.7f+rnd()*0.6f); }
+                for (int i=0;i<160;i++){ if(!Q.parts[i].active)continue; Q.parts[i].vy+=Q.pGrav*PX; Q.parts[i].x+=Q.parts[i].vx; Q.parts[i].y+=Q.parts[i].vy;
+                    if((Q.parts[i].life-=1.0f)<=0){Q.parts[i].active=false;continue;}
+                    float age=1.0f-Q.parts[i].life/Q.parts[i].maxLife; float sz=Q.pSize*(1.0f-age); if(sz<0.5f)sz=0.5f; int al=(int)(235*(1.0f-age));
+                    dl->AddCircleFilled(ImVec2(Q.parts[i].x,Q.parts[i].y), sz, IM_COL32(255,225,150,al)); }
+                continue;
+            }
+            if (Q.spline.size() < 2) seedSpline(Q);
+            if (Q.thick.size() != Q.spline.size()) Q.thick.assign(Q.spline.size(), 1.0f);
+            Q.anim += Q.bPulse; Q.lifeClk += Q.bPulse; Q.surgeAnim += 0.05f;
+            int M = (int)Q.spline.size();
+            const int SUB = 14; int si = 0;
+            if (Q.bSurge) {
+                float lx=cp.x+cs.x*0.06f, rx=cp.x+cs.x*0.94f; int nb=Q.bBounces; int NS=nb*12; if(NS>900)NS=900;
+                for(int i=0;i<=NS && si<1000;i++){ float t=(float)i/(float)NS; float by=floorY - Q.bBow*fabsf(sinf((t*nb - Q.surgeAnim)*3.14159265f)); thA[si]=1.0f; sm[si++]=ImVec2(lx+(rx-lx)*t, by); }
             } else {
-                for(int seg=0; seg<M-1 && si<1000; seg++){
-                    ImVec2 p0=sFxSpline[seg>0?seg-1:0],p1=sFxSpline[seg],p2=sFxSpline[seg+1],p3=sFxSpline[seg<M-2?seg+2:M-1];
-                    float t0=sFxThick[seg], t1=sFxThick[seg+1];   // per-point thickness, lerped along the segment
+                // Show the single authored arc as-is (the Bounces count repeats THIS shape
+                // across the map at runtime — it doesn't change the shape you draw here).
+                for(int seg=0; seg<M-1 && si<1000; seg++){ ImVec2 p0=Q.spline[seg>0?seg-1:0],p1=Q.spline[seg],p2=Q.spline[seg+1],p3=Q.spline[seg<M-2?seg+2:M-1]; float t0=Q.thick[seg],t1=Q.thick[seg+1];
                     for(int s=0;s<SUB;s++){ float t=(float)s/SUB; thA[si]=t0+(t1-t0)*t; sm[si++]=toScr(ImVec2(cr(p0.x,p1.x,p2.x,p3.x,t),cr(p0.y,p1.y,p2.y,p3.y,t))); } }
-                thA[si]=sFxThick[M-1]; sm[si++]=toScr(sFxSpline[M-1]);
+                thA[si]=Q.thick[M-1]; sm[si++]=toScr(Q.spline[M-1]);
             }
-            int total=si;
-            // crackle: jitter each interior sample perpendicular to the local tangent
-            for(int i=1;i<total-1;i++){ float jx=sm[i+1].y-sm[i-1].y, jy=-(sm[i+1].x-sm[i-1].x); float l=sqrtf(jx*jx+jy*jy); if(l<0.001f)l=0.001f;
-                float off=pvbJitter*sym(); sm[i].x+=jx/l*off; sm[i].y+=jy/l*off; }
-            // LIFECYCLE: born by growing in over "Life in" (head advances 0->1), then dies by
-            // retracting over "Life out" (tail advances 0->1) — visible window = [tail, head].
-            float L = pvbLifeClk - floorf(pvbLifeClk);
-            bool useLife = (pvbPulse>0.0001f) && (pvbLifeIn>0.001f || pvbLifeOut>0.001f);   // Pulse = speed; 0 = static full bolt
-            float head=1.0f, tail=0.0f;
-            if (useLife){
-                head = (pvbLifeIn>0.001f && L<pvbLifeIn) ? L/pvbLifeIn : 1.0f;
-                tail = (pvbLifeOut>0.001f && L>1.0f-pvbLifeOut) ? (L-(1.0f-pvbLifeOut))/pvbLifeOut : 0.0f;
-            }
-            float pp = (!useLife && pvbPulse>0.0001f) ? (pvbAnim-floorf(pvbAnim)) : -1.0f;  // bounce ball (no lifecycle)
+            int total = si;
+            for(int i=1;i<total-1;i++){ float jx=sm[i+1].y-sm[i-1].y, jy=-(sm[i+1].x-sm[i-1].x); float l=sqrtf(jx*jx+jy*jy); if(l<0.001f)l=0.001f; float off=Q.bJitter*sym(); sm[i].x+=jx/l*off; sm[i].y+=jy/l*off; }
+            float Lc = Q.lifeClk - floorf(Q.lifeClk); bool useLife = (Q.bPulse>0.0001f) && (Q.bLifeIn>0.001f || Q.bLifeOut>0.001f);
+            float head=1.0f, tail=0.0f; if (useLife){ head=(Q.bLifeIn>0.001f && Lc<Q.bLifeIn)?Lc/Q.bLifeIn:1.0f; tail=(Q.bLifeOut>0.001f && Lc>1.0f-Q.bLifeOut)?(Lc-(1.0f-Q.bLifeOut))/Q.bLifeOut:0.0f; }
+            float pp = (!useLife && Q.bPulse>0.0001f) ? (Q.anim-floorf(Q.anim)) : -1.0f;
+            float trvClk = Q.surgeAnim * (20.0f / (Q.bTravelLife > 1.0f ? Q.bTravelLife : 1.0f));   // loop period ~ Travel life frames
+            float trv = Q.bTravel ? (trvClk - floorf(trvClk)) : -1.0f;   // crawling packet head 0..1 (loops in preview)
             for(int i=0;i<total-1;i++){ float tm=(float)i/(float)(total-1);
-                if (useLife && (tm<tail || tm>head)) continue;            // visible window
+                if (useLife && (tm<tail || tm>head)) continue;
                 int al=235;
-                if (useLife){ float ed=2.0f;                              // bright at the active growing/retracting edge
-                    if (head<1.0f){ float d=head-tm; if(d>=0&&d<ed)ed=d; }
-                    if (tail>0.0f){ float d=tm-tail; if(d>=0&&d<ed)ed=d; }
-                    al = ed<0.10f ? 255 : 175;
-                } else if (pp>=0.0f){ float d=tm-pp; if(d<0)d=-d; float b=d<0.12f?(1.0f-d/0.12f):0.0f; al=(int)(120+135*b*b); if(al<120)al=120; if(al>255)al=255; }
-                float taper=1.0f;
-                if (pvbTaperS>0.001f && tm<pvbTaperS) taper = tm/pvbTaperS;                       // point at the start
-                if (pvbTaperE>0.001f && tm>1.0f-pvbTaperE){ float te=(1.0f-tm)/pvbTaperE; if(te<taper) taper=te; }  // point at the end
-                float fall=1.0f;   // smooth THICKNESS falloff at each end (distinct from the sharp taper)
-                if (pvbFalloffS>0.001f && tm<pvbFalloffS){ float f=tm/pvbFalloffS; f=f*f*(3.0f-2.0f*f); if(f<fall)fall=f; }
-                if (pvbFalloffE>0.001f && tm>1.0f-pvbFalloffE){ float f=(1.0f-tm)/pvbFalloffE; f=f*f*(3.0f-2.0f*f); if(f<fall)fall=f; }
-                float w = pvbWidth*thA[i]*taper*fall*(al>=255?1.6f:1.0f); if (w<0.15f) continue;   // * per-point thickness
-                dl->AddLine(sm[i],sm[i+1], IM_COL32(110,170,255,(int)(al*0.30f)), w*2.4f);   // glow
-                dl->AddLine(sm[i],sm[i+1], IM_COL32(235,245,255,al), w);                      // core
+                if (trv>=0.0f){ float win=Q.bTravelPersist>0.03f?Q.bTravelPersist:0.03f; float head=trv*(1.0f+win); float d=head-tm; if(tm>head||d>win||d<0) continue;
+                    float bb=1.0f-d/win; bb*=bb; float fade=Q.bTravelFade; al=(int)(255*(1.0f-fade*(1.0f-bb))); if(al<0)al=0; }
+                else if (useLife){ float ed=2.0f; if(head<1.0f){float d=head-tm;if(d>=0&&d<ed)ed=d;} if(tail>0.0f){float d=tm-tail;if(d>=0&&d<ed)ed=d;} al=ed<0.10f?255:175; }
+                else if (pp>=0.0f){ float d=tm-pp;if(d<0)d=-d; float b=d<0.12f?(1.0f-d/0.12f):0.0f; al=(int)(120+135*b*b); if(al<120)al=120; if(al>255)al=255; }
+                float taper=1.0f; if(Q.bTaperS>0.001f&&tm<Q.bTaperS)taper=tm/Q.bTaperS; if(Q.bTaperE>0.001f&&tm>1.0f-Q.bTaperE){float te=(1.0f-tm)/Q.bTaperE;if(te<taper)taper=te;}
+                float fall=1.0f; if(Q.bFalloffS>0.001f&&tm<Q.bFalloffS){float f=tm/Q.bFalloffS;f=f*f*(3.0f-2.0f*f);if(f<fall)fall=f;} if(Q.bFalloffE>0.001f&&tm>1.0f-Q.bFalloffE){float f=(1.0f-tm)/Q.bFalloffE;f=f*f*(3.0f-2.0f*f);if(f<fall)fall=f;}
+                float w=Q.bWidth*thA[i]*taper*fall*(al>=255?1.6f:1.0f); if(w<0.15f)continue;
+                dl->AddLine(sm[i],sm[i+1], IM_COL32(110,170,255,(int)(al*0.30f)), w*2.4f);
+                dl->AddLine(sm[i],sm[i+1], IM_COL32(235,245,255,al), w);
             }
-            // control-point handles (spline mode only); dot size shows that point's thickness
-            if (!pvbSurge) for(int i=0;i<M;i++){ ImVec2 sp=toScr(sFxSpline[i]); bool act=(i==dragIdx||i==sFxSel);
-                float r = 3.5f + (i<(int)sFxThick.size()? sFxThick[i]*1.6f : 1.6f);
+            if (isAct && !Q.bSurge) for(int i=0;i<M;i++){ ImVec2 sp=toScr(Q.spline[i]); bool act=(i==dragIdx||i==sFxSel); float r=3.5f+(i<(int)Q.thick.size()?Q.thick[i]*1.6f:1.6f);
                 dl->AddCircleFilled(sp, act?r+1.5f:r, act?IM_COL32(255,230,120,255):IM_COL32(120,200,255,220));
                 dl->AddCircle(sp, act?r+1.5f:r, IM_COL32(255,255,255,210), 0, 1.5f); }
         }
+        ImGui::EndChild();   // end canvas
+
+        // ===== BOTTOM BAR: INSTANCES (horizontal) — each is a callable effect; the [n]
+        // index is the Play Effect node's "Instance" pin value. =====
+        ImGui::BeginChild("##fxinstbar", ImVec2(0, fxBarH), true, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::AlignTextToFramePadding(); ImGui::TextColored(ImVec4(0.8f,0.85f,1.0f,1.0f), "Instances:"); ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each instance = one effect the Play Effect node can trigger.\nThe [n] index is the node's Instance pin. Selecting one\nswaps the Layers shown at the top.");
+        ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
+        for (int i = 0; i < (int)sFxInstances.size(); i++) {
+            ImGui::PushID(10000 + i); bool sel = (i == sFxInst);
+            if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "[%d] %s (%d)", i, sFxInstances[i].name, (int)sFxInstances[i].layers.size());
+            if (ImGui::Button(lbl)) { sFxInst = i; sFxActive = 0; sFxSel = -1; }
+            if (sel) ImGui::PopStyleColor();
+            ImGui::PopID(); ImGui::SameLine();
+        }
+        if (ImGui::Button("+ Add")) { FxInstance In; snprintf(In.name, sizeof(In.name), "Effect %d", (int)sFxInstances.size()+1); In.layers.push_back(FxLayer()); sFxInstances.push_back(In); sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; }
+        ImGui::SameLine();
+        if (ImGui::Button("Duplicate")) { FxInstance In = sFxInstances[sFxInst]; snprintf(In.name, sizeof(In.name), "Effect %d", (int)sFxInstances.size()+1); sFxInstances.push_back(In); sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; }
+        if ((int)sFxInstances.size() > 1) { ImGui::SameLine(); if (ImGui::Button("- Remove")) { sFxInstances.erase(sFxInstances.begin()+sFxInst); if (sFxInst >= (int)sFxInstances.size()) sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; } }
         ImGui::EndChild();
+
         ImGui::End();
         ImGui::PopStyleColor();
     }

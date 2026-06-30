@@ -1284,6 +1284,16 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_beam_spawn = 1;   // cast THIS frame\n";
                 break;
             }
+            case AfnScriptNodeType::PlayEffect: {
+                // Queue an authored effect INSTANCE (Effects tab) by index — the main loop
+                // calls afn_fx_play(idx, player...) next, which plays ALL of that instance's
+                // layers (particle bursts + spline-shaped lightning bolts) with their params.
+                auto* d0=findDataIn(a->id,0);
+                f << "#ifdef AFN_HAS_FX\n";
+                f << "    afn_fx_play_req = " << (d0?resolveInt(d0):0) << " + 1;   // play instance (0-based) THIS frame\n";
+                f << "#endif\n";
+                break;
+            }
             case AfnScriptNodeType::LockPlayerFunctions:
                 // Lock out player combat functions for this frame. The runtime masks HELD
                 // keys (so On-Key-Held abilities like Charge Up don't run — kills the energy

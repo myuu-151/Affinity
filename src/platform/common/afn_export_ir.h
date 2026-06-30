@@ -167,6 +167,27 @@ struct AfnCameraExport
     struct CamKf { int frame = 0; float ex = 0, ey = 0, ez = 0, yaw = 0, pitch = 0, fov = 45; int interp = 2; float speed = 1.0f; bool smoothIn = true, smoothOut = true; };
     struct CamAnimExp { char name[32] = "Anim"; int fps = 30; bool smoothPath = false; std::vector<CamKf> keyframes; };
     std::vector<CamAnimExp> camAnims;
+
+    // Effects-tab layers (each a particle or lightning preset). A Play Effect node
+    // triggers one by index. Spline points are normalised (x 0..1 along the path,
+    // y 0..1 in the canvas — ~0.86 = floor — , th = per-point thickness).
+    struct FxPt { float x = 0, y = 0, th = 1; };
+    struct FxLayerExp {
+        int   kind = 1;            // 0 = particle, 1 = lightning
+        int   pCount = 10; float pSpeed=1.6f,pSpread=0.6f,pLife=45,pGrav=0.05f,pSize=10;
+        float bWidth=3,bBow=90,bJitter=10,bDecay=0.78f,bPulse=0.018f; int bSegs=14,bBounces=3;
+        bool  bSurge=false; float bTaperS=0,bTaperE=0,bLifeIn=0,bLifeOut=0,bFalloffS=0,bFalloffE=0;
+        bool  bTravel=false;       // crawl a bright packet source->target over the bolt's life
+        int   bTravelBounces=3;    // how many times the spline tiles across the floor (decaying) before it fizzles
+        float bTravelLife=45;      // frames the jolt takes to course across (enter->exit) in travel mode
+        float bTravelPersist=0.30f;// fraction of the path the lit ribbon trails behind the head
+        float bTravelFade=0.35f;   // fade only over this last fraction of the life (0 = no fade)
+        float bArcLen=14;          // world units each bounce spans (reach = bArcLen * bounces)
+        std::vector<FxPt> spline;
+    };
+    // An instance = one node-callable effect = a set of layers composited together.
+    struct FxInstanceExp { std::vector<FxLayerExp> layers; };
+    std::vector<FxInstanceExp> fxInstances;
 };
 
 // Mesh asset for GBA export
@@ -572,6 +593,7 @@ enum class AfnScriptNodeType : int {
     LockPlayerFunctions, // action: while it runs, lock out player abilities (menu nav still works)
     SpawnParticles,  // action: emit a burst of billboard particles (pure-code sim) at the player
     LightningBeam,   // action: cast a jittered ribbon (lightning/laser) from the player to the lock-on enemy / forward
+    PlayEffect,      // action: trigger an authored effect LAYER (from the Effects tab) by index at the player
     COUNT
 };
 

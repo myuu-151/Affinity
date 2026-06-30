@@ -396,6 +396,39 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             for (const auto& a : camera.camAnims) f << (a.smoothPath ? 1 : 0) << ",";
             f << "};\n";
         }
+
+        // ---- Effects instances (a Play Effect node triggers one by index; an instance
+        // plays ALL its layers at once). Layers are flattened; each instance records its
+        // [layerStart, layerCount). Spline points: x 0..1 along path, y 0..1 canvas, th.
+        int nfxi = (int)camera.fxInstances.size();
+        if (nfxi > 0) {
+            int nlay = 0, fxtot = 0;
+            for (const auto& In : camera.fxInstances) { nlay += (int)In.layers.size();
+                for (const auto& Lx : In.layers) fxtot += (int)Lx.spline.size(); }
+            f << "#define AFN_HAS_FX 1\n";
+            f << "#define AFN_FX_COUNT " << nfxi << "\n";          // instances (Play Effect's Layer pin indexes this)
+            f << "#define AFN_FX_LAYER_COUNT " << (nlay>0?nlay:1) << "\n";
+            f << "typedef struct { unsigned char kind, surge, travel; short pCount, bSegs, bBounces, bTravelBounces, splineStart, splineCount;"
+                 " float pSpeed,pSpread,pLife,pGrav,pSize, bWidth,bBow,bJitter,bDecay,bPulse,"
+                 " bTaperS,bTaperE,bLifeIn,bLifeOut,bFalloffS,bFalloffE, bTravelLife, bTravelPersist, bTravelFade, bArcLen; } AfnFxLayer;\n";
+            f << "typedef struct { short layerStart, layerCount; } AfnFxInstance;\n";
+            f << "static const AfnFxLayer afn_fx_layers[" << (nlay>0?nlay:1) << "] = {\n";
+            { int run = 0; for (const auto& In : camera.fxInstances) for (const auto& Lx : In.layers) {
+                f << "  { " << Lx.kind << "," << (Lx.bSurge?1:0) << "," << (Lx.bTravel?1:0) << ", " << Lx.pCount << "," << Lx.bSegs << "," << Lx.bBounces << "," << Lx.bTravelBounces << ", " << run << "," << (int)Lx.spline.size() << ", "
+                  << Flt(Lx.pSpeed) << "," << Flt(Lx.pSpread) << "," << Flt(Lx.pLife) << "," << Flt(Lx.pGrav) << "," << Flt(Lx.pSize) << ", "
+                  << Flt(Lx.bWidth) << "," << Flt(Lx.bBow) << "," << Flt(Lx.bJitter) << "," << Flt(Lx.bDecay) << "," << Flt(Lx.bPulse) << ", "
+                  << Flt(Lx.bTaperS) << "," << Flt(Lx.bTaperE) << "," << Flt(Lx.bLifeIn) << "," << Flt(Lx.bLifeOut) << "," << Flt(Lx.bFalloffS) << "," << Flt(Lx.bFalloffE) << ", " << Flt(Lx.bTravelLife) << "," << Flt(Lx.bTravelPersist) << "," << Flt(Lx.bTravelFade) << "," << Flt(Lx.bArcLen) << " },\n";
+                run += (int)Lx.spline.size(); } }
+            if (nlay == 0) f << "  {0}\n";
+            f << "};\n";
+            f << "static const AfnFxInstance afn_fx_instances[" << nfxi << "] = {";
+            { int lrun = 0; for (const auto& In : camera.fxInstances) { f << "{" << lrun << "," << (int)In.layers.size() << "},"; lrun += (int)In.layers.size(); } }
+            f << "};\n";
+            f << "static const float afn_fx_pts[" << (fxtot>0?fxtot:1) << "][3] = {";
+            for (const auto& In : camera.fxInstances) for (const auto& Lx : In.layers) for (const auto& p : Lx.spline) f << "{" << Flt(p.x) << "," << Flt(p.y) << "," << Flt(p.th) << "},";
+            if (fxtot == 0) f << "{0,0,1}";
+            f << "};\n";
+        }
     }
 
     f.close();

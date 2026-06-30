@@ -355,13 +355,19 @@ float afn_part_ox = 0.0f, afn_part_oy = 14.0f, afn_part_oz = 0.0f;  // spawn off
 // All pure vector math. The impact flash at the end is the particle pool above.
 // ---------------------------------------------------------------------------
 #define AFN_BEAM_POOL 4
-#define AFN_BEAM_MAX_SEGS 24
+#define AFN_BEAM_MAX_SEGS 48
 typedef struct {
     int   active, life, maxLife;
     float sx, sy, sz, tx, ty, tz;     // source / target (world)
     float width, bow, jitter, decay, pulse;
     int   segs, bounces;
     unsigned col;                     // core colour 0xAABBGGRR
+    const float (*spts)[3];           // authored spline (normalised x,y,th), or NULL = parametric bounce
+    int   nspts;
+    int   travel;                     // 1 = crawl a bright packet from source->target over its life
+    int   travelBounces;              // how many times the spline tiles across the floor (decaying) before it fizzles
+    float travelPersist;              // fraction of the path the lit ribbon trails behind the head (0..1)
+    float travelFade;                 // over what fraction of the END of its life it fades out (0 = no fade)
 } AfnBeam;
 static AfnBeam s_beams[AFN_BEAM_POOL] = {{0}};
 
@@ -378,6 +384,15 @@ int   afn_beam_bounces = 3;          // arches the bolt makes across the floor (
 float afn_beam_decay  = 0.78f;       // each bounce reaches this fraction of the previous height (1 = even)
 float afn_beam_pulse  = 0.018f;      // animated "ball" travels along the arcs at this speed (frac/frame; 0 = none)
 unsigned afn_beam_col = 0xFFFFFFFFu; // core colour
+// Authored spline override (Play Effect node / effect layer) — when set, the bolt
+// follows these normalised control points (x 0..1 along path, y 0..1 height) instead
+// of the parametric parabolic bounce. Cleared by afn_beam_resolve after one cast.
+const float (*afn_beam_spline)[3] = 0;
+int afn_beam_spline_n = 0;
+int afn_beam_travel = 0;             // 1 = a bright packet crawls source->target over the bolt's life
+int afn_beam_travel_bounces = 3;     // spline tiles this many times across the floor (decaying) before fizzling
+float afn_beam_travel_persist = 0.30f; // fraction of the path the lit ribbon trails behind the crawling head
+float afn_beam_travel_fade = 0.35f;  // fade only over this last fraction of the life (0 = stays full bright, no fade)
 // Beam clash — FULLY NODE-ORCHESTRATED now (ch_controller BP). The runtime keeps
 // only the heavy primitives: the 2D struggle render (clash_render_2d), the beam
 // geometry -> afn_clash_ready flag (clash_sense), and the RNG masher / pitch /
@@ -2161,6 +2176,24 @@ static void afn_beam_resolve(float px, float py, float pz, float yawDeg) {
     bm->width = afn_beam_width; bm->bow = afn_beam_bow; bm->jitter = afn_beam_jitter;
     bm->segs = afn_beam_segs; bm->col = afn_beam_col;
     bm->bounces = afn_beam_bounces; bm->decay = afn_beam_decay; bm->pulse = afn_beam_pulse;
+    bm->spts = afn_beam_spline; bm->nspts = afn_beam_spline_n;
+    bm->travel = afn_beam_travel; bm->travelBounces = afn_beam_travel_bounces; bm->travelPersist = afn_beam_travel_persist; bm->travelFade = afn_beam_travel_fade;
+    afn_beam_spline = 0; afn_beam_spline_n = 0; afn_beam_travel = 0; afn_beam_travel_bounces = 3; afn_beam_travel_persist = 0.30f; afn_beam_travel_fade = 0.35f;   // one-shot: don't leak into the next plain bolt
+}
+
+// Catmull-Rom sample of an authored effect spline (normalised x,y,th) at param s in
+// 0..1 across all segments. Returns the interpolated x,y (and thickness th if want).
+static void fx_spline_sample(const float (*p)[3], int n, float s, float* ox, float* oy, float* oth) {
+    if (n <= 1) { *ox = n ? p[0][0] : 0.0f; *oy = n ? p[0][1] : 0.0f; if (oth) *oth = n ? p[0][2] : 1.0f; return; }
+    if (s < 0) s = 0; if (s > 1) s = 1;
+    float fs = s * (float)(n - 1); int i = (int)fs; if (i > n - 2) i = n - 2; if (i < 0) i = 0;
+    float t = fs - (float)i, t2 = t*t, t3 = t2*t;
+    int i0 = i-1 < 0 ? 0 : i-1, i1 = i, i2 = i+1, i3 = i+2 > n-1 ? n-1 : i+2;
+    for (int c = 0; c < 3; c++) {
+        float a0 = p[i0][c], a1 = p[i1][c], a2 = p[i2][c], a3 = p[i3][c];
+        float v = 0.5f * ((2.0f*a1) + (-a0+a2)*t + (2.0f*a0-5.0f*a1+4.0f*a2-a3)*t2 + (-a0+3.0f*a1-3.0f*a2+a3)*t3);
+        if (c == 0) *ox = v; else if (c == 1) *oy = v; else if (oth) *oth = v;
+    }
 }
 
 // Render each bolt as a camera-facing triangle strip: walk the source->target line in
@@ -2182,7 +2215,10 @@ static void afn_beam_render(const float* view) {
         AfnBeam* bm = &s_beams[b];
         if (!bm->active) continue;
         int nb = bm->bounces > 0 ? bm->bounces : 1;
-        int N = bm->segs; { int need = nb * 8; if (need > N) N = need; }   // ~8 segs per arch
+        // When a spline is authored it tiles `travelBounces` times across the floor; otherwise
+        // the parametric path makes `bounces` arches. Resolve enough segments for either.
+        int tb = (bm->nspts >= 2 && bm->travelBounces > 0) ? bm->travelBounces : nb;
+        int N = bm->segs; { int need = tb * 8; if (need > N) N = need; }   // ~8 segs per arch
         if (N < 2) N = 2; if (N > AFN_BEAM_MAX_SEGS) N = AFN_BEAM_MAX_SEGS;
         float dx = bm->tx - bm->sx, dy = bm->ty - bm->sy, dz = bm->tz - bm->sz;
         float len = sqrtf(dx*dx + dy*dy + dz*dz); if (len < 0.001f) len = 0.001f;
@@ -2202,55 +2238,158 @@ static void afn_beam_render(const float* view) {
         // bounce), and each successive arch is `decay`x the previous height (energy loss). The
         // arch lifts along path-frame UP; a jagged crackle rides on top (clean at the anchors).
         float cxA[AFN_BEAM_MAX_SEGS+1], cyA[AFN_BEAM_MAX_SEGS+1], czA[AFN_BEAM_MAX_SEGS+1];
+        float thA[AFN_BEAM_MAX_SEGS+1];
+        float refY = (bm->nspts >= 2) ? bm->spts[0][1] : 0.0f;   // spline start = floor reference
         for (int i = 0; i <= N; i++) {
             float t = (float)i / (float)N;
-            float bx = bm->sx + dx*t, by = bm->sy + dy*t, bz = bm->sz + dz*t;
-            float seg = t * (float)nb; int bi = (int)seg; if (bi >= nb) bi = nb-1;
-            float lt = seg - (float)bi;                       // 0..1 within this bounce
-            float hump = 4.0f * lt * (1.0f - lt);             // parabola: 0 at contacts, 1 at peak
-            float decayF = 1.0f; for (int k=0;k<bi;k++) decayF *= bm->decay;   // each arch lower
-            float arch = bm->bow * decayF * hump;
+            float along = t, arch, thk = 1.0f;
+            if (bm->nspts >= 2) {
+                // Authored shape tiled `tb` times across the floor: each tile replays the
+                // spline (x -> along-path within its slot, refY-y -> height) at decay^tile
+                // height, so the bolt bounces tb times, each shorter, then fizzles.
+                float seg = t * (float)tb; int bi = (int)seg; if (bi >= tb) bi = tb-1;
+                float lt = seg - (float)bi;
+                float sx, sy, sth; fx_spline_sample(bm->spts, bm->nspts, lt, &sx, &sy, &sth);
+                float decF = 1.0f; for (int k=0;k<bi;k++) decF *= bm->decay;
+                along = ((float)bi + sx) / (float)tb;
+                arch = (refY - sy) * bm->bow * decF; thk = sth;
+            } else {
+                float seg = t * (float)nb; int bi = (int)seg; if (bi >= nb) bi = nb-1;
+                float lt = seg - (float)bi;                       // 0..1 within this bounce
+                float hump = 4.0f * lt * (1.0f - lt);             // parabola: 0 at contacts, 1 at peak
+                float decayF = 1.0f; for (int k=0;k<bi;k++) decayF *= bm->decay;   // each arch lower
+                arch = bm->bow * decayF * hump;
+            }
+            float bx = bm->sx + dx*along, by = bm->sy + dy*along, bz = bm->sz + dz*along;
             float edge = t < 0.5f ? t : (1.0f - t);
             float endRamp = edge*8.0f < 1.0f ? edge*8.0f : 1.0f;
             rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
             float r = ((float)(rng & 0xFFFF) / 32768.0f) - 1.0f;
             float jit = bm->jitter * r * endRamp;
             bx += hux*arch + sscx*jit; by += huy*arch + sscy*jit; bz += huz*arch + sscz*jit;
-            cxA[i]=bx; cyA[i]=by; czA[i]=bz;
+            cxA[i]=bx; cyA[i]=by; czA[i]=bz; thA[i]=thk;
         }
         float lifeF = bm->maxLife > 0 ? (float)bm->life / (float)bm->maxLife : 1.0f;
-        unsigned baseA = (unsigned)(((bm->col >> 24) & 0xFF) * lifeF);
+        // Travel bolts stay full-bright the whole crawl (no life dimming); their only fade is
+        // the trailing tail, controlled per-point by travelFade below. Non-travel bolts use
+        // the plain life flicker fade.
+        float fadeMul = bm->travel ? 1.0f : lifeF;
+        unsigned baseA = (unsigned)(((bm->col >> 24) & 0xFF) * fadeMul);
         unsigned rgb = bm->col & 0x00FFFFFFu;
         float hw = bm->width;
         // Animated bounce "ball": a bright spot that travels the arcs (up-and-down = bounce).
         float pp = bm->pulse > 0.0001f ? (float)fmod((double)afn_frame_count * bm->pulse, 1.0) : -1.0f;
-        // Pass 2: ribbon — width along the SCREEN-perpendicular of the LOCAL tangent (camera-
-        // facing while following the arcs). Per-point alpha boosted near the bounce ball.
-        AfnVertex strip[2 * (AFN_BEAM_MAX_SEGS + 1)];
+        // Pass 2: ribbon — a CROSS of two perpendicular strips so the bolt has 3D volume
+        // from every camera angle. Strip A is camera-facing (screen-perp of the local
+        // tangent); strip B runs along tangent x A (the depth direction). When you look
+        // straight down the bolt — e.g. it's cast directly in front of you — strip A
+        // collapses to a sliver but strip B is broadside, so it still reads as a spark
+        // bouncing toward/away from you. Per-point alpha boosted near the bounce ball.
+        AfnVertex stripA[2 * (AFN_BEAM_MAX_SEGS + 1)];
+        AfnVertex stripB[2 * (AFN_BEAM_MAX_SEGS + 1)];
         for (int i = 0; i <= N; i++) {
             int ia = i>0?i-1:0, ib = i<N?i+1:N;
             float tx = cxA[ib]-cxA[ia], ty = cyA[ib]-cyA[ia], tz = czA[ib]-czA[ia];
             float tr = tx*Rwx+ty*Rwy+tz*Rwz, tu = tx*Uwx+ty*Uwy+tz*Uwz;
             float tl = sqrtf(tr*tr+tu*tu); if (tl<0.001f) tl=0.001f;
+            // A = camera-facing side (in the screen plane, perpendicular to the tangent).
             float lsx = (-tu/tl)*Rwx + (tr/tl)*Uwx, lsy = (-tu/tl)*Rwy + (tr/tl)*Uwy, lsz = (-tu/tl)*Rwz + (tr/tl)*Uwz;
+            // B = tangent x A (the third axis of the cross-section) -> the depth direction.
+            float tlen = sqrtf(tx*tx+ty*ty+tz*tz); if (tlen<0.001f) tlen=0.001f;
+            float tnx=tx/tlen, tny=ty/tlen, tnz=tz/tlen;
+            float bsx = tny*lsz - tnz*lsy, bsy = tnz*lsx - tnx*lsz, bsz = tnx*lsy - tny*lsx;
+            float bl = sqrtf(bsx*bsx+bsy*bsy+bsz*bsz); if (bl<0.001f) bl=0.001f; bsx/=bl; bsy/=bl; bsz/=bl;
             unsigned a = baseA;
-            if (pp >= 0.0f) { float t = (float)i/(float)N, d = t - pp; if (d < 0) d = -d;
+            if (bm->travel) {
+                // A bright packet crawls source->target over the bolt's life, bouncing along
+                // the spline. Points outside the trailing window are transparent (additive),
+                // so the strip stays intact but only the moving comet shows.
+                float t = (float)i/(float)N;
+                // Window is sized to ONE arc (persist / bounce count), so the packet rides up
+                // and over each arc and touches down between them — cycling through every arc
+                // — instead of lighting the whole path at once. Head sweeps a touch past 1 so
+                // the tail finishes exiting the final arc.
+                float win = (bm->travelPersist > 0.01f ? bm->travelPersist : 0.01f) / (float)tb;
+                float headT = (bm->maxLife > 0 ? 1.0f - (float)bm->life/(float)bm->maxLife : 1.0f) * (1.0f + win);
+                float d = headT - t;                 // >0 = this point trails the head
+                if (t > headT || d > win || d < 0.0f) a = 0;
+                else { float bb = 1.0f - d/win; bb *= bb;   // 1 at the head, 0 at the tail
+                    float fade = bm->travelFade;            // 0 = uniform bright, 1 = full tail comet
+                    a = (unsigned)(baseA * (1.0f - fade*(1.0f - bb))); }
+            } else if (pp >= 0.0f) { float t = (float)i/(float)N, d = t - pp; if (d < 0) d = -d;
                 float boost = d < 0.14f ? (1.0f - d/0.14f) : 0.0f; boost *= boost;
                 unsigned pa = baseA + (unsigned)(baseA * boost * 1.8f); a = pa > 255 ? 255 : pa; }
             unsigned col = rgb | (a << 24);
-            strip[2*i].u=0; strip[2*i].v=0; strip[2*i].color=col;
-            strip[2*i].x = cxA[i]-lsx*hw; strip[2*i].y = cyA[i]-lsy*hw; strip[2*i].z = czA[i]-lsz*hw;
-            strip[2*i+1].u=1; strip[2*i+1].v=0; strip[2*i+1].color=col;
-            strip[2*i+1].x = cxA[i]+lsx*hw; strip[2*i+1].y = cyA[i]+lsy*hw; strip[2*i+1].z = czA[i]+lsz*hw;
+            float w = hw * thA[i];
+            stripA[2*i].u=0; stripA[2*i].v=0; stripA[2*i].color=col;
+            stripA[2*i].x = cxA[i]-lsx*w; stripA[2*i].y = cyA[i]-lsy*w; stripA[2*i].z = czA[i]-lsz*w;
+            stripA[2*i+1].u=1; stripA[2*i+1].v=0; stripA[2*i+1].color=col;
+            stripA[2*i+1].x = cxA[i]+lsx*w; stripA[2*i+1].y = cyA[i]+lsy*w; stripA[2*i+1].z = czA[i]+lsz*w;
+            stripB[2*i].u=0; stripB[2*i].v=0; stripB[2*i].color=col;
+            stripB[2*i].x = cxA[i]-bsx*w; stripB[2*i].y = cyA[i]-bsy*w; stripB[2*i].z = czA[i]-bsz*w;
+            stripB[2*i+1].u=1; stripB[2*i+1].v=0; stripB[2*i+1].color=col;
+            stripB[2*i+1].x = cxA[i]+bsx*w; stripB[2*i+1].y = cyA[i]+bsy*w; stripB[2*i+1].z = czA[i]+bsz*w;
         }
-        AfnVertex* v = strip;
-        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
-        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &v->x);
+        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &stripA->color);
+        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &stripA->x);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 2 * (N + 1));
+        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &stripB->color);
+        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &stripB->x);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 2 * (N + 1));
     }
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
+
+#ifdef AFN_HAS_FX
+// Spawn one authored effect LAYER at the player. kind 0 = particle burst (its emitter
+// params), kind 1 = lightning bolt that follows the layer's authored spline
+// (afn_fx_pts[splineStart..]). Pixel-space editor params -> world (width*0.1, bow*0.15,
+// jitter*0.1).
+static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz, float yawDeg) {
+    if (L->kind == 0) {
+        afn_part_spawn = L->pCount > 0 ? L->pCount : 1;
+        afn_part_frame = -1; afn_part_blend = 1;
+        afn_part_speed = L->pSpeed; afn_part_spread = L->pSpread; afn_part_life = L->pLife;
+        afn_part_grav  = L->pGrav;  afn_part_size0 = L->pSize * 0.1f; afn_part_size1 = 0.0f;
+        afn_part_col0 = 0xFFFFFFFFu; afn_part_col1 = 0x00FFFFFFu;
+        afn_particles_emit(px, py + 14.0f, pz);
+    } else {
+        afn_beam_width  = L->bWidth  * 0.06f;
+        afn_beam_bow    = L->bBow    * 0.06f;
+        afn_beam_jitter = L->bJitter * 0.04f;
+        afn_beam_segs   = L->bSegs > 1 ? L->bSegs : 14;
+        afn_beam_bounces= L->bBounces > 0 ? L->bBounces : 1;
+        afn_beam_decay  = L->bDecay; afn_beam_pulse = L->bPulse;
+        afn_beam_life   = (int)L->pLife > 5 ? (int)L->pLife : 18;
+        // Travel mode runs for its own duration (how long the jolt takes to course across).
+        if (L->travel && (int)L->bTravelLife > 5) afn_beam_life = (int)L->bTravelLife;
+        afn_beam_travel_bounces = L->bTravelBounces > 0 ? L->bTravelBounces : 1;
+        // Each bounce spans `bArcLen` world units; the forward cast distance = arc length x
+        // bounce count, so the SAME arc repeats N times across the map. Smaller arc length =
+        // tighter, less-stretched arcs AND a shorter total reach. (Lock-on uses the fixed
+        // player->enemy distance split into N instead.)
+        { float al = L->bArcLen > 1.0f ? L->bArcLen : 1.0f;
+          afn_beam_range = (int)(al * afn_beam_travel_bounces); if (afn_beam_range < 2) afn_beam_range = 2; }
+        afn_beam_col = 0xFFFFFFFFu;
+        afn_beam_travel = L->travel; afn_beam_travel_persist = L->bTravelPersist > 0.01f ? L->bTravelPersist : 0.01f;
+        afn_beam_travel_fade = L->bTravelFade;
+        if (L->splineCount >= 2) { afn_beam_spline = &afn_fx_pts[L->splineStart]; afn_beam_spline_n = L->splineCount; }
+        afn_beam_spawn = 1;
+        afn_beam_resolve(px, py, pz, yawDeg);
+    }
+}
+
+// Play Effect node: trigger an authored effect INSTANCE (index into afn_fx_instances)
+// at the player — plays ALL of that instance's composited layers at once.
+int afn_fx_play_req = 0;   // 0 = none; else (instance index + 1) queued by the node this frame
+static void afn_fx_play(int idx, float px, float py, float pz, float yawDeg) {
+    if (idx < 0 || idx >= AFN_FX_COUNT) return;
+    const AfnFxInstance* In = &afn_fx_instances[idx];
+    for (int i = 0; i < In->layerCount; i++)
+        afn_fx_play_layer(&afn_fx_layers[In->layerStart + i], px, py, pz, yawDeg);
+}
+#endif // AFN_HAS_FX
 
 // Node primitive (Step Enemy Beam): advance the enemy's fired projectile. Driven
 // once per frame by the node graph, independent of the enemy's life/visibility, so
@@ -5292,6 +5431,13 @@ int main(void)
         afn_particles_render(view);
         // Beam/lightning ribbons: tick life, cast any queued bolt, draw the strips.
         afn_beam_update();
+#ifdef AFN_HAS_FX
+        // HARDCODED TEST: Select fires effect instance 0 so the ground-bounce zap can be
+        // tried without wiring a Play Effect node yet. Remove once it's node-driven.
+        if (key_hit(KEY_SELECT)) afn_fx_play_req = 1;   // instance 0 (+1)
+        // Play Effect node queued an authored effect instance this frame.
+        if (afn_fx_play_req > 0) { afn_fx_play(afn_fx_play_req - 1, playerX, playerY, playerZ, playerYaw); afn_fx_play_req = 0; }
+#endif
         afn_beam_resolve(playerX, playerY, playerZ, playerYaw);
         afn_beam_render(view);
 
