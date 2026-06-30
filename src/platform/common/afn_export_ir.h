@@ -186,6 +186,9 @@ struct AfnCameraExport
         int   bFilaments=5;        // bundled crackling strands
         float bOrbSize=1.0f;       // head-orb radius multiplier
         float bColR=0.376f,bColG=0.690f,bColB=1.0f;
+        // thunder (kind 2) params — defaults = the runtime hardcode
+        float tCloudH=56,tAim=60,tCharge=90,tSpread=26,tCloudSize=12,tReticle=4; int tPuffs=18;
+        float tCloudR=0.157f,tCloudG=0.188f,tCloudB=0.282f;
         std::vector<FxPt> spline;
     };
     // An instance = one node-callable effect = a set of layers composited together.
@@ -597,6 +600,9 @@ enum class AfnScriptNodeType : int {
     SpawnParticles,  // action: emit a burst of billboard particles (pure-code sim) at the player
     LightningBeam,   // action: cast a jittered ribbon (lightning/laser) from the player to the lock-on enemy / forward
     PlayEffect,      // action: trigger an authored effect LAYER (from the Effects tab) by index at the player
+    FloorReticle,    // action: draw a glowing aim reticle on the floor ahead of the player
+    ThunderCharge,   // action: charge the Thunder spell (clouds + reticle)
+    ThunderStrike,   // action: release the Thunder strike at the aim
     COUNT
 };
 

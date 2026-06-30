@@ -410,8 +410,9 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             f << "#define AFN_FX_LAYER_COUNT " << (nlay>0?nlay:1) << "\n";
             f << "typedef struct { unsigned char kind, surge, travel; short pCount, bSegs, bBounces, bTravelBounces, splineStart, splineCount;"
                  " float pSpeed,pSpread,pLife,pGrav,pSize, bWidth,bBow,bJitter,bDecay,bPulse,"
-                 " bTaperS,bTaperE,bLifeIn,bLifeOut,bFalloffS,bFalloffE, bTravelLife, bTravelPersist, bTravelFade, bArcLen, orbSize; "
-                 " unsigned char filaments; unsigned colr,colg,colb; } AfnFxLayer;\n";
+                 " bTaperS,bTaperE,bLifeIn,bLifeOut,bFalloffS,bFalloffE, bTravelLife, bTravelPersist, bTravelFade, bArcLen, orbSize, "
+                 " tCloudH,tAim,tCharge,tSpread,tCloudSize,tReticle; "
+                 " short tPuffs; unsigned char filaments; unsigned colr,colg,colb, tcloudr,tcloudg,tcloudb; } AfnFxLayer;\n";
             f << "typedef struct { short layerStart, layerCount; } AfnFxInstance;\n";
             f << "static const AfnFxLayer afn_fx_layers[" << (nlay>0?nlay:1) << "] = {\n";
             { int run = 0; for (const auto& In : camera.fxInstances) for (const auto& Lx : In.layers) {
@@ -419,7 +420,9 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
                   << Flt(Lx.pSpeed) << "," << Flt(Lx.pSpread) << "," << Flt(Lx.pLife) << "," << Flt(Lx.pGrav) << "," << Flt(Lx.pSize) << ", "
                   << Flt(Lx.bWidth) << "," << Flt(Lx.bBow) << "," << Flt(Lx.bJitter) << "," << Flt(Lx.bDecay) << "," << Flt(Lx.bPulse) << ", "
                   << Flt(Lx.bTaperS) << "," << Flt(Lx.bTaperE) << "," << Flt(Lx.bLifeIn) << "," << Flt(Lx.bLifeOut) << "," << Flt(Lx.bFalloffS) << "," << Flt(Lx.bFalloffE) << ", " << Flt(Lx.bTravelLife) << "," << Flt(Lx.bTravelPersist) << "," << Flt(Lx.bTravelFade) << "," << Flt(Lx.bArcLen) << "," << Flt(Lx.bOrbSize) << ", "
-                  << (int)Lx.bFilaments << ", " << (int)(Lx.bColR*255.0f) << "," << (int)(Lx.bColG*255.0f) << "," << (int)(Lx.bColB*255.0f) << " },\n";
+                  << Flt(Lx.tCloudH) << "," << Flt(Lx.tAim) << "," << Flt(Lx.tCharge) << "," << Flt(Lx.tSpread) << "," << Flt(Lx.tCloudSize) << "," << Flt(Lx.tReticle) << ", "
+                  << (int)Lx.tPuffs << ", " << (int)Lx.bFilaments << ", " << (int)(Lx.bColR*255.0f) << "," << (int)(Lx.bColG*255.0f) << "," << (int)(Lx.bColB*255.0f) << ", "
+                  << (int)(Lx.tCloudR*255.0f) << "," << (int)(Lx.tCloudG*255.0f) << "," << (int)(Lx.tCloudB*255.0f) << " },\n";
                 run += (int)Lx.spline.size(); } }
             if (nlay == 0) f << "  {0}\n";
             f << "};\n";

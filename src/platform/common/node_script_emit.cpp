@@ -1294,6 +1294,26 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
+            case AfnScriptNodeType::FloorReticle: {
+                // Show the floor aim reticle this frame (the main loop draws + clears it).
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);
+                auto* d2=findDataIn(a->id,2); auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4);
+                f << "    afn_reticle_show = 1;\n";
+                f << "    afn_reticle_dist = " << (d0?resolveInt(d0):60) << ";\n";
+                f << "    afn_reticle_size = " << (d1?resolveInt(d1):40) << " / 10.0f;\n";
+                f << "    afn_reticle_col  = 0xFF000000u | ((unsigned)" << (d4?resolveInt(d4):255) << " << 16) | ((unsigned)"
+                  << (d3?resolveInt(d3):192) << " << 8) | (unsigned)" << (d2?resolveInt(d2):96) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::ThunderCharge:
+                // Charge the Thunder spell this frame (drive On Key Held). afn_thunder_step()
+                // gathers the clouds + tracks the reticle; params come from the Thunder layer.
+                f << "    afn_thunder_charge_req = 1;\n";
+                break;
+            case AfnScriptNodeType::ThunderStrike:
+                // Release the strike at the reticle (drive On Key Released).
+                f << "    afn_thunder_strike_req = 1;\n";
+                break;
             case AfnScriptNodeType::LockPlayerFunctions:
                 // Lock out player combat functions for this frame. The runtime masks HELD
                 // keys (so On-Key-Held abilities like Charge Up don't run — kills the energy

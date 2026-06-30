@@ -200,6 +200,9 @@ struct FxLayer {
     int   bFilaments=5;        // bundled crackling strands
     float bOrbSize=1.0f;       // head-orb radius multiplier (0 = no orb)
     float bColR=0.376f,bColG=0.690f,bColB=1.0f;  // bolt colour (light blue)
+    // thunder (kind 2) — defaults = the runtime hardcode
+    float tCloudH=56,tAim=60,tCharge=90,tSpread=26,tCloudSize=12,tReticle=4; int tPuffs=18;
+    float tCloudR=0.157f,tCloudG=0.188f,tCloudB=0.282f;
     std::vector<ImVec2> spline; std::vector<float> thick;
     // transient (not serialized)
     float lifeClk=0,anim=0,surgeAnim=0; int pBurst=0; FxPart parts[160] = {};
@@ -946,6 +949,9 @@ enum class VsNodeType : int {
     SpawnParticles,  // action: emit a burst of billboard particles (pure-code sim) at the player
     LightningBeam,   // action: cast a jittered ribbon (lightning/laser) from the player to the lock-on enemy / forward
     PlayEffect,      // action: trigger an authored effect LAYER (from the Effects tab) by index at the player
+    FloorReticle,    // action: draw a glowing aim reticle on the floor ahead of the player (per frame while it runs)
+    ThunderCharge,   // action: charge the Thunder spell (clouds gather + reticle) — drive On Key Held
+    ThunderStrike,   // action: release the Thunder strike at the aim — drive On Key Released
     COUNT
 };
 
@@ -1364,6 +1370,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Spawn Particles",  0xFFCC6644, 1, 1, 7, 0, {"Sprite", "Count", "Speed x100", "Spread 0-100", "Life (frames)", "Size x100", "Gravity x1000"}, {}, {} },
     { "Lightning Beam",   0xFF66AAFF, 1, 1, 9, 0, {"Range", "Width x100", "Arch x100", "Jitter x100", "Segments", "Life (frames)", "Bounces", "Decay x100", "Pulse x1000"}, {}, {} },
     { "Play Effect",      0xFFCC66AA, 1, 1, 1, 0, {"Instance"}, {}, {} },
+    { "Floor Reticle",    0xFF44AACC, 1, 1, 5, 0, {"Distance","Size x10","Red","Green","Blue"}, {}, {} },
+    { "Thunder Charge",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
+    { "Thunder Strike",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1674,6 +1683,9 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
     case VsNodeType::LightningBeam: desc = "Casts a lightning bolt that BOUNCES across the floor — a connected jagged ribbon from the player's feet to the lock-on enemy's feet (or `Range` ahead if nothing's locked), made of `Bounces` arches that rise off the ground and touch back down between each, crawling forward as it crackles. Camera-facing, additive (glows on its own, no texture). Fire from On Key Pressed. Pins: Range = forward distance when unlocked; Width x100 = ribbon half-width ×100; Arch x100 = how high each bounce rises off the floor ×100; Jitter x100 = jagged crackle ×100 (0 = clean arches); Segments = base resolution (auto-raised so each arch is smooth); Life = frames the bolt lasts (flickering); Bounces = how many arches it skips across the floor; Decay x100 = how much SHORTER each successive bounce is (78 = each 78% of the last, like a ball losing energy; 100 = even arches); Pulse x1000 = speed of the bright 'ball' that travels the arcs to animate the bounce (0 = static glow). The bounce shape is a parabolic-arc spline (sharp at the floor contacts like a real bounce). The pink impact star is a separate Spawn Particles at the target."; break;
     case VsNodeType::PlayEffect: desc = "Triggers an authored EFFECT INSTANCE (built in the Effects tab) by index, at the player. Each instance is a self-contained effect made of one or more composited LAYERS (e.g. a lightning bolt + 2 particle bursts) — each layer has its own emitter/lightning params and (for lightning) its own hand-dragged spline shape. Playing the instance fires ALL its layers at once. Pin: Instance = which effect instance to play (0-based, matches the [n] index in the Effects tab's Instances list). A particle layer fires a one-shot burst; a lightning layer casts a bolt that follows that layer's authored spline (the exact arc/bounce you dragged), scaling the editor's pixel params to world units. Fire from any event (On Key Pressed = one-shot, On Update = continuous). Authoring lives in the Effects tab; this node just plays an instance."; break;
+    case VsNodeType::FloorReticle: desc = "Draws a glowing aim RETICLE on the floor a set distance ahead of the player's facing — a spinning ring + pulsing centre, additive. Drive it from On Update (or while a spell is charging) so it tracks the aim every frame; stop running it and the reticle disappears. Pins: Distance = how far ahead of the player it sits (world units); Size x10 = ring radius ×10 (40 = 4.0); Red / Green / Blue = colour 0-255. Great as the targeting marker for a Thunder-style strike, a teleport target, an AoE indicator, etc."; break;
+    case VsNodeType::ThunderCharge: desc = "CHARGES the Thunder spell — a plane of dark rainclouds gathers overhead and a reticle tracks the aim on the floor ahead of the player, building toward a strike. Drive it from On Key Held (call it every frame the cast button is down). Stop calling it without a Thunder Strike and the clouds disperse (cancel). All look/params come from the Thunder layer in the Effects tab (cloud height, charge time, colours, aim distance, strike). Pair with Thunder Strike on release."; break;
+    case VsNodeType::ThunderStrike: desc = "Releases the THUNDER STRIKE — a vertical lightning bolt slams down from the cloud to the reticle, with an impact flash + spark burst. Drive it from On Key Released (the frame the cast button is let go) after Thunder Charge. Uses the Thunder layer's bolt params (width/crackle/filaments/colour). If called without charging first, it strikes instantly at the current aim."; break;
     case VsNodeType::SpawnParticles: desc = "Emits a burst of billboard particles at the player — a pure-code sim: each particle integrates velocity + gravity per frame, fades over its life, and faces the camera. Fire it from any event: a one-shot On Key Pressed = a burst, On Update = a continuous stream (it emits Count particles every frame it runs). Pins: Sprite = graphic frame for the billboard (-1 = solid quad); Count = particles per emit; Speed x100 = initial speed in world-units/frame ×100 (150 = 1.5); Spread 0-100 = lateral cone width (0 = straight up); Life = lifetime in frames; Size x100 = start size ×100 (shrinks to 0); Gravity x1000 = downward pull ×1000 (40 = 0.04). Spawns at the player + a small height offset (spline pathing + emitter presets come from the Effects tab)."; break;
     case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
     case VsNodeType::AiDodgeClips: desc = "Sets the enemy's DODGE animation clips — the only enemy clips the AI Clips node doesn't cover. Run once from On Update (alongside AI Clips). Two sets: the standard sidestep/roll (Dodge L/R, Dodge FW/BWD = DodgeL/DodgeR/DodgeFW/DodgeBWD) used when reacting to an incoming blast, and the charge-dodge (Chg Dodge L/R = atk_spc_chg_dodge_L/_R) it plays when it sidesteps WITHOUT dropping a charge. Like AI Clips, each UNWIRED pin is name-resolved AT EXPORT to the rig's current index so a glTF re-sort can't drift them (defaults: Chg Dodge L/R = 9/10, Dodge L/R/FW/BWD = 28/29/27/26). The L/R clip the runtime picks is facing-relative (it projects the dodge move onto the enemy's actual render facing), so wire L=DodgeL and R=DodgeR straight. Wire a pin to a Skeletal Animation node to override. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
@@ -7845,11 +7857,12 @@ static bool SaveProject(const std::string& path)
     for (const auto& In : sFxInstances) {
         fprintf(f, "fxInstance=%s|%d\n", In.name, (int)In.layers.size());
         for (const auto& Lf : In.layers) {
-            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g\n",
+            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d|%g|%g|%g\n",
                 Lf.name, Lf.kind, Lf.visible?1:0, Lf.pCount, Lf.pSpeed, Lf.pSpread, Lf.pLife, Lf.pGrav, Lf.pSize, Lf.pStream?1:0,
                 Lf.bWidth, Lf.bBow, Lf.bJitter, Lf.bDecay, Lf.bPulse, Lf.bSegs, Lf.bBounces, Lf.bSurge?1:0,
                 Lf.bTaperS, Lf.bTaperE, Lf.bLifeIn, Lf.bLifeOut, Lf.bFalloffS, Lf.bFalloffE, Lf.bTravel?1:0, Lf.bTravelBounces, Lf.bTravelLife, Lf.bTravelPersist, Lf.bTravelFade, Lf.bArcLen,
-                Lf.bFilaments, Lf.bOrbSize, Lf.bColR, Lf.bColG, Lf.bColB);
+                Lf.bFilaments, Lf.bOrbSize, Lf.bColR, Lf.bColG, Lf.bColB,
+                Lf.tCloudH, Lf.tAim, Lf.tCharge, Lf.tSpread, Lf.tCloudSize, Lf.tReticle, Lf.tPuffs, Lf.tCloudR, Lf.tCloudG, Lf.tCloudB);
             fprintf(f, "fxSpline=%d", (int)Lf.spline.size());
             for (size_t i = 0; i < Lf.spline.size(); i++)
                 fprintf(f, " %g,%g,%g", Lf.spline[i].x, Lf.spline[i].y, i < Lf.thick.size() ? Lf.thick[i] : 1.0f);
@@ -9055,11 +9068,12 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "fxLayerCount=", 13) == 0) { sFxInstances.clear(); sFxInst = 0; sFxActive = 0; sFxSel = -1; fxFlatLegacy = true; }  // legacy flat list
             else if (strncmp(line, "fxLayer=", 8) == 0) {
                 FxLayer Lf; int vis = 1, str = 1, surge = 0, travel = 0;
-                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g",
+                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d|%g|%g|%g",
                     Lf.name, &Lf.kind, &vis, &Lf.pCount, &Lf.pSpeed, &Lf.pSpread, &Lf.pLife, &Lf.pGrav, &Lf.pSize, &str,
                     &Lf.bWidth, &Lf.bBow, &Lf.bJitter, &Lf.bDecay, &Lf.bPulse, &Lf.bSegs, &Lf.bBounces, &surge,
                     &Lf.bTaperS, &Lf.bTaperE, &Lf.bLifeIn, &Lf.bLifeOut, &Lf.bFalloffS, &Lf.bFalloffE, &travel, &Lf.bTravelBounces, &Lf.bTravelLife, &Lf.bTravelPersist, &Lf.bTravelFade, &Lf.bArcLen,
-                    &Lf.bFilaments, &Lf.bOrbSize, &Lf.bColR, &Lf.bColG, &Lf.bColB);
+                    &Lf.bFilaments, &Lf.bOrbSize, &Lf.bColR, &Lf.bColG, &Lf.bColB,
+                    &Lf.tCloudH, &Lf.tAim, &Lf.tCharge, &Lf.tSpread, &Lf.tCloudSize, &Lf.tReticle, &Lf.tPuffs, &Lf.tCloudR, &Lf.tCloudG, &Lf.tCloudB);
                 Lf.visible = vis != 0; Lf.pStream = str != 0; Lf.bSurge = surge != 0; Lf.bTravel = travel != 0;
                 if (fxFlatLegacy || sFxInstances.empty()) {   // legacy: each layer is its own instance
                     FxInstance In; snprintf(In.name, sizeof(In.name), "%s", Lf.name); sFxInstances.push_back(In);
@@ -19310,6 +19324,8 @@ void FrameTick(float dt)
                         fe.bSurge=fl.bSurge; fe.bTaperS=fl.bTaperS; fe.bTaperE=fl.bTaperE; fe.bLifeIn=fl.bLifeIn; fe.bLifeOut=fl.bLifeOut; fe.bFalloffS=fl.bFalloffS; fe.bFalloffE=fl.bFalloffE;
                         fe.bTravel=fl.bTravel; fe.bTravelBounces=fl.bTravelBounces; fe.bTravelLife=fl.bTravelLife; fe.bTravelPersist=fl.bTravelPersist; fe.bTravelFade=fl.bTravelFade; fe.bArcLen=fl.bArcLen;
                         fe.bFilaments=fl.bFilaments; fe.bOrbSize=fl.bOrbSize; fe.bColR=fl.bColR; fe.bColG=fl.bColG; fe.bColB=fl.bColB;
+                        fe.tCloudH=fl.tCloudH; fe.tAim=fl.tAim; fe.tCharge=fl.tCharge; fe.tSpread=fl.tSpread; fe.tCloudSize=fl.tCloudSize; fe.tReticle=fl.tReticle; fe.tPuffs=fl.tPuffs;
+                        fe.tCloudR=fl.tCloudR; fe.tCloudG=fl.tCloudG; fe.tCloudB=fl.tCloudB;
                         for (size_t i=0;i<fl.spline.size();i++) fe.spline.push_back({ fl.spline[i].x, fl.spline[i].y, (i<fl.thick.size()?fl.thick[i]:1.0f) });
                         ie.layers.push_back(fe);
                     }
@@ -26050,6 +26066,37 @@ void FrameTick(float dt)
                         "    //     afn_beam_spawn=1 + afn_beam_resolve(). afn_beam_render then follows that exact\n"
                         "    //     spline (Catmull-Rom: x = along-path, refY-y = height, th = per-point width).");
                     break;
+                case VsNodeType::FloorReticle:
+                    editorCode = "// Show a glowing aim reticle on the floor ahead of the player (this frame)";
+                    setActionFunc(infoNode, "_floor_reticle",
+                        "    afn_reticle_show = 1;                 // request the reticle THIS frame (cleared after draw)\n"
+                        "    afn_reticle_dist = <Distance>;        // units ahead of the player's facing\n"
+                        "    afn_reticle_size = <Size x10> / 10.0f;// ring radius (world units)\n"
+                        "    afn_reticle_col  = 0xFF000000u | (<Blue> << 16) | (<Green> << 8) | <Red>;  // 0xAABBGGRR\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // The 3D pass calls afn_reticle_render(view, playerX,Y,Z, playerYaw): if afn_reticle_show,\n"
+                        "    //   pos = player + facing*dist on the floor; draws a spinning additive ring (XZ) + a\n"
+                        "    //   pulsing centre billboard, then clears afn_reticle_show. Drive On Update to track the aim.");
+                    break;
+                case VsNodeType::ThunderCharge:
+                    editorCode = "// Charge the Thunder spell this frame (clouds gather + reticle tracks aim)";
+                    setActionFunc(infoNode, "_thunder_charge",
+                        "    afn_thunder_charge_req = 1;   // request charge THIS frame (drive On Key Held)\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_thunder_step() reads the request: ramps s_thCharge, sets the reticle at\n"
+                        "    //   player + facing*afn_thunder_aim, and draws the dark cloud puffs + floor ring.\n"
+                        "    //   Params come from the Thunder (kind 2) effect layer via afn_thunder_apply().\n"
+                        "    //   Stop calling it (no Thunder Strike) -> s_thCharging cleared, clouds disperse.");
+                    break;
+                case VsNodeType::ThunderStrike:
+                    editorCode = "// Release the Thunder strike at the reticle (drive On Key Released)";
+                    setActionFunc(infoNode, "_thunder_strike",
+                        "    afn_thunder_strike_req = 1;   // fire the strike THIS frame\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_thunder_step(): on the request, afn_beam_cast()s a straight (bow 0) jagged\n"
+                        "    //   bundle from (reticle, cloud_h) down to the floor, spawns impact sparks, and\n"
+                        "    //   flashes s_thStrike. Strike width/crackle/filaments/colour from the Thunder layer.");
+                    break;
                 case VsNodeType::PlayCameraAnim: {
                     editorCode = "// Take over the camera + play the player's keyframed cutscene path";
                     setActionFunc(infoNode, "_play_camera_anim",
@@ -31569,7 +31616,7 @@ void FrameTick(float dt)
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
             char lbl[64]; snprintf(lbl, sizeof(lbl), "%s %s%s",
-                Inst.layers[i].kind == 1 ? "\xE2\x9A\xA1" : "\xE2\x9C\xB1",   // ⚡ lightning / ✱ particle
+                Inst.layers[i].kind == 2 ? "\xE2\x98\x81" : Inst.layers[i].kind == 1 ? "\xE2\x9A\xA1" : "\xE2\x9C\xB1",   // ☁ thunder / ⚡ lightning / ✱ particle
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
             if (sel) ImGui::PopStyleColor();
@@ -31592,7 +31639,8 @@ void FrameTick(float dt)
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
         if (ImGui::RadioButton("Particles", &L.kind, 0)) sProjectDirty = true; ImGui::SameLine();
-        if (ImGui::RadioButton("Lightning", &L.kind, 1)) sProjectDirty = true;
+        if (ImGui::RadioButton("Lightning", &L.kind, 1)) sProjectDirty = true; ImGui::SameLine();
+        if (ImGui::RadioButton("Thunder", &L.kind, 2)) sProjectDirty = true;
         ImGui::Separator();
         if (L.kind == 0) {
             ImGui::PushItemWidth(Scaled(110));
@@ -31605,7 +31653,7 @@ void FrameTick(float dt)
             ImGui::PopItemWidth();
             ImGui::Checkbox("Stream", &L.pStream);
             if (ImGui::Button("Burst")) L.pBurst = L.pCount;
-        } else {
+        } else if (L.kind == 1) {
             // ---- Lightning bundle — every value is in WORLD units (same as the runtime),
             // so the 3D viewport is an exact mirror of how it casts in-game. ----
             ImGui::TextDisabled("Shape");
@@ -31643,6 +31691,35 @@ void FrameTick(float dt)
             if (ImGui::SliderFloat("Fade falloff", &L.bTravelFade, 0.0f, 1.0f, "%.2f")) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform bright streak; 1 = comet fading to nothing.");
             ImGui::PopItemWidth();
+        } else {
+            // ---- Thunder spell — hold to charge (rainclouds + floor reticle), release to
+            // strike. WORLD units, defaults = the runtime hardcode. Strike reuses the bundle. ----
+            ImGui::TextDisabled("Storm");
+            ImGui::PushItemWidth(Scaled(110));
+            if (ImGui::SliderFloat("Cloud height", &L.tCloudH, 10.0f, 120.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::SliderFloat("Aim distance", &L.tAim, 10.0f, 150.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How far ahead of the player the reticle / strike lands.");
+            if (ImGui::SliderFloat("Charge frames", &L.tCharge, 10.0f, 240.0f, "%.0f f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames to reach full charge before the strike can fire.");
+            ImGui::PopItemWidth();
+            ImGui::Spacing(); ImGui::TextDisabled("Clouds");
+            ImGui::PushItemWidth(Scaled(110));
+            if (ImGui::SliderInt("Puffs", &L.tPuffs, 1, 40)) sProjectDirty = true;
+            if (ImGui::SliderFloat("Cloud spread", &L.tSpread, 4.0f, 60.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::SliderFloat("Puff size", &L.tCloudSize, 3.0f, 30.0f, "%.0f")) sProjectDirty = true;
+            ImGui::PopItemWidth();
+            float ccol[3] = { L.tCloudR, L.tCloudG, L.tCloudB };
+            if (ImGui::ColorEdit3("Cloud colour", ccol, ImGuiColorEditFlags_NoInputs)) { L.tCloudR=ccol[0]; L.tCloudG=ccol[1]; L.tCloudB=ccol[2]; sProjectDirty = true; }
+            ImGui::Spacing(); ImGui::TextDisabled("Strike & reticle");
+            ImGui::PushItemWidth(Scaled(110));
+            if (ImGui::SliderFloat("Reticle size", &L.tReticle, 1.0f, 16.0f, "%.1f")) sProjectDirty = true;
+            if (ImGui::SliderFloat("Bolt width", &L.bWidth, 0.1f, 3.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::SliderFloat("Bolt crackle", &L.bJitter, 0.0f, 6.0f, "%.2f")) sProjectDirty = true;
+            if (ImGui::SliderInt("Bolt filaments", &L.bFilaments, 1, 12)) sProjectDirty = true;
+            ImGui::PopItemWidth();
+            float bcol[3] = { L.bColR, L.bColG, L.bColB };
+            if (ImGui::ColorEdit3("Bolt colour", bcol, ImGuiColorEditFlags_NoInputs)) { L.bColR=bcol[0]; L.bColG=bcol[1]; L.bColB=bcol[2]; sProjectDirty = true; }
+            ImGui::Spacing(); ImGui::TextDisabled("Preview plays the charge -> strike loop.");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -31670,14 +31747,17 @@ void FrameTick(float dt)
         if (sFxPlay) sFxClk += 1.0f;   // 1 frame/tick (matches the runtime's fixed 60 Hz step)
         ImGui::PushClipRect(cp, ImVec2(cp.x+cs.x, cp.y+cs.y), true);
 
-        // frame the content + build the orbit camera basis (looks at the origin)
-        float maxRange = 8.0f;
-        for (auto& Q : Inst.layers) if (Q.visible && Q.kind==1) { float r=Q.bArcLen*(Q.bBounces<1?1:Q.bBounces); if(r>maxRange)maxRange=r; }
+        // frame the content + build the orbit camera basis (orbits a look-at target)
+        float maxRange = 8.0f, tgtY = 0.0f;
+        for (auto& Q : Inst.layers) if (Q.visible) {
+            if (Q.kind==1) { float r=Q.bArcLen*(Q.bBounces<1?1:Q.bBounces); if(r>maxRange)maxRange=r; }
+            else if (Q.kind==2) { if(Q.tCloudH>maxRange)maxRange=Q.tCloudH; if(Q.tSpread*2.0f>maxRange)maxRange=Q.tSpread*2.0f; if(Q.tCloudH*0.45f>tgtY)tgtY=Q.tCloudH*0.45f; }
+        }
         float dist = (maxRange*0.95f + 8.0f) / sFxScale;   // bigger scale = closer camera = bigger preview
         float cyaw=cosf(sFxYaw), syaw=sinf(sFxYaw), cpit=cosf(sFxPitch), spit=sinf(sFxPitch);
-        float ex=dist*cpit*syaw, ey=dist*spit, ez=dist*cpit*cyaw;        // eye
-        float el=sqrtf(ex*ex+ey*ey+ez*ez); if(el<0.001f)el=0.001f;
-        float fwx=-ex/el, fwy=-ey/el, fwz=-ez/el;                        // forward
+        float odx=cpit*syaw, ody=spit, odz=cpit*cyaw;                    // unit orbit dir
+        float ex=dist*odx, ey=tgtY+dist*ody, ez=dist*odz;               // eye (orbits (0,tgtY,0))
+        float fwx=-odx, fwy=-ody, fwz=-odz;                             // forward (toward target)
         float crx=fwy*0.0f-fwz*1.0f, cry=fwz*0.0f-fwx*0.0f, crz=fwx*1.0f-fwy*0.0f;  // cross(fwd,(0,1,0))
         float cl=sqrtf(crx*crx+cry*cry+crz*crz); if(cl<0.001f)cl=0.001f; crx/=cl;cry/=cl;crz/=cl;  // right
         float cux=cry*fwz-crz*fwy, cuy=crz*fwx-crx*fwz, cuz=crx*fwy-cry*fwx;        // cam up
@@ -31698,7 +31778,46 @@ void FrameTick(float dt)
         // ---- each visible lightning layer: mirror afn_beam_render (smooth centerline +
         // filament bundle + head orb), projected through the orbit camera ----
         for (auto& Q : Inst.layers) {
-            if (!Q.visible || Q.kind != 1) continue;
+            if (!Q.visible) continue;
+            if (Q.kind == 2) {
+                // ---- THUNDER preview: mirror afn_thunder_step at the origin (reticle on the
+                // floor, cloud plane above, strike on the charge->strike loop) ----
+                int chargeF=(int)Q.tCharge; if(chargeF<1)chargeF=1; int strikeF=16, cyc=chargeF+strikeF+14;
+                int php=((int)sFxClk)%cyc; bool charging=php<chargeF; int strikePh=php-chargeF;
+                float chg=charging?(float)php/(float)chargeF:1.0f;
+                int ccR=(int)(Q.tCloudR*255),ccG=(int)(Q.tCloudG*255),ccB=(int)(Q.tCloudB*255);
+                int bcR=(int)(Q.bColR*255),bcG=(int)(Q.bColG*255),bcB=(int)(Q.bColB*255);
+                int npf=Q.tPuffs<1?1:(Q.tPuffs>40?40:Q.tPuffs);
+                // clouds
+                for(int i=0;i<npf;i++){ unsigned h=(unsigned)((i+1)*2654435761u)^0x9E3779B9u;
+                    float ang=(float)(h&0xFFFF)/65536.0f*6.2831853f, rr=6.0f+(float)((h>>16)&0xFF)/255.0f*Q.tSpread;
+                    float drift=sinf(sFxClk*0.02f+(float)i)*2.0f;
+                    float cx=cosf(ang)*rr+drift, cy=Q.tCloudH+((float)((h>>8)&7)-3.0f), cz=sinf(ang)*rr;
+                    float vz; ImVec2 S=proj(cx,cy,cz,&vz); if(vz<=0.05f)continue; float sr=Q.tCloudSize*focal/vz; if(sr<2)sr=2;
+                    int a=(int)(150*chg)+30;
+                    for(int r=4;r>=1;r--){ float rad=sr*(float)r/4.0f; int aa=(int)(a*(1.0f-(float)r/5.0f)*0.55f)+8; dl->AddCircleFilled(S,rad,IM_COL32(ccR,ccG,ccB,aa)); } }
+                // floor reticle ring (XZ circle at y=0.3)
+                { ImVec2 rp[25]; int okc=1; float spin=sFxClk*0.03f;
+                  for(int j=0;j<25;j++){ float a=spin+(float)j*(6.2831853f/24.0f); float vz; rp[j]=proj(cosf(a)*Q.tReticle,0.3f,sinf(a)*Q.tReticle,&vz); if(vz<=0.05f)okc=0; }
+                  if(okc){ dl->AddPolyline(rp,25,IM_COL32(bcR,bcG,bcB,90),0,(2.0f+chg*1.5f)*2.4f); dl->AddPolyline(rp,25,IM_COL32((bcR+255)/2,(bcG+255)/2,255,220),0,2.0f+chg*1.5f); } }
+                // strike bolt (vertical bundle, cloud -> floor)
+                if(!charging && strikePh<strikeF){ int N=18; int nfil=Q.bFilaments<1?1:Q.bFilaments; float fw=Q.bWidth;
+                    for(int k=0;k<nfil;k++){ unsigned frng=(unsigned)((int)sFxClk)*2654435761u ^ ((unsigned)(k+1)*0x9E3779B9u);
+                        float phk=(float)k*(6.2831853f/(float)nfil), cph=cosf(phk), sph=sinf(phk); ImVec2 prevS(0,0); int prevOk=0;
+                        for(int i=0;i<=N;i++){ float t=(float)i/(float)N; float edge=t<0.5f?t:(1.0f-t); float endRamp=edge*6.0f<1.0f?edge*6.0f:1.0f;
+                            float rad=Q.bJitter*0.5f*endRamp;
+                            frng^=frng<<13;frng^=frng>>17;frng^=frng<<5; float c1=((float)(frng&0xFFFF)/32768.0f)-1.0f;
+                            frng^=frng<<13;frng^=frng>>17;frng^=frng<<5; float c2=((float)(frng&0xFFFF)/32768.0f)-1.0f;
+                            float Px=cph*rad+c1*Q.bJitter*0.8f*endRamp, Pz=sph*rad+c2*Q.bJitter*0.8f*endRamp, Py=Q.tCloudH+(1.0f-Q.tCloudH)*t;
+                            float vz; ImVec2 S=proj(Px,Py,Pz,&vz); int ok=(vz>0.05f);
+                            if(ok&&prevOk){ float th=fw*focal/vz; if(th<1)th=1; int a=235;
+                                dl->AddLine(prevS,S,IM_COL32(bcR,bcG,bcB,(int)(a*0.3f)),th*2.6f); dl->AddLine(prevS,S,IM_COL32((bcR+255)/2,(bcG+255)/2,255,a),th); }
+                            prevS=S; prevOk=ok; } }
+                    float f=(float)(strikeF-strikePh)/(float)strikeF; float vz; ImVec2 S=proj(0,1,0,&vz);
+                    if(vz>0.05f){ float fr=8.0f*(1.2f-f)*focal/vz; if(fr<2)fr=2; dl->AddCircleFilled(S,fr*0.6f,IM_COL32(255,255,255,(int)(230*f))); dl->AddCircleFilled(S,fr*0.3f,IM_COL32(255,255,255,(int)(255*f))); } }
+                continue;
+            }
+            if (Q.kind != 1) continue;
             int nb = Q.bBounces<1?1:Q.bBounces;
             int N = Q.bSegs; { int need=nb*8; if(need>N)N=need; } if(N<2)N=2; if(N>48)N=48;   // matches runtime cap
             float range = Q.bArcLen*nb, s0x=-range*0.5f;
