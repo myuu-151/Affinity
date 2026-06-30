@@ -356,6 +356,7 @@ float afn_part_ox = 0.0f, afn_part_oy = 14.0f, afn_part_oz = 0.0f;  // spawn off
 // ---------------------------------------------------------------------------
 #define AFN_BEAM_POOL 4
 #define AFN_BEAM_MAX_SEGS 48
+#define AFN_BEAM_FILAMENTS 5   // thin crackling lines bundled around the centerline (electric look)
 typedef struct {
     int   active, life, maxLife;
     float sx, sy, sz, tx, ty, tz;     // source / target (world)
@@ -2260,14 +2261,12 @@ static void afn_beam_render(const float* view) {
                 float decayF = 1.0f; for (int k=0;k<bi;k++) decayF *= bm->decay;   // each arch lower
                 arch = bm->bow * decayF * hump;
             }
-            float bx = bm->sx + dx*along, by = bm->sy + dy*along, bz = bm->sz + dz*along;
-            float edge = t < 0.5f ? t : (1.0f - t);
-            float endRamp = edge*8.0f < 1.0f ? edge*8.0f : 1.0f;
-            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-            float r = ((float)(rng & 0xFFFF) / 32768.0f) - 1.0f;
-            float jit = bm->jitter * r * endRamp;
-            bx += hux*arch + sscx*jit; by += huy*arch + sscy*jit; bz += huz*arch + sscz*jit;
-            cxA[i]=bx; cyA[i]=by; czA[i]=bz; thA[i]=thk;
+            // Smooth centerline (the arc/bounce path). The lightning crackle is added per
+            // FILAMENT at draw time so the bundle reads as many distinct jagged strands.
+            cxA[i] = bm->sx + dx*along + hux*arch;
+            cyA[i] = bm->sy + dy*along + huy*arch;
+            czA[i] = bm->sz + dz*along + huz*arch;
+            thA[i] = thk;
         }
         float lifeF = bm->maxLife > 0 ? (float)bm->life / (float)bm->maxLife : 1.0f;
         // Travel bolts stay full-bright the whole crawl (no life dimming); their only fade is
@@ -2277,65 +2276,79 @@ static void afn_beam_render(const float* view) {
         unsigned baseA = (unsigned)(((bm->col >> 24) & 0xFF) * fadeMul);
         unsigned rgb = bm->col & 0x00FFFFFFu;
         float hw = bm->width;
-        // Animated bounce "ball": a bright spot that travels the arcs (up-and-down = bounce).
-        float pp = bm->pulse > 0.0001f ? (float)fmod((double)afn_frame_count * bm->pulse, 1.0) : -1.0f;
-        // Pass 2: ribbon — a CROSS of two perpendicular strips so the bolt has 3D volume
-        // from every camera angle. Strip A is camera-facing (screen-perp of the local
-        // tangent); strip B runs along tangent x A (the depth direction). When you look
-        // straight down the bolt — e.g. it's cast directly in front of you — strip A
-        // collapses to a sliver but strip B is broadside, so it still reads as a spark
-        // bouncing toward/away from you. Per-point alpha boosted near the bounce ball.
-        AfnVertex stripA[2 * (AFN_BEAM_MAX_SEGS + 1)];
-        AfnVertex stripB[2 * (AFN_BEAM_MAX_SEGS + 1)];
+        // Per-centerline camera-facing perpendicular (filament width direction). Filaments
+        // run roughly parallel to the centerline, so they share it.
+        float lsxA[AFN_BEAM_MAX_SEGS+1], lsyA[AFN_BEAM_MAX_SEGS+1], lszA[AFN_BEAM_MAX_SEGS+1];
         for (int i = 0; i <= N; i++) {
             int ia = i>0?i-1:0, ib = i<N?i+1:N;
             float tx = cxA[ib]-cxA[ia], ty = cyA[ib]-cyA[ia], tz = czA[ib]-czA[ia];
             float tr = tx*Rwx+ty*Rwy+tz*Rwz, tu = tx*Uwx+ty*Uwy+tz*Uwz;
             float tl = sqrtf(tr*tr+tu*tu); if (tl<0.001f) tl=0.001f;
-            // A = camera-facing side (in the screen plane, perpendicular to the tangent).
-            float lsx = (-tu/tl)*Rwx + (tr/tl)*Uwx, lsy = (-tu/tl)*Rwy + (tr/tl)*Uwy, lsz = (-tu/tl)*Rwz + (tr/tl)*Uwz;
-            // B = tangent x A (the third axis of the cross-section) -> the depth direction.
-            float tlen = sqrtf(tx*tx+ty*ty+tz*tz); if (tlen<0.001f) tlen=0.001f;
-            float tnx=tx/tlen, tny=ty/tlen, tnz=tz/tlen;
-            float bsx = tny*lsz - tnz*lsy, bsy = tnz*lsx - tnx*lsz, bsz = tnx*lsy - tny*lsx;
-            float bl = sqrtf(bsx*bsx+bsy*bsy+bsz*bsz); if (bl<0.001f) bl=0.001f; bsx/=bl; bsy/=bl; bsz/=bl;
-            unsigned a = baseA;
-            if (bm->travel) {
-                // A bright packet crawls source->target over the bolt's life, bouncing along
-                // the spline. Points outside the trailing window are transparent (additive),
-                // so the strip stays intact but only the moving comet shows.
-                float t = (float)i/(float)N;
-                // Window is sized to ONE arc (persist / bounce count), so the packet rides up
-                // and over each arc and touches down between them — cycling through every arc
-                // — instead of lighting the whole path at once. Head sweeps a touch past 1 so
-                // the tail finishes exiting the final arc.
-                float win = (bm->travelPersist > 0.01f ? bm->travelPersist : 0.01f) / (float)tb;
-                float headT = (bm->maxLife > 0 ? 1.0f - (float)bm->life/(float)bm->maxLife : 1.0f) * (1.0f + win);
-                float d = headT - t;                 // >0 = this point trails the head
-                if (t > headT || d > win || d < 0.0f) a = 0;
-                else { float bb = 1.0f - d/win; bb *= bb;   // 1 at the head, 0 at the tail
-                    float fade = bm->travelFade;            // 0 = uniform bright, 1 = full tail comet
-                    a = (unsigned)(baseA * (1.0f - fade*(1.0f - bb))); }
-            } else if (pp >= 0.0f) { float t = (float)i/(float)N, d = t - pp; if (d < 0) d = -d;
-                float boost = d < 0.14f ? (1.0f - d/0.14f) : 0.0f; boost *= boost;
-                unsigned pa = baseA + (unsigned)(baseA * boost * 1.8f); a = pa > 255 ? 255 : pa; }
-            unsigned col = rgb | (a << 24);
-            float w = hw * thA[i];
-            stripA[2*i].u=0; stripA[2*i].v=0; stripA[2*i].color=col;
-            stripA[2*i].x = cxA[i]-lsx*w; stripA[2*i].y = cyA[i]-lsy*w; stripA[2*i].z = czA[i]-lsz*w;
-            stripA[2*i+1].u=1; stripA[2*i+1].v=0; stripA[2*i+1].color=col;
-            stripA[2*i+1].x = cxA[i]+lsx*w; stripA[2*i+1].y = cyA[i]+lsy*w; stripA[2*i+1].z = czA[i]+lsz*w;
-            stripB[2*i].u=0; stripB[2*i].v=0; stripB[2*i].color=col;
-            stripB[2*i].x = cxA[i]-bsx*w; stripB[2*i].y = cyA[i]-bsy*w; stripB[2*i].z = czA[i]-bsz*w;
-            stripB[2*i+1].u=1; stripB[2*i+1].v=0; stripB[2*i+1].color=col;
-            stripB[2*i+1].x = cxA[i]+bsx*w; stripB[2*i+1].y = cyA[i]+bsy*w; stripB[2*i+1].z = czA[i]+bsz*w;
+            lsxA[i]=(-tu/tl)*Rwx+(tr/tl)*Uwx; lsyA[i]=(-tu/tl)*Rwy+(tr/tl)*Uwy; lszA[i]=(-tu/tl)*Rwz+(tr/tl)*Uwz;
         }
-        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &stripA->color);
-        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &stripA->x);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 2 * (N + 1));
-        glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &stripB->color);
-        glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &stripB->x);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 2 * (N + 1));
+        float headT = bm->travel ? (1.0f - lifeF) : 1.0f;
+        float win = (bm->travelPersist > 0.01f ? bm->travelPersist : 0.01f) / (float)tb;
+        float fw = hw * 0.55f; if (fw < 0.03f) fw = 0.03f;   // thin filament half-width
+
+        // ---- the electric BUNDLE: thin crackling filaments around the centerline ----
+        for (int k = 0; k < AFN_BEAM_FILAMENTS; k++) {
+            unsigned frng = rng ^ ((unsigned)(k+1) * 0x9E3779B9u);
+            float ph = (float)k * (6.2831853f / (float)AFN_BEAM_FILAMENTS);
+            float cph = cosf(ph), sph = sinf(ph);
+            AfnVertex fil[2 * (AFN_BEAM_MAX_SEGS + 1)];
+            for (int i = 0; i <= N; i++) {
+                float t = (float)i/(float)N;
+                float aMul = 1.0f;
+                if (bm->travel) {                 // crawling window (per-arc) reveals the bundle
+                    float hT = headT*(1.0f+win); float d = hT - t;
+                    if (t > hT || d > win || d < 0.0f) aMul = 0.0f;
+                    else { float bb = 1.0f - d/win; bb *= bb; float fade = bm->travelFade; aMul = 1.0f - fade*(1.0f-bb); }
+                }
+                float edge = t<0.5f?t:(1.0f-t); float endRamp = edge*6.0f<1.0f?edge*6.0f:1.0f;
+                float rad = bm->jitter * (0.35f + 0.65f*t) * endRamp;   // tube spreads toward the head
+                frng ^= frng<<13; frng^=frng>>17; frng^=frng<<5; float c1=((float)(frng&0xFFFF)/32768.0f)-1.0f;
+                frng ^= frng<<13; frng^=frng>>17; frng^=frng<<5; float c2=((float)(frng&0xFFFF)/32768.0f)-1.0f;
+                float ox = cph*rad + c1*bm->jitter*0.8f*endRamp;   // screen-plane offset (tube + crackle)
+                float oy = sph*rad + c2*bm->jitter*0.8f*endRamp;   // out-of-plane offset
+                float fx2 = cxA[i] + sscx*ox + hsx*oy;
+                float fy2 = cyA[i] + sscy*ox + hsy*oy;
+                float fz2 = czA[i] + sscz*ox + hsz*oy;
+                int a = (int)(baseA * aMul); if (a > 255) a = 255;
+                unsigned col = rgb | ((unsigned)a << 24);
+                fil[2*i].u=0; fil[2*i].v=0; fil[2*i].color=col;
+                fil[2*i].x = fx2 - lsxA[i]*fw; fil[2*i].y = fy2 - lsyA[i]*fw; fil[2*i].z = fz2 - lszA[i]*fw;
+                fil[2*i+1].u=1; fil[2*i+1].v=0; fil[2*i+1].color=col;
+                fil[2*i+1].x = fx2 + lsxA[i]*fw; fil[2*i+1].y = fy2 + lsyA[i]*fw; fil[2*i+1].z = fz2 + lszA[i]*fw;
+            }
+            glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &fil->color);
+            glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &fil->x);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 2 * (N + 1));
+        }
+
+        // ---- bright HEAD ORB (the leading ball): a soft radial glow (blue halo + white core),
+        // additive triangle fans so it's round without a texture ----
+        {
+            float ht = headT; if (ht>1.0f) ht=1.0f; if (ht<0.0f) ht=0.0f;
+            float fi = ht*(float)N; int hi=(int)fi; if(hi>N-1)hi=N-1; if(hi<0)hi=0; int h2=hi+1<=N?hi+1:hi; float hf=fi-(float)hi;
+            float ox = cxA[hi]+(cxA[h2]-cxA[hi])*hf, oy = cyA[hi]+(cyA[h2]-cyA[hi])*hf, oz = czA[hi]+(czA[h2]-czA[hi])*hf;
+            float pls = 0.85f + 0.15f*sinf((float)afn_frame_count*0.7f);
+            // two fans: large blue halo, then small white-hot core
+            for (int pass = 0; pass < 2; pass++) {
+                float orad = (pass==0 ? (hw*4.0f + bm->jitter*1.5f) : (hw*1.8f)) * pls;
+                unsigned cc = (pass==0 ? rgb : 0x00FFFFFFu) | ((unsigned)baseA << 24);
+                unsigned rim = (pass==0 ? rgb : 0x00FFFFFFu);   // alpha 0 at rim
+                AfnVertex fan[11];
+                fan[0].u=0.5f; fan[0].v=0.5f; fan[0].color=cc; fan[0].x=ox; fan[0].y=oy; fan[0].z=oz;
+                for (int j = 0; j <= 8; j++) {
+                    float ang = (float)j * (6.2831853f/8.0f); float ca=cosf(ang), sa=sinf(ang);
+                    float rx=(Rwx*ca+Uwx*sa)*orad, ry=(Rwy*ca+Uwy*sa)*orad, rz=(Rwz*ca+Uwz*sa)*orad;
+                    fan[1+j].u=0; fan[1+j].v=0; fan[1+j].color=rim; fan[1+j].x=ox+rx; fan[1+j].y=oy+ry; fan[1+j].z=oz+rz;
+                }
+                glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &fan->color);
+                glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &fan->x);
+                glDrawArrays(GL_TRIANGLE_FAN, 0, 10);
+            }
+        }
     }
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
@@ -5431,10 +5444,27 @@ int main(void)
         afn_particles_render(view);
         // Beam/lightning ribbons: tick life, cast any queued bolt, draw the strips.
         afn_beam_update();
+        // HARDCODED TEST (Pikachu-jolt look): Select casts a blue/white electric bundle that
+        // bounces 12 times across the floor, with a bright leading head orb. Iterate the
+        // numbers here, then reverse it back into the Effects tab once it looks right.
+        if (key_hit(KEY_SELECT)) {
+            afn_beam_bounces = 12;          // parabolic arches across the floor
+            afn_beam_range   = 156;         // total reach (~13 units / bounce)
+            afn_beam_bow     = 7.0f;        // arch height off the floor
+            afn_beam_width   = 0.55f;       // filament thickness
+            afn_beam_jitter  = 1.3f;        // bundle spread + crackle (world units)
+            afn_beam_decay   = 0.97f;       // each bounce slightly lower
+            afn_beam_pulse   = 0.0f;
+            afn_beam_life    = 150;         // frames to crawl across
+            afn_beam_segs    = 14;
+            afn_beam_travel  = 1;           // crawl a head across, bundle trailing
+            afn_beam_travel_persist = 0.55f;
+            afn_beam_travel_fade    = 0.30f;
+            afn_beam_col     = 0xFFFFB060u; // light blue (0xAABBGGRR: B=FF,G=B0,R=60)
+            afn_beam_spline  = 0; afn_beam_spline_n = 0;   // parametric bounce (no authored spline)
+            afn_beam_spawn   = 1;
+        }
 #ifdef AFN_HAS_FX
-        // HARDCODED TEST: Select fires effect instance 0 so the ground-bounce zap can be
-        // tried without wiring a Play Effect node yet. Remove once it's node-driven.
-        if (key_hit(KEY_SELECT)) afn_fx_play_req = 1;   // instance 0 (+1)
         // Play Effect node queued an authored effect instance this frame.
         if (afn_fx_play_req > 0) { afn_fx_play(afn_fx_play_req - 1, playerX, playerY, playerZ, playerYaw); afn_fx_play_req = 0; }
 #endif
