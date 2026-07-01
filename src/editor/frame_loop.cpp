@@ -31635,7 +31635,7 @@ void FrameTick(float dt)
         for (int i = 0; i < (int)Inst.layers.size(); i++) {
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
-            const char* kindTag = Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
+            const char* kindTag = Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
             char lbl[64]; snprintf(lbl, sizeof(lbl), "%s: %s%s", kindTag,
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
@@ -31649,8 +31649,8 @@ void FrameTick(float dt)
         // ---- Presets: pick from the dropdown + "Add" to drop in a pre-configured layer ----
         ImGui::SameLine(); ImGui::TextDisabled("| Preset:"); ImGui::SameLine();
         static int sFxPreset = 0;
-        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam" };
-        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7 };
+        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf" };
+        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
         ImGui::SetNextItemWidth(Scaled(120));
         ImGui::Combo("##fxpreset", &sFxPreset, fxPresetNames, IM_ARRAYSIZE(fxPresetNames));
         ImGui::SameLine();
@@ -31677,7 +31677,7 @@ void FrameTick(float dt)
         ImGui::SetNextItemWidth(Scaled(120));
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
-        { const char* kindName = L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
+        { const char* kindName = L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
           ImGui::TextDisabled("Kind: %s", kindName); }   // set by the preset you added (no radio)
         ImGui::Separator();
         if (L.kind == 0) {
@@ -31808,6 +31808,46 @@ void FrameTick(float dt)
                                "a cone, wobbles, and the bubbles pop at the end.");
             ImGui::Spacing();
             ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 8) {
+            // Ice Beam — a forward beam of ice diamonds: a straight light-blue centre strand + two
+            // dark-blue side strands winding in a helix. Faceted, refracting cores. Shoots out then holds.
+            ImGui::TextWrapped("Ice Beam: a forward beam of ice diamonds — a straight light-blue "
+                               "centre strand plus two dark-blue side strands that wind in a helix. "
+                               "Gradient bodies with 4-facet refracting cores. Shoots out then holds.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 9) {
+            // Sludge Bomb — lobs a gooey purple glob in an arc; on impact it splats into a bubbling
+            // floor puddle that lingers ~4 seconds. Poison-purple, matte goo with drips + toxic bubbles.
+            ImGui::TextWrapped("Sludge Bomb: lobs a gooey purple glob in an arc toward the target. On "
+                               "impact it splats into a bubbling puddle on the floor that lingers ~4 "
+                               "seconds, then fades. Drips, splat burst, toxic-green bubbles.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 10) {
+            // Psybeam — a psychic zigzag zap that shoots out fast with an animated rainbow gradient,
+            // white-hot core, muzzle flash + a rainbow head orb. Intro/outro of the glow taper to points.
+            ImGui::TextWrapped("Psybeam: a psychic zigzag zap fired forward — shoots out fast with an "
+                               "animated rainbow gradient and a white-hot core. Muzzle flash + a rainbow "
+                               "head orb; the glow tapers to a point at the mouth and into the orb.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 11) {
+            // Psychic — a funnel of 6 pink rings along the forward axis, small near the player to big
+            // out front. They reveal in sequence (small -> big), then pulse + slowly rotate.
+            ImGui::TextWrapped("Psychic: a funnel of 6 magenta rings along the forward axis, growing "
+                               "from a small ring near the player to a big one out front. They reveal in "
+                               "sequence (small to big), then pulse and slowly swirl.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 12) {
+            // Surf — a wide translucent wave-surface mesh (deep blue -> cyan -> white foam) that sweeps
+            // forward across the arena; the PLAYER RIDES it, carried forward on the crest.
+            ImGui::TextWrapped("Surf: a wide translucent wave (mesh surface: deep blue -> cyan -> white "
+                               "foam, with ripples + a foam crest) sweeps forward across the arena. The "
+                               "PLAYER RIDES it — carried forward just behind the crest.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -31845,6 +31885,11 @@ void FrameTick(float dt)
             else if (Q.kind==5) { if(40.0f>maxRange)maxRange=40.0f; }   // electroweb: frame the lattice ahead
             else if (Q.kind==6) { if(18.0f>maxRange)maxRange=18.0f; }   // fire spin: frame the ground spiral
             else if (Q.kind==7) { if(44.0f>maxRange)maxRange=44.0f; }   // bubble beam: frame the forward stream
+            else if (Q.kind==8) { if(50.0f>maxRange)maxRange=50.0f; }   // ice beam: frame the forward helix
+            else if (Q.kind==9) { if(34.0f>maxRange)maxRange=34.0f; }   // sludge bomb: frame the arc + puddle
+            else if (Q.kind==10) { if(50.0f>maxRange)maxRange=50.0f; }  // psybeam: frame the forward zap
+            else if (Q.kind==11) { if(40.0f>maxRange)maxRange=40.0f; }  // psychic: frame the ring funnel
+            else if (Q.kind==12) { if(48.0f>maxRange)maxRange=48.0f; }  // surf: frame the wave sweep
         }
         float dist = (maxRange*0.95f + 8.0f) / sFxScale;   // bigger scale = closer camera = bigger preview
         // Demonstrate the Thunder cinematic cam UP-tilt: while a thunder layer is in its charge
@@ -32018,6 +32063,101 @@ void FrameTick(float dt)
                     dl->AddCircleFilled(P,sr,IM_COL32(150,200,255,(int)(70*A)));                 // translucent body
                     dl->AddCircle(P,sr,IM_COL32(215,235,255,(int)(190*A)),0,1.6f);               // bright rim
                     dl->AddCircleFilled(ImVec2(P.x-sr*0.32f,P.y-sr*0.36f), sr*0.24f+0.6f, IM_COL32(255,255,255,(int)(200*A))); }   // highlight
+                continue;
+            }
+            if (Q.kind == 8) {
+                // ---- ICE BEAM preview: straight light-blue centre + dark-blue double helix of diamonds ----
+                float php=fmodf(sFxClk,130.0f); float front=php/20.0f; if(front>1.0f)front=1.0f;
+                float ifd=(130.0f-php)<18.0f?(130.0f-php)/18.0f:1.0f;
+                float ox=-18.0f,oy=5.0f,oz=0.0f, range=46.0f, coils=3.0f, helixR=3.0f; int N=22;
+                auto diamond=[&](float wx,float wy,float wz, float ww,float hh, ImU32 col){ float vz; ImVec2 C=proj(wx,wy,wz,&vz); if(vz<=0.05f)return; float ws=ww*focal/vz, hs=hh*focal/vz; dl->AddQuadFilled(ImVec2(C.x,C.y-hs),ImVec2(C.x+ws,C.y),ImVec2(C.x,C.y+hs),ImVec2(C.x-ws,C.y), col); };
+                for(int i=0;i<N;i++){ float t=(float)i/(float)(N-1); if(t>front)continue; float dist=t*range;   // centre strand
+                    diamond(ox+dist,oy,oz, 1.0f,1.18f, IM_COL32(175,215,255,(int)(150*ifd)));
+                    diamond(ox+dist,oy,oz, 0.57f,0.90f, IM_COL32(240,250,255,(int)(205*ifd))); }
+                for(int s=0;s<2;s++){ float ph0=(float)s*3.14159265f;                                          // two helix strands
+                    for(int i=0;i<N;i++){ float t=(float)i/(float)(N-1); if(t>front)continue; float dist=t*range;
+                        float ang=t*coils*6.2831853f + php*0.12f + ph0; float cy=oy+sinf(ang)*helixR, cz=oz+cosf(ang)*helixR;
+                        diamond(ox+dist,cy,cz, 0.8f,1.2f, IM_COL32(48,95,205,(int)(180*ifd)));
+                        diamond(ox+dist,cy,cz, 0.44f,0.70f, IM_COL32(150,190,245,(int)(205*ifd))); } }
+                continue;
+            }
+            if (Q.kind == 9) {
+                // ---- SLUDGE BOMB preview: gooey arc lob, then a bubbling floor puddle (loops) ----
+                float cyc=44.0f+240.0f; float php=fmodf(sFxClk,cyc);
+                float sx=-15.0f,sy=8.0f,sz=0.0f, tx=15.0f,ty=0.4f,tz=0.0f, arc=13.0f;
+                if (php < 44.0f) {   // FLY
+                    float t=php/44.0f; float bx=sx+(tx-sx)*t, by=sy+(ty-sy)*t+arc*sinf(3.14159265f*t), bz=sz;
+                    float vz; ImVec2 B=proj(bx,by,bz,&vz); if(vz>0.05f){ float r=2.7f*focal/vz; if(r<3)r=3;
+                        dl->AddCircleFilled(B, r, IM_COL32(55,16,78,215));
+                        dl->AddCircleFilled(ImVec2(B.x-r*0.22f,B.y-r*0.22f), r*0.72f, IM_COL32(150,55,185,225));
+                        dl->AddCircleFilled(ImVec2(B.x-r*0.34f,B.y-r*0.34f), r*0.3f, IM_COL32(228,158,238,210)); }
+                } else {             // PUDDLE
+                    float pt=(php-44.0f)/240.0f; float fade=(pt>0.85f)?(1.0f-pt)/0.15f:1.0f; float grow=pt<0.06f?pt/0.06f:1.0f;
+                    float vz; ImVec2 P=proj(tx,ty,tz,&vz); if(vz>0.05f){ float r=9.0f*focal/vz*grow; if(r<4)r=4;
+                        dl->AddCircleFilled(P, r, IM_COL32(45,14,64,(int)(205*fade)));
+                        dl->AddCircleFilled(P, r*0.6f, IM_COL32(140,55,175,(int)(200*fade)));
+                        dl->AddCircleFilled(ImVec2(P.x-r*0.2f,P.y-r*0.14f), r*0.24f, IM_COL32(182,98,208,(int)(110*fade)));
+                        for(int j=0;j<6;j++){ unsigned bh=(unsigned)(j+1)*2654435761u; float bph=fmodf(php*0.026f+(float)((bh>>4)&0xFF)/255.0f,1.0f);
+                            float ba=(float)(bh&0xFFFF)/65536.0f*6.2831853f, brr=r*0.55f*((float)((bh>>8)&0xFF)/255.0f), bA=sinf(bph*3.14159265f);
+                            ImVec2 Bp(P.x+cosf(ba)*brr, P.y+sinf(ba)*brr*0.5f-bph*r*0.35f);
+                            dl->AddCircleFilled(Bp, r*0.08f+1.0f, (j%3==0)?IM_COL32(150,215,90,(int)(150*bA*fade)):IM_COL32(168,78,202,(int)(150*bA*fade))); } }
+                }
+                continue;
+            }
+            if (Q.kind == 10) {
+                // ---- PSYBEAM preview: rainbow zigzag zap shooting +X, shoots out fast ----
+                float php=fmodf(sFxClk,84.0f); float front=php/8.0f; if(front>1.0f)front=1.0f;
+                float pfd=(84.0f-php)<14.0f?(84.0f-php)/14.0f:1.0f;
+                float ox=-20.0f,oy=5.0f,oz=0.0f, range=46.0f, amp=4.2f, coils=5.0f, ct=sFxClk*0.06f; int M=20;
+                ImVec2 pts[22]; float ats[22]; int np=0; unsigned rng=(unsigned)(int)sFxClk*2654435761u ^ 0xA11CE5EDu;
+                for(int i=0;i<=M;i++){ float t=(float)i/(float)M; if(t>front)break; float dist=t*range;
+                    float ph=t*coils, ff=ph-floorf(ph), tw=(ff<0.5f)?(ff*4.0f-1.0f):(3.0f-ff*4.0f);
+                    float endR=t<0.5f?t*2.0f:(1.0f-t)*2.0f; if(endR>1.0f)endR=1.0f;
+                    rng^=rng<<13;rng^=rng>>17;rng^=rng<<5; float jx=((float)(rng&0xFFFF)/32768.0f-1.0f)*1.1f;
+                    float oxs=(tw*amp+jx)*endR; float vz; pts[np]=proj(ox+dist, oy+oxs, oz, &vz); ats[np]=t; np++; }
+                for(int i=0;i<np-1;i++){ float h=(ats[i]*1.6f+ct)*6.2831853f;
+                    int r=(int)((0.55f+0.45f*sinf(h))*255.0f), g=(int)((0.55f+0.45f*sinf(h+2.0944f))*255.0f), b=(int)((0.55f+0.45f*sinf(h+4.1888f))*255.0f);
+                    if(r<0)r=0;if(r>255)r=255;if(g<0)g=0;if(g>255)g=255;if(b<0)b=0;if(b>255)b=255;
+                    float wtp=(ats[i]<0.22f?ats[i]/0.22f:1.0f); float tn=(float)i/(float)(np>1?np-1:1); if(tn>0.70f)wtp*=(1.0f-tn)/0.30f;
+                    dl->AddLine(pts[i],pts[i+1], IM_COL32(r,g,b,(int)(150*pfd)), 3.0f+9.0f*wtp); }   // rainbow glow (tapered)
+                for(int i=0;i<np-1;i++) dl->AddLine(pts[i],pts[i+1], IM_COL32(255,255,255,(int)(230*pfd)), 2.5f);   // white core
+                if(np>0) dl->AddCircleFilled(pts[np-1], 5.0f, IM_COL32(255,255,255,(int)(230*pfd)));   // head orb
+                continue;
+            }
+            if (Q.kind == 11) {
+                // ---- PSYCHIC preview: funnel of 6 rings along +X, small -> big, revealing then pulsing ----
+                float php=fmodf(sFxClk,110.0f); float pfd=(110.0f-php)<16.0f?(110.0f-php)/16.0f:1.0f;
+                float ox=-15.0f,oy=5.0f,oz=0.0f, spacing=5.5f, r0=1.6f, rGrow=2.3f; int NR=6;
+                for(int ri=0;ri<NR;ri++){ float appear=(float)ri*5.0f, age=php-appear; if(age<0.0f)continue;
+                    float ai=(age<8.0f)?age/8.0f:1.0f; float d=(float)ri*spacing;
+                    float pulse=1.0f+0.07f*sinf(sFxClk*0.16f+(float)ri*0.8f); float r=(r0+(float)ri*rGrow)*pulse;
+                    float sp=sFxClk*0.03f+(float)ri*0.5f, cs=cosf(sp), ss=sinf(sp);
+                    // ring in the Y/Z plane (perp to +X), rotated by sp
+                    ImVec2 gp[25]; int okc=1; for(int j=0;j<25;j++){ float aa=(float)j*(6.2831853f/24.0f);
+                        float ry=(cosf(aa)*cs - sinf(aa)*ss)*r, rz=(cosf(aa)*ss + sinf(aa)*cs)*r; float vz;
+                        gp[j]=proj(ox+d, oy+ry, oz+rz, &vz); if(vz<=0.05f)okc=0; }
+                    if(okc){ int A2=(int)(150*pfd*ai); dl->AddPolyline(gp,25,IM_COL32(205,70,225,A2),0,(2.0f+r*0.12f));
+                        dl->AddPolyline(gp,25,IM_COL32(255,180,255,(int)(210*pfd*ai)),0,1.6f); } }
+                continue;
+            }
+            if (Q.kind == 12) {
+                // ---- SURF preview: a wave-surface mesh sweeping +X, deep blue -> cyan -> white foam ----
+                float php=fmodf(sFxClk,120.0f); float t=php/120.0f; float ease=t*t*(3.0f-2.0f*t); float fd=6.0f+ease*40.0f;
+                float ef=(120.0f-php)<24.0f?(120.0f-php)/24.0f:1.0f; float riseIn=(t<0.15f)?t/0.15f:1.0f;
+                float ox=-22.0f,oy=0.5f,oz=0.0f, halfW=18.0f, crestH=8.0f*riseIn, waveDepth=18.0f;
+                float backD=fd-waveDepth; if(backD<0.0f)backD=0.0f; float span=fd-backD; if(span<0.1f)span=0.1f;
+                int NX=11, NZ=7; ImVec2 gpP[7][11]; int gok[7][11]; float invCH=1.0f/(crestH>0.2f?crestH:0.2f);
+                for(int j=0;j<NZ;j++){ float zr=(float)j/(float)(NZ-1); float zf=backD+zr*span;
+                    for(int i=0;i<NX;i++){ float x=(-1.0f+2.0f*(float)i/(float)(NX-1))*halfW;
+                        float rip=sinf(x*0.35f+sFxClk*0.14f)*0.55f+sinf(zf*0.4f-sFxClk*0.18f)*0.55f;
+                        float h=crestH*powf(zr,1.4f)+rip*zr; float vz; gpP[j][i]=proj(ox+zf, oy+h, oz+x, &vz); gok[j][i]=(vz>0.05f); } }
+                for(int j=0;j<NZ-1;j++){ float zr=(float)(j+1)/(float)(NZ-1);
+                    int r=(int)(30+120*zr), g=(int)(95+120*zr), b=(int)(180+75*zr);   // approx colour by row
+                    float f=zr>0.8f?(zr-0.8f)/0.2f:0.0f; r+=(int)((255-r)*f);g+=(int)((255-g)*f);b+=(int)((255-b)*f);
+                    int a=(int)((150+70*zr+55*f)*ef); if(a>255)a=255; ImU32 col=IM_COL32(r,g,b,a);
+                    for(int i=0;i<NX-1;i++){ if(!(gok[j][i]&&gok[j][i+1]&&gok[j+1][i]&&gok[j+1][i+1]))continue;
+                        dl->AddQuadFilled(gpP[j][i],gpP[j][i+1],gpP[j+1][i+1],gpP[j+1][i], col); } }
+                for(int i=0;i<NX;i++){ if(gok[NZ-1][i]) dl->AddCircleFilled(gpP[NZ-1][i], 4.0f, IM_COL32(255,255,255,(int)(150*ef))); }   // foam crest
                 continue;
             }
             if (Q.kind != 1) continue;

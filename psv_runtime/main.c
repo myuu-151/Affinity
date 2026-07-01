@@ -2510,6 +2510,42 @@ static void mm_diamond(float cx,float cy,float cz, float Rx,float Ry,float Rz, f
     MMV(n, cx+Ux*h, cy+Uy*h, cz+Uz*h, col); n++;   // close back to top
     mm_flush(n, GL_TRIANGLE_FAN);
 }
+static unsigned mm_lerp_col(unsigned a, unsigned b, float t) {
+    int ar=a&0xFF, ag=(a>>8)&0xFF, ab=(a>>16)&0xFF, aa=(a>>24)&0xFF;
+    int br=b&0xFF, bg=(b>>8)&0xFF, bb=(b>>16)&0xFF, ba=(b>>24)&0xFF;
+    int r=ar+(int)((br-ar)*t), g=ag+(int)((bg-ag)*t), bl=ab+(int)((bb-ab)*t), al=aa+(int)((ba-aa)*t);
+    return (unsigned)(r&0xFF)|((unsigned)(g&0xFF)<<8)|((unsigned)(bl&0xFF)<<16)|((unsigned)(al&0xFF)<<24);
+}
+// Faceted diamond: the 4 triangles (top-right, right-bottom, bottom-left, left-top) are drawn as
+// FLAT separate triangles, each its own shade — so the crystal reads as 4 cut facets refracting
+// light rather than a smooth blob.
+static void mm_diamond_facet(float cx,float cy,float cz, float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
+                             float w,float h, unsigned c1, unsigned c2, unsigned c3, unsigned c4) {
+    float Tx=cx+Ux*h, Ty=cy+Uy*h, Tz=cz+Uz*h;   // top
+    float Px=cx+Rx*w, Py=cy+Ry*w, Pz=cz+Rz*w;   // right
+    float Bx=cx-Ux*h, By=cy-Uy*h, Bz=cz-Uz*h;   // bottom
+    float Lx=cx-Rx*w, Ly=cy-Ry*w, Lz=cz-Rz*w;   // left
+    int n=0;
+    MMV(n,cx,cy,cz,c1); n++; MMV(n,Tx,Ty,Tz,c1); n++; MMV(n,Px,Py,Pz,c1); n++;   // top-right facet
+    MMV(n,cx,cy,cz,c2); n++; MMV(n,Px,Py,Pz,c2); n++; MMV(n,Bx,By,Bz,c2); n++;   // right-bottom
+    MMV(n,cx,cy,cz,c3); n++; MMV(n,Bx,By,Bz,c3); n++; MMV(n,Lx,Ly,Lz,c3); n++;   // bottom-left
+    MMV(n,cx,cy,cz,c4); n++; MMV(n,Lx,Ly,Lz,c4); n++; MMV(n,Tx,Ty,Tz,c4); n++;   // left-top
+    mm_flush(n, GL_TRIANGLES);
+}
+// Gradient diamond: bright colHi toward the top/left facets, dark colLo toward bottom/right, so
+// each crystal shades from a highlight to a dark edge (per-vertex colours).
+static void mm_diamond_grad(float cx,float cy,float cz, float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
+                            float w,float h, unsigned colHi, unsigned colLo) {
+    unsigned colMid = mm_lerp_col(colHi, colLo, 0.5f);
+    int n=0;
+    MMV(n,cx,cy,cz,colMid); n++;
+    MMV(n, cx+Ux*h, cy+Uy*h, cz+Uz*h, colHi); n++;   // top    (highlight)
+    MMV(n, cx+Rx*w, cy+Ry*w, cz+Rz*w, colLo); n++;   // right  (dark)
+    MMV(n, cx-Ux*h, cy-Uy*h, cz-Uz*h, colLo); n++;   // bottom (dark)
+    MMV(n, cx-Rx*w, cy-Ry*w, cz-Rz*w, colHi); n++;   // left   (highlight)
+    MMV(n, cx+Ux*h, cy+Uy*h, cz+Uz*h, colHi); n++;   // close
+    mm_flush(n, GL_TRIANGLE_FAN);
+}
 static void afn_icebeam_fire(float px, float py, float pz, float yaw) {
     float yr = yaw * (3.14159265f/180.0f);
     s_ib_fx=sinf(yr); s_ib_fy=0.0f; s_ib_fz=cosf(yr);      // forward
@@ -2536,8 +2572,10 @@ static void afn_icebeam_render(const float* view) {
     // CENTER strand: straight down the beam axis (no spiral), LIGHT BLUE crystal.
     for (int i=0;i<N;i++){ float t=(float)i/(float)(N-1); if (t > front) continue;
         float dist=t*range; float cx=ox+Fx*dist, cy=oy+Fy*dist, cz=oz+Fz*dist;
-        mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 1.6f, 2.3f, MM_COL(150,210,255,(int)(150*fade)));    // light-blue body
-        mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.9f, 1.4f, MM_COL(240,250,255,(int)(0.85f*a)));     // white core
+        mm_diamond_grad(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 1.0f, 1.18f, MM_COL(230,244,255,(int)(150*fade)), MM_COL(120,185,250,(int)(150*fade)));   // light-blue gradient body (shorter)
+        { int cc=(int)(0.9f*a);   // 4-facet refracting core (light-blue/white)
+          mm_diamond_facet(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.57f,0.90f,
+              MM_COL(250,253,255,cc), MM_COL(170,210,255,cc), MM_COL(125,182,250,cc), MM_COL(210,235,255,cc)); }
     }
     // TWO SIDE strands: wind around the axis in a helix (180 deg apart), DARK BLUE.
     for (int s=0;s<2;s++){ float ph0=(float)s*3.14159265f;
@@ -2546,10 +2584,284 @@ static void afn_icebeam_render(const float* view) {
             float cx=ox+Fx*dist+(Ax*cosf(ang)+Bx*sinf(ang))*helixR;
             float cy=oy+Fy*dist+(Ay*cosf(ang)+By*sinf(ang))*helixR;
             float cz=oz+Fz*dist+(Az*cosf(ang)+Bz*sinf(ang))*helixR;
-            mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 1.3f, 1.9f, MM_COL(25,60,180,(int)(180*fade)));  // dark-blue body
-            mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.7f, 1.1f, MM_COL(80,130,230,(int)(0.85f*a)));  // lighter core
+            mm_diamond_grad(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.8f, 1.2f,  MM_COL(120,165,240,(int)(180*fade)), MM_COL(18,45,150,(int)(180*fade)));  // dark-blue gradient body
+            { int ca=(int)(0.9f*a);   // 4-facet refracting core: each facet a distinct blue shade
+              mm_diamond_facet(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.44f,0.70f,
+                  MM_COL(215,232,255,ca), MM_COL(70,120,225,ca), MM_COL(28,62,175,ca), MM_COL(120,165,240,ca)); }
         }
     }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Sludge Bomb — HARDCODED prototype. Lobs a gooey purple sludge blob in an ARC
+// toward a forward point (or the locked target); on impact it splats into a
+// bubbling PUDDLE on the floor that lingers ~4 seconds, then fades. Poison-purple,
+// alpha-blended (matte goo, not glow). Two phases: 0 = flying, 1 = puddle.
+// ---------------------------------------------------------------------------
+static int   s_sl_active=0, s_sl_phase=0, s_sl_timer=0;
+static float s_sl_sx,s_sl_sy,s_sl_sz, s_sl_tx,s_sl_ty,s_sl_tz, s_sl_arc;
+#define SL_FLY 44
+#define SL_PUDDLE 240   // ~4s at 60fps
+static void afn_sludge_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f); float land=30.0f;
+    s_sl_sx=px+sinf(yr)*3.0f; s_sl_sy=py+9.0f; s_sl_sz=pz+cosf(yr)*3.0f;      // launch from the hand
+    s_sl_tx=px+sinf(yr)*land; s_sl_ty=py+0.4f; s_sl_tz=pz+cosf(yr)*land;      // land forward on the floor
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_CAM_LOCK)
+    if(afn_cam_lock_target>=0 && afn_ai_slot>=0){ s_sl_tx=s_npcX[afn_ai_slot]; s_sl_tz=s_npcZ[afn_ai_slot]; }   // toward the locked target
+#endif
+    s_sl_arc=18.0f; s_sl_phase=0; s_sl_timer=SL_FLY; s_sl_active=1;
+}
+static void afn_sludge_step(void){
+    if(!s_sl_active||afn_paused) return;
+    if(--s_sl_timer<=0){ if(s_sl_phase==0){ s_sl_phase=1; s_sl_timer=SL_PUDDLE; } else s_sl_active=0; }   // land -> puddle -> gone
+}
+static void afn_sludge_render(const float* view){
+    if(!s_sl_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    static int frame=0; frame++;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // matte goo (alpha, not additive)
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    if(s_sl_phase==0){
+        float t=1.0f-(float)s_sl_timer/(float)SL_FLY;
+        float bx=s_sl_sx+(s_sl_tx-s_sl_sx)*t, by=s_sl_sy+(s_sl_ty-s_sl_sy)*t + s_sl_arc*sinf(3.14159265f*t), bz=s_sl_sz+(s_sl_tz-s_sl_sz)*t;
+        // trailing goo drips along the arc (fade back)
+        for(int k=1;k<=5;k++){ float tk=t-(float)k*0.045f; if(tk<0.0f)continue;
+            float dx=s_sl_sx+(s_sl_tx-s_sl_sx)*tk, dy=s_sl_sy+(s_sl_ty-s_sl_sy)*tk+s_sl_arc*sinf(3.14159265f*tk), dz=s_sl_sz+(s_sl_tz-s_sl_sz)*tk;
+            float sz=1.5f*(1.0f-(float)k*0.16f); mm_fill_oval(dx,dy,dz, Rx,Ry,Rz, Ux,Uy,Uz, sz,sz, MM_COL(105,32,138,150-k*24)); }
+        // droplets falling off the glob (gravity)
+        for(int d=0;d<2;d++){ float dph=fmodf((float)frame*0.05f+(float)d*0.5f,1.0f);
+            float ddx=bx+Rx*((float)d-0.5f)*1.6f, ddy=by-dph*dph*7.0f-1.0f, ddz=bz+Rz*((float)d-0.5f)*1.6f;
+            float ds=0.5f*(1.0f-dph*0.5f); mm_fill_oval(ddx,ddy,ddz, Rx,Ry,Rz, Ux,Uy,Uz, ds,ds*1.35f, MM_COL(120,40,160,(int)(175*(1.0f-dph)))); }
+        // gooey glob: soft dark shadow base -> wobbling lumps -> lit side -> specular -> toxic fleck
+        mm_fill_oval(bx,by,bz, Rx,Ry,Rz, Ux,Uy,Uz, 2.7f,2.55f, MM_COL(45,12,65,205));                      // shadow base
+        for(int j=0;j<6;j++){ float ja=(float)j*1.05f+(float)frame*0.16f; float off=1.3f;
+            float ox=(Rx*cosf(ja)+Ux*sinf(ja))*off, oy=(Ry*cosf(ja)+Uy*sinf(ja))*off, oz=(Rz*cosf(ja)+Uz*sinf(ja))*off;
+            float sz=1.3f+sinf((float)frame*0.25f+(float)j*1.3f)*0.3f;
+            mm_fill_oval(bx+ox,by+oy,bz+oz, Rx,Ry,Rz, Ux,Uy,Uz, sz,sz, MM_COL(118,40,158,222)); }          // mid-purple goo
+        mm_fill_oval(bx-Rx*0.7f+Ux*0.7f, by-Ry*0.7f+Uy*0.7f, bz-Rz*0.7f+Uz*0.7f, Rx,Ry,Rz, Ux,Uy,Uz, 1.5f,1.5f, MM_COL(172,72,205,205));   // lit side
+        mm_fill_oval(bx-Rx*0.95f+Ux*0.95f, by-Ry*0.95f+Uy*0.95f, bz-Rz*0.95f+Uz*0.95f, Rx,Ry,Rz, Ux,Uy,Uz, 0.5f,0.5f, MM_COL(228,158,238,210));  // specular
+        mm_fill_oval(bx+Rx*0.6f-Ux*0.25f, by+Ry*0.6f-Uy*0.25f, bz+Rz*0.6f-Uz*0.25f, Rx,Ry,Rz, Ux,Uy,Uz, 0.4f,0.4f, MM_COL(150,220,90,140));   // toxic green fleck
+    } else {
+        float t=1.0f-(float)s_sl_timer/(float)SL_PUDDLE;
+        float fade=s_sl_timer<40?(float)s_sl_timer/40.0f:1.0f;
+        float grow=t<0.06f?t/0.06f:1.0f;
+        float tx=s_sl_tx,ty=s_sl_ty,tz=s_sl_tz; float pr=9.0f*grow;   // bigger mess
+        // impact SPLAT burst — droplets fly out + arc down in the first moment
+        if(t<0.14f){ float bt=t/0.14f;
+            for(int j=0;j<9;j++){ float ja=(float)j*0.7f; float dist=pr*(0.6f+bt*1.5f), arc=sinf(bt*3.14159265f)*4.0f;
+                float ds=0.6f*(1.0f-bt*0.4f);
+                mm_fill_oval(tx+cosf(ja)*dist, ty+arc, tz+sinf(ja)*dist, Rx,Ry,Rz, Ux,Uy,Uz, ds,ds, MM_COL(135,48,170,(int)(205*(1.0f-bt)))); } }
+        // flat ground puddle: dark rim -> irregular edge lumps -> lighter fill -> glossy sheen
+        mm_fill_oval(tx,ty,tz, 1,0,0, 0,0,1, pr*1.05f,pr*0.95f, MM_COL(42,12,60,(int)(210*fade)));           // dark rim
+        for(int j=0;j<8;j++){ float ja=(float)j*0.82f; float off=pr*0.6f;
+            float ox=cosf(ja)*off, oz=sinf(ja*1.3f)*off*0.85f; float sz=pr*(0.34f+0.16f*sinf((float)j*2.1f));
+            mm_fill_oval(tx+ox,ty,tz+oz, 1,0,0, 0,0,1, sz,sz*0.85f, MM_COL(105,35,140,(int)(200*fade))); }   // organic edge
+        mm_fill_oval(tx,ty,tz, 1,0,0, 0,0,1, pr*0.6f,pr*0.55f, MM_COL(140,55,175,(int)(200*fade)));          // lighter fill
+        mm_fill_oval(tx-pr*0.2f,ty,tz-pr*0.2f, 1,0,0, 0,0,1, pr*0.28f,pr*0.2f, MM_COL(182,98,208,(int)(110*fade)));   // glossy sheen
+        // rising bubbles that pop (mostly purple, occasional toxic green)
+        for(int j=0;j<7;j++){ unsigned bh=(unsigned)(j+1)*2654435761u; float bph=fmodf((float)frame*0.026f+(float)((bh>>4)&0xFF)/255.0f,1.0f);
+            float ba=(float)(bh&0xFFFF)/65536.0f*6.2831853f, brr=pr*0.6f*((float)((bh>>8)&0xFF)/255.0f);
+            float bxr=tx+cosf(ba)*brr, bzr=tz+sinf(ba)*brr, byr=ty+bph*2.4f;
+            float bA=sinf(bph*3.14159265f), bs=0.35f+0.3f*(float)((bh>>16)&0xFF)/255.0f;
+            unsigned bc = (j%3==0) ? MM_COL(150,215,90,(int)(150*bA*fade)) : MM_COL(168,78,202,(int)(150*bA*fade));
+            mm_fill_oval(bxr,byr,bzr, Rx,Ry,Rz, Ux,Uy,Uz, bs,bs, bc); }
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Psybeam — HARDCODED prototype. A psychic ZAP: a zigzag bolt fired forward that
+// shoots out fast, crackles (re-jitters each frame), and shimmers through an
+// animated RAINBOW gradient (iridescent psychedelic). Additive glow ribbon +
+// a white-hot core, muzzle flash + a rainbow head orb. Migrate to a preset later.
+// ---------------------------------------------------------------------------
+static int   s_pb_active=0, s_pb_life=0;
+static float s_pb_ox,s_pb_oy,s_pb_oz, s_pb_fx,s_pb_fy,s_pb_fz, s_pb_ax,s_pb_ay,s_pb_az, s_pb_bx,s_pb_by,s_pb_bz;
+#define PB_MAXLIFE 84
+static unsigned mm_rainbow(float hue, int alpha) {
+    float h=hue*6.2831853f;
+    int r=(int)((0.55f+0.45f*sinf(h))*255.0f);
+    int g=(int)((0.55f+0.45f*sinf(h+2.0944f))*255.0f);
+    int b=(int)((0.55f+0.45f*sinf(h+4.1888f))*255.0f);
+    if(r<0)r=0; if(r>255)r=255; if(g<0)g=0; if(g>255)g=255; if(b<0)b=0; if(b>255)b=255;
+    return MM_COL(r,g,b,alpha);
+}
+static void afn_psybeam_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f);
+    s_pb_fx=sinf(yr); s_pb_fy=0.0f; s_pb_fz=cosf(yr);
+    s_pb_ax=cosf(yr); s_pb_ay=0.0f; s_pb_az=-sinf(yr);
+    s_pb_bx=0.0f;     s_pb_by=1.0f; s_pb_bz=0.0f;
+    s_pb_ox=px+s_pb_fx*4.0f; s_pb_oy=py+7.0f; s_pb_oz=pz+s_pb_fz*4.0f;
+    s_pb_life=PB_MAXLIFE; s_pb_active=1;
+}
+static void afn_psybeam_step(void){ if(s_pb_active && !afn_paused){ if(--s_pb_life<=0) s_pb_active=0; } }
+static void afn_psybeam_render(const float* view){
+    if(!s_pb_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float fade=(s_pb_life<14)?(float)s_pb_life/14.0f:1.0f;
+    static int frame=0; frame++;
+    float ox=s_pb_ox,oy=s_pb_oy,oz=s_pb_oz;
+    float Fx=s_pb_fx,Fy=s_pb_fy,Fz=s_pb_fz, Ax=s_pb_ax,Ay=s_pb_ay,Az=s_pb_az, Bx=s_pb_bx,By=s_pb_by,Bz=s_pb_bz;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive psychic glow
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int M=20; float range=46.0f, amp=4.2f, coils=5.0f, width=1.3f;
+    float front=(float)(PB_MAXLIFE - s_pb_life)/8.0f; if(front>1.0f)front=1.0f;   // shoots out fast (~8 frames)
+    float ct=(float)frame*0.06f;                                                  // rainbow animation
+    static float PX[22],PY[22],PZ[22];
+    unsigned rng=(unsigned)frame*2654435761u ^ 0xA11CE5EDu; int np=0;
+    for(int i=0;i<=M;i++){ float t=(float)i/(float)M; if(t>front)break;
+        float dist=t*range;
+        float ph=t*coils, ff=ph-floorf(ph), tw=(ff<0.5f)?(ff*4.0f-1.0f):(3.0f-ff*4.0f);   // triangle-wave zigzag -1..1
+        float endR=t<0.5f?t*2.0f:(1.0f-t)*2.0f; if(endR>1.0f)endR=1.0f;                    // taper at the ends
+        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5; float jx=((float)(rng&0xFFFF)/32768.0f-1.0f)*1.1f;
+        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5; float jy=((float)(rng&0xFFFF)/32768.0f-1.0f)*1.1f;
+        float oxs=(tw*amp+jx)*endR, oys=jy*endR*0.55f;
+        PX[np]=ox+Fx*dist+Ax*oxs+Bx*oys; PY[np]=oy+Fy*dist+Ay*oxs+By*oys; PZ[np]=oz+Fz*dist+Az*oxs+Bz*oys; np++;
+    }
+    if(np<2){ glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY); glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D); return; }
+    for(int pass=0;pass<2;pass++){ float w=(pass==0)?width*2.0f:width*0.55f; int n=0;
+        for(int i=0;i<np;i++){
+            float dx,dy,dz;
+            if(i==0){dx=PX[1]-PX[0];dy=PY[1]-PY[0];dz=PZ[1]-PZ[0];}
+            else if(i==np-1){dx=PX[i]-PX[i-1];dy=PY[i]-PY[i-1];dz=PZ[i]-PZ[i-1];}
+            else {dx=PX[i+1]-PX[i-1];dy=PY[i+1]-PY[i-1];dz=PZ[i+1]-PZ[i-1];}
+            float ddr=dx*Rx+dy*Ry+dz*Rz, ddu=dx*Ux+dy*Uy+dz*Uz; float m=sqrtf(ddr*ddr+ddu*ddu); if(m<0.001f)m=0.001f; ddr/=m; ddu/=m;
+            float wpx=Rx*(-ddu)+Ux*ddr, wpy=Ry*(-ddu)+Uy*ddr, wpz=Rz*(-ddu)+Uz*ddr;
+            float t=(float)i/(float)(np-1);
+            float at=(float)i/(float)M;                                  // absolute position along the full beam
+            float wt=(at<0.22f?at/0.22f:1.0f);                           // taper the INTRO to a point at the mouth
+            if(pass==0 && t>0.70f) wt*=(1.0f-t)/0.30f;                   // glow: taper the END into the head orb (ball)
+            float wI=w*wt;
+            unsigned col=(pass==0)?mm_rainbow(t*1.6f+ct,(int)(150*fade)):MM_COL(255,255,255,(int)(230*fade));   // rainbow glow / white core
+            MMV(n, PX[i]-wpx*wI, PY[i]-wpy*wI, PZ[i]-wpz*wI, col); n++;
+            MMV(n, PX[i]+wpx*wI, PY[i]+wpy*wI, PZ[i]+wpz*wI, col); n++;
+        }
+        mm_flush(n, GL_TRIANGLE_STRIP);
+    }
+    // muzzle flash (rainbow) + head orb at the front tip
+    mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, 4.0f,4.0f, mm_rainbow(ct,(int)(160*fade)), mm_rainbow(ct,0));
+    { float hx=PX[np-1],hy=PY[np-1],hz=PZ[np-1];
+      mm_glow(hx,hy,hz, Rx,Ry,Rz, Ux,Uy,Uz, 3.4f,3.4f, mm_rainbow(ct+0.5f,(int)(180*fade)), mm_rainbow(ct+0.5f,0));
+      mm_fill_oval(hx,hy,hz, Rx,Ry,Rz, Ux,Uy,Uz, 1.1f,1.1f, MM_COL(255,255,255,(int)(230*fade))); }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Psychic — HARDCODED prototype. A funnel of 6 psychic rings along the forward
+// axis, growing from a small ring near the player to a big one out front. They
+// REVEAL in sequence (small -> big), then pulse + slowly rotate. Pink/magenta
+// glow, additive. Migrate to a preset later.
+// ---------------------------------------------------------------------------
+static int   s_ps_active=0, s_ps_life=0;
+static float s_ps_ox,s_ps_oy,s_ps_oz, s_ps_fx,s_ps_fy,s_ps_fz, s_ps_ax,s_ps_ay,s_ps_az, s_ps_bx,s_ps_by,s_ps_bz;
+#define PS_MAXLIFE 110
+static void afn_psychic_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f);
+    s_ps_fx=sinf(yr); s_ps_fy=0.0f; s_ps_fz=cosf(yr);
+    s_ps_ax=cosf(yr); s_ps_ay=0.0f; s_ps_az=-sinf(yr);       // ring-plane basis (perp to forward)
+    s_ps_bx=0.0f;     s_ps_by=1.0f; s_ps_bz=0.0f;
+    s_ps_ox=px+s_ps_fx*4.0f; s_ps_oy=py+7.0f; s_ps_oz=pz+s_ps_fz*4.0f;
+    s_ps_life=PS_MAXLIFE; s_ps_active=1;
+}
+static void afn_psychic_step(void){ if(s_ps_active && !afn_paused){ if(--s_ps_life<=0) s_ps_active=0; } }
+static void afn_psychic_render(const float* view){
+    if(!s_ps_active) return;
+    static int frame=0; frame++;
+    float ox=s_ps_ox,oy=s_ps_oy,oz=s_ps_oz;
+    float Fx=s_ps_fx,Fy=s_ps_fy,Fz=s_ps_fz, Ax=s_ps_ax,Ay=s_ps_ay,Az=s_ps_az, Bx=s_ps_bx,By=s_ps_by,Bz=s_ps_bz;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive psychic glow
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int NR=6; float spacing=5.5f, r0=1.6f, rGrow=2.3f;
+    float elapsed=(float)(PS_MAXLIFE - s_ps_life);
+    float fade=(s_ps_life<16)?(float)s_ps_life/16.0f:1.0f;
+    for(int i=0;i<NR;i++){
+        float appear=(float)i*5.0f; float age=elapsed-appear; if(age<0.0f)continue;   // reveal small -> big
+        float ai=(age<8.0f)?age/8.0f:1.0f;
+        float d=(float)i*spacing, pulse=1.0f+0.07f*sinf((float)frame*0.16f+(float)i*0.8f);
+        float r=(r0+(float)i*rGrow)*pulse;
+        float sp=(float)frame*0.03f+(float)i*0.5f, cs=cosf(sp), ss=sinf(sp);          // slow swirl per ring
+        float RAx=Ax*cs+Bx*ss, RAy=Ay*cs+By*ss, RAz=Az*cs+Bz*ss;
+        float RBx=-Ax*ss+Bx*cs, RBy=-Ay*ss+By*cs, RBz=-Az*ss+Bz*cs;
+        float cx=ox+Fx*d, cy=oy+Fy*d, cz=oz+Fz*d, A2=fade*ai;
+        mm_ring(cx,cy,cz, RAx,RAy,RAz, RBx,RBy,RBz, r,r, r*0.14f, MM_COL(205,70,225,(int)(150*A2)));            // outer glow
+        mm_ring(cx,cy,cz, RAx,RAy,RAz, RBx,RBy,RBz, r*0.93f,r*0.93f, r*0.05f, MM_COL(255,180,255,(int)(220*A2))); // bright edge
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Surf — HARDCODED prototype. A wide translucent WAVE FRONT (perpendicular to the
+// player's facing) that rises and SWEEPS forward across the arena: a blue water
+// body with lower trailing rows (the wake), a white foam CREST on top, and SPRAY
+// droplets flying off the crest. Alpha-blended (see-through water). Migrate later.
+// ---------------------------------------------------------------------------
+static int   s_su_active=0, s_su_life=0;
+static float s_su_ox,s_su_oy,s_su_oz, s_su_fx,s_su_fy,s_su_fz, s_su_ax,s_su_ay,s_su_az, s_su_yaw;
+#define SU_MAXLIFE 120
+// Where along the wave the front + the ride sit at progress t (shared by render + the ride).
+static float afn_surf_front(float t){ float ease=t*t*(3.0f-2.0f*t); return 6.0f+ease*40.0f; }
+static void afn_surf_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f);
+    s_su_fx=sinf(yr); s_su_fy=0.0f; s_su_fz=cosf(yr);       // sweep direction
+    s_su_ax=cosf(yr); s_su_ay=0.0f; s_su_az=-sinf(yr);      // width (right)
+    s_su_ox=px; s_su_oy=py+0.4f; s_su_oz=pz; s_su_yaw=yaw;  // ground at the player
+    s_su_life=SU_MAXLIFE; s_su_active=1;
+}
+static void afn_surf_step(void){ if(s_su_active && !afn_paused){ if(--s_su_life<=0) s_su_active=0; } }
+// Water surface colour: deep blue at the base rising to cyan, whitening to foam near the crest.
+static unsigned su_water_col(float hn, float zr, float ef){
+    if(hn<0.0f)hn=0.0f; if(hn>1.0f)hn=1.0f;
+    int r=(int)(30.0f+120.0f*hn), g=(int)(95.0f+120.0f*hn), b=(int)(180.0f+75.0f*hn);   // deep -> cyan by height
+    float f=(zr>0.80f)?(zr-0.80f)/0.20f:0.0f;                                            // foam whitens the crest
+    r+=(int)((255-r)*f); g+=(int)((255-g)*f); b+=(int)((255-b)*f);
+    int a=(int)((150.0f+70.0f*zr+55.0f*f)*ef); if(a>255)a=255; if(a<0)a=0;               // more opaque toward the front
+    return MM_COL(r,g,b,a);
+}
+static void afn_surf_render(const float* view){
+    if(!s_su_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    static int frame=0; frame++;
+    float ox=s_su_ox,oy=s_su_oy,oz=s_su_oz;
+    float Fx=s_su_fx,Fy=s_su_fy,Fz=s_su_fz, Ax=s_su_ax,Ay=s_su_ay,Az=s_su_az;
+    float t=(float)(SU_MAXLIFE - s_su_life)/(float)SU_MAXLIFE;
+    float fd=afn_surf_front(t);                            // wave front advances forward (shared with the ride)
+    float ef=(s_su_life<24)?(float)s_su_life/24.0f:1.0f;   // fade out at the end
+    float riseIn=(t<0.15f)?t/0.15f:1.0f;                   // rise up at the start
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // translucent water
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int NX=16, NZ=10; float halfW=24.0f, crestH=8.5f*riseIn, waveDepth=20.0f;
+    float backD=fd-waveDepth; if(backD<0.0f)backD=0.0f; float span=fd-backD; if(span<0.1f)span=0.1f;
+    float invCH=1.0f/(crestH>0.2f?crestH:0.2f);
+    // WAVE SURFACE: a rippled triangle-mesh sheet rising from the flat back up to the crest at the
+    // front. Per-vertex colour gradient (deep blue -> cyan -> white foam) so it reads as water.
+    for(int j=0;j<NZ-1;j++){ int n=0;
+        for(int i=0;i<NX;i++){ float x=(-1.0f+2.0f*(float)i/(float)(NX-1))*halfW;
+            for(int jj=0;jj<2;jj++){ float zr=(float)(j+jj)/(float)(NZ-1); float z=backD+zr*span;
+                float rip=sinf(x*0.35f+(float)frame*0.14f)*0.55f + sinf(z*0.4f-(float)frame*0.18f)*0.55f;
+                float h=crestH*powf(zr,1.4f)+rip*zr; float hn=h*invCH;
+                MMV(n, ox+Ax*x+Fx*z, oy+h, oz+Az*x+Fz*z, su_water_col(hn,zr,ef)); n++; } }
+        mm_flush(n, GL_TRIANGLE_STRIP);
+    }
+    // soft foam crest + spray riding the leading edge (z = fd)
+    for(int i=0;i<NX;i++){ float x=(-1.0f+2.0f*(float)i/(float)(NX-1))*halfW;
+        float cx=ox+Fx*fd+Ax*x, cz=oz+Fz*fd+Az*x, cy=oy+crestH+sinf((float)frame*0.15f+x)*0.6f;
+        mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 3.0f,2.0f, MM_COL(255,255,255,(int)(150*ef)), MM_COL(210,235,255,0));   // soft foam
+        for(int d=0;d<2;d++){ float dph=fmodf((float)frame*0.06f+(float)i*0.3f+(float)d*0.4f,1.0f);
+            float dy=cy+dph*6.5f-dph*dph*9.0f; float dx=cx+Ax*((float)d-0.5f)*1.6f, dz=cz+Az*((float)d-0.5f)*1.6f;
+            mm_glow(dx,dy,dz, Rx,Ry,Rz, Ux,Uy,Uz, 0.7f,0.7f, MM_COL(230,245,255,(int)(160*(1.0f-dph)*ef)), MM_COL(210,235,255,0)); } }
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
@@ -3039,6 +3351,16 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
         afn_firespin_fire();                       // Fire Spin vortex on the player (follows live pos)
     } else if (L->kind == 7) {
         afn_bubblebeam_fire(px, py, pz, yawDeg);   // Bubble Beam forward stream
+    } else if (L->kind == 8) {
+        afn_icebeam_fire(px, py, pz, yawDeg);      // Ice Beam (3-strand diamond helix)
+    } else if (L->kind == 9) {
+        afn_sludge_fire(px, py, pz, yawDeg);       // Sludge Bomb (arc lob + floor puddle)
+    } else if (L->kind == 10) {
+        afn_psybeam_fire(px, py, pz, yawDeg);      // Psybeam (rainbow zigzag zap)
+    } else if (L->kind == 11) {
+        afn_psychic_fire(px, py, pz, yawDeg);      // Psychic (funnel of 6 rings)
+    } else if (L->kind == 12) {
+        afn_surf_fire(px, py, pz, yawDeg);         // Surf (wave sweeps forward + the player rides it)
     } else {
         // Lightning bundle — all params are WORLD units straight from the layer (the editor's
         // 3D sim authors in the same units, so it mirrors this exactly). No px scaling.
@@ -5015,6 +5337,7 @@ int main(void)
             s_ew_inPrev = inside;
         }
         if (afn_player_stuck > 0) { afn_input_fwd = 0; afn_input_right = 0; afn_player_stuck--; }
+        if (s_su_active) { afn_input_fwd = 0; afn_input_right = 0; }   // Surf: the wave carries the player (no walk)
         if (afn_stick_8way && (afn_input_fwd || afn_input_right)) {
             float m = sqrtf((float)afn_input_fwd*afn_input_fwd + (float)afn_input_right*afn_input_right);
             float a = atan2f((float)afn_input_right, (float)afn_input_fwd);
@@ -5538,6 +5861,16 @@ int main(void)
                 s_floorN[1] += (1.0f-s_floorN[1])*0.1f;
                 s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
             }
+        }
+        // SURF RIDE: while a wave is sweeping, the player rides just behind its crest — carried
+        // forward with the front + lifted onto the water (overrides gravity/floor for the ride).
+        if (s_su_active) {
+            float st=(float)(SU_MAXLIFE - s_su_life)/(float)SU_MAXLIFE;
+            float rideD=afn_surf_front(st) - 3.0f;                                   // sit just behind the crest
+            playerX = s_su_ox + s_su_fx*rideD; playerZ = s_su_oz + s_su_fz*rideD;
+            float riseIn=(st<0.15f)?st/0.15f:1.0f, fallOut=(st>0.85f)?(1.0f-st)/0.15f:1.0f;
+            playerY = s_su_oy + 5.0f*riseIn*fallOut;                                 // ride on the wave, settle at the end
+            playerVY = 0.0f; grounded = 1; playerYaw = s_su_yaw;                     // face the sweep, no gravity
         }
         if (afn_land_timer > 0) afn_land_timer--;   // bleed the land-anim window (Is Landing gate)
 
@@ -6220,10 +6553,22 @@ int main(void)
         // Bubble Beam is node-driven now (Play Effect -> kind=7 layer -> afn_bubblebeam_fire).
         afn_bubblebeam_render(view);
         afn_bubblebeam_step();
-        // HARDCODED TEST: tap Select to fire an Ice Beam (spiraling helix of ice diamonds).
-        if (afn_keys_pressed & KEY_SELECT) afn_icebeam_fire(playerX, playerY, playerZ, playerYaw);
+        // Ice Beam is node-driven now (Play Effect -> kind=8 layer -> afn_icebeam_fire).
         afn_icebeam_render(view);
         afn_icebeam_step();
+        // Sludge Bomb is node-driven now (Play Effect -> kind=9 layer -> afn_sludge_fire).
+        afn_sludge_render(view);
+        afn_sludge_step();
+        // Psybeam is node-driven now (Play Effect -> kind=10 layer -> afn_psybeam_fire).
+        afn_psybeam_render(view);
+        afn_psybeam_step();
+        // Psychic is node-driven now (Play Effect -> kind=11 layer -> afn_psychic_fire).
+        afn_psychic_render(view);
+        afn_psychic_step();
+        // Surf is node-driven now (Play Effect -> kind=12 layer -> afn_surf_fire); the ride override
+        // in the movement block keys off s_su_active, so it carries the player either way.
+        afn_surf_render(view);
+        afn_surf_step();
 
         }   // end 3D world (skipped in 2D menu mode)
 
