@@ -411,7 +411,7 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             f << "typedef struct { unsigned char kind, surge, travel; short pCount, bSegs, bBounces, bTravelBounces, splineStart, splineCount;"
                  " float pSpeed,pSpread,pLife,pGrav,pSize, bWidth,bBow,bJitter,bDecay,bPulse,"
                  " bTaperS,bTaperE,bLifeIn,bLifeOut,bFalloffS,bFalloffE, bTravelLife, bTravelPersist, bTravelFade, bArcLen, orbSize, "
-                 " tCloudH,tAim,tCharge,tSpread,tCloudSize,tReticle; "
+                 " tCloudH,tAim,tCharge,tSpread,tCloudSize,tReticle,tCamPitch,tCamSmooth,tAimSpeed,tAimOrbit; "
                  " short tPuffs; unsigned char filaments; unsigned colr,colg,colb, tcloudr,tcloudg,tcloudb; } AfnFxLayer;\n";
             f << "typedef struct { short layerStart, layerCount; } AfnFxInstance;\n";
             f << "static const AfnFxLayer afn_fx_layers[" << (nlay>0?nlay:1) << "] = {\n";
@@ -420,7 +420,7 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
                   << Flt(Lx.pSpeed) << "," << Flt(Lx.pSpread) << "," << Flt(Lx.pLife) << "," << Flt(Lx.pGrav) << "," << Flt(Lx.pSize) << ", "
                   << Flt(Lx.bWidth) << "," << Flt(Lx.bBow) << "," << Flt(Lx.bJitter) << "," << Flt(Lx.bDecay) << "," << Flt(Lx.bPulse) << ", "
                   << Flt(Lx.bTaperS) << "," << Flt(Lx.bTaperE) << "," << Flt(Lx.bLifeIn) << "," << Flt(Lx.bLifeOut) << "," << Flt(Lx.bFalloffS) << "," << Flt(Lx.bFalloffE) << ", " << Flt(Lx.bTravelLife) << "," << Flt(Lx.bTravelPersist) << "," << Flt(Lx.bTravelFade) << "," << Flt(Lx.bArcLen) << "," << Flt(Lx.bOrbSize) << ", "
-                  << Flt(Lx.tCloudH) << "," << Flt(Lx.tAim) << "," << Flt(Lx.tCharge) << "," << Flt(Lx.tSpread) << "," << Flt(Lx.tCloudSize) << "," << Flt(Lx.tReticle) << ", "
+                  << Flt(Lx.tCloudH) << "," << Flt(Lx.tAim) << "," << Flt(Lx.tCharge) << "," << Flt(Lx.tSpread) << "," << Flt(Lx.tCloudSize) << "," << Flt(Lx.tReticle) << "," << Flt(Lx.tCamPitch) << "," << Flt(Lx.tCamSmooth) << "," << Flt(Lx.tAimSpeed) << "," << Flt(Lx.tAimOrbit) << ", "
                   << (int)Lx.tPuffs << ", " << (int)Lx.bFilaments << ", " << (int)(Lx.bColR*255.0f) << "," << (int)(Lx.bColG*255.0f) << "," << (int)(Lx.bColB*255.0f) << ", "
                   << (int)(Lx.tCloudR*255.0f) << "," << (int)(Lx.tCloudG*255.0f) << "," << (int)(Lx.tCloudB*255.0f) << " },\n";
                 run += (int)Lx.spline.size(); } }

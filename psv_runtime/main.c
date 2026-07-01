@@ -1657,7 +1657,8 @@ enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT
        // each stick independently (left stick != d-pad).
        KEY_LSTICK_UP=4096,    KEY_LSTICK_DOWN=8192,    KEY_LSTICK_LEFT=16384,   KEY_LSTICK_RIGHT=32768,
        KEY_RSTICK_UP=65536,   KEY_RSTICK_DOWN=131072,  KEY_RSTICK_LEFT=262144,  KEY_RSTICK_RIGHT=524288,
-       KEY_L3=1048576,        KEY_R3=2097152 };   // stick clicks (external/PSTV controller only)
+       KEY_L3=1048576,        KEY_R3=2097152,      // stick clicks (rear-touch / external pad)
+       KEY_L2=4194304,        KEY_R2=8388608 };    // rear touch panel (extended ctrl buffer)
 unsigned afn_keys_held=0, afn_keys_pressed=0, afn_keys_released=0;
 unsigned afn_pause_key = 64;   // KEY_START default; the Toggle Pause node captures the key that paused (so the resume key auto-matches whatever On Key Pressed drives it — Select, Start, etc.)
 // Per-direction analog trip thresholds on the 0..127 axis range, ordered
@@ -1700,9 +1701,13 @@ static void input_update(const SceCtrlData* pad) {
     if (b & SCE_CTRL_CIRCLE)   k|=KEY_B;
     if (b & SCE_CTRL_SQUARE)   k|=KEY_X;
     if (b & SCE_CTRL_TRIANGLE) k|=KEY_Y;
-    if (b & SCE_CTRL_LTRIGGER) k|=KEY_L;
-    if (b & SCE_CTRL_RTRIGGER) k|=KEY_R;
-    if (b & SCE_CTRL_L3)       k|=KEY_L3;   // stick clicks — external/PSTV controller
+    // Extended (Ext2) buffer: the physical shoulders are L1/R1 (SCE_CTRL_LTRIGGER is the L2
+    // bit, which here is the REAR TOUCH — not the shoulder). Map the shoulders to L1/R1.
+    if (b & SCE_CTRL_L1)       k|=KEY_L;    // physical L1 shoulder
+    if (b & SCE_CTRL_R1)       k|=KEY_R;    // physical R1 shoulder
+    if (b & SCE_CTRL_L2)       k|=KEY_L2;   // rear touch panel (top-left)
+    if (b & SCE_CTRL_R2)       k|=KEY_R2;   // rear touch panel (top-right)
+    if (b & SCE_CTRL_L3)       k|=KEY_L3;   // rear touch panel (bottom) / external pad
     if (b & SCE_CTRL_R3)       k|=KEY_R3;
     if (b & SCE_CTRL_START)    k|=KEY_START;
     if (b & SCE_CTRL_SELECT)   k|=KEY_SELECT;
@@ -2145,6 +2150,162 @@ static void afn_particles_render(const float* view) {
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
+// ---------------------------------------------------------------------------
+// Meteor Mash — HARDCODED prototype (fired on Select). A cast-in-place burst of
+// additive, texture-free billboards that glow on their own:
+//   * CIRCLE STREAK : big spinning rings that expand over the life
+//   * OVALS         : blue swirl loops orbiting the centre, each tilted + spinning
+//   * STARS         : yellow spinning stars flung outward, each with a GLOW halo
+//                     and a comet GLOW TRAIL streaming back toward the centre
+//   * IMPACT FLASH  : a bright white core disc that pops + fades at the start
+// Camera-facing (uses the view matrix's right/up like afn_particles_render).
+// Migrate to a data-driven Effects layer + node once the look is locked.
+// ---------------------------------------------------------------------------
+#define MM_LIFE 56
+#define MM_COL(r,g,b,a) ((unsigned)((r)&0xFF) | (((unsigned)(g)&0xFF)<<8) | (((unsigned)(b)&0xFF)<<16) | (((unsigned)(a)&0xFF)<<24))
+static int   s_mm_timer = 0;
+static float s_mm_ox, s_mm_oy, s_mm_oz;         // launch point (muzzle) in front of the player
+static float s_mm_fx, s_mm_fy, s_mm_fz;         // forward (shot travels along this)
+static float s_mm_ax, s_mm_ay, s_mm_az;         // perp basis A (right)  — spans the tube cross-section
+static float s_mm_bx, s_mm_by, s_mm_bz;         // perp basis B (up)     — with A, the plane perp to forward
+static AfnVertex s_mmVB[132];
+#define MMV(I,X,Y,Z,C) do{ s_mmVB[I].u=0; s_mmVB[I].v=0; s_mmVB[I].color=(C); s_mmVB[I].x=(X); s_mmVB[I].y=(Y); s_mmVB[I].z=(Z);}while(0)
+static void mm_flush(int n, GLenum mode) {
+    AfnVertex* v = s_mmVB;
+    glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &v->u);
+    glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+    glVertexPointer (3, GL_FLOAT,        sizeof(AfnVertex), &v->x);
+    glDrawArrays(mode, 0, n);
+}
+// Oval RING (triangle strip between inner/outer edge) in the world plane spanned
+// by unit dirs A (major) and B (minor). rx/ry = radii, thick = ring wall.
+static void mm_ring(float cx,float cy,float cz, float Ax,float Ay,float Az, float Bx,float By,float Bz,
+                    float rx,float ry,float thick, unsigned col) {
+    int K=30, n=0;
+    for (int j=0;j<=K;j++){ float a=(float)j/(float)K*6.2831853f, ca=cosf(a), sa=sinf(a);
+        float ox=Ax*(rx*ca)+Bx*(ry*sa), oy=Ay*(rx*ca)+By*(ry*sa), oz=Az*(rx*ca)+Bz*(ry*sa);
+        float ix=Ax*((rx-thick)*ca)+Bx*((ry-thick)*sa), iy=Ay*((rx-thick)*ca)+By*((ry-thick)*sa), iz=Az*((rx-thick)*ca)+Bz*((ry-thick)*sa);
+        MMV(n,cx+ox,cy+oy,cz+oz,col); n++; MMV(n,cx+ix,cy+iy,cz+iz,col); n++; }
+    mm_flush(n, GL_TRIANGLE_STRIP);
+}
+// Filled 5-point STAR (triangle fan), camera-facing in the R/U plane.
+static void mm_star(float cx,float cy,float cz, float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
+                    float rad, float rot, unsigned col) {
+    int P=5, n=0; MMV(n,cx,cy,cz,col); n++;
+    for (int j=0;j<=P*2;j++){ float a=rot+(float)j/(float)(P*2)*6.2831853f; float r=(j&1)?rad*0.40f:rad;
+        float ca=cosf(a), sa=sinf(a);
+        MMV(n, cx+(Rx*ca+Ux*sa)*r, cy+(Ry*ca+Uy*sa)*r, cz+(Rz*ca+Uz*sa)*r, col); n++; }
+    mm_flush(n, GL_TRIANGLE_FAN);
+}
+// Filled DISC (triangle fan), camera-facing — glow halo / impact flash core.
+// Filled OVAL (triangle fan) in the plane spanned by unit dirs A (major) / B (minor).
+static void mm_fill_oval(float cx,float cy,float cz, float Ax,float Ay,float Az, float Bx,float By,float Bz,
+                         float rx,float ry, unsigned col) {
+    int K=18, n=0; MMV(n,cx,cy,cz,col); n++;
+    for (int j=0;j<=K;j++){ float a=(float)j/(float)K*6.2831853f, ca=cosf(a), sa=sinf(a);
+        MMV(n, cx+Ax*(rx*ca)+Bx*(ry*sa), cy+Ay*(rx*ca)+By*(ry*sa), cz+Az*(rx*ca)+Bz*(ry*sa), col); n++; }
+    mm_flush(n, GL_TRIANGLE_FAN);
+}
+// Soft GLOW (triangle fan) — bright colCtr at the centre fading to colRim (alpha 0) at the
+// rim, so it's a soft radial falloff instead of a hard-edged flat disc. A/B = plane dirs.
+static void mm_glow(float cx,float cy,float cz, float Ax,float Ay,float Az, float Bx,float By,float Bz,
+                    float rx,float ry, unsigned ctr, unsigned rim) {
+    int K=20, n=0; MMV(n,cx,cy,cz,ctr); n++;
+    for (int j=0;j<=K;j++){ float a=(float)j/(float)K*6.2831853f, ca=cosf(a), sa=sinf(a);
+        MMV(n, cx+Ax*(rx*ca)+Bx*(ry*sa), cy+Ay*(rx*ca)+By*(ry*sa), cz+Az*(rx*ca)+Bz*(ry*sa), rim); n++; }
+    mm_flush(n, GL_TRIANGLE_FAN);
+}
+// Comet GLOW TRAIL: a SOFT camera-facing streak from head backward along -dir. A bright
+// centre spine (colHead -> colTail along the length) fades to transparent EDGES across the
+// width, so it glows softly both ways instead of being a hard-edged ribbon.
+static void mm_trail(float hx,float hy,float hz, float dux,float duy,float duz,
+                     float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
+                     float len, float wHead, unsigned colHead, unsigned colTail) {
+    float dr = dux*Rx+duy*Ry+duz*Rz, dv = dux*Ux+duy*Uy+duz*Uz;   // outward dir in screen plane
+    float m = sqrtf(dr*dr+dv*dv); if (m<0.001f) m=0.001f; dr/=m; dv/=m;
+    float alx=Rx*dr+Ux*dv, aly=Ry*dr+Uy*dv, alz=Rz*dr+Uz*dv;      // world "along" (screen-projected)
+    float pex=Rx*(-dv)+Ux*dr, pey=Ry*(-dv)+Uy*dr, pez=Rz*(-dv)+Uz*dr;  // world "perp"
+    float tx=hx-alx*len, ty=hy-aly*len, tz=hz-alz*len;            // tail streams back toward centre
+    float hw=wHead*0.5f, tw=wHead*0.12f;
+    unsigned edgeH = colHead & 0x00FFFFFFu, edgeT = colTail & 0x00FFFFFFu;   // same rgb, alpha 0
+    // left half (edge -> centre spine), then right half — soft falloff across the width.
+    MMV(0, hx+pex*hw, hy+pey*hw, hz+pez*hw, edgeH); MMV(1, hx,hy,hz, colHead);
+    MMV(2, tx+pex*tw, ty+pey*tw, tz+pez*tw, edgeT); MMV(3, tx,ty,tz, colTail);
+    mm_flush(4, GL_TRIANGLE_STRIP);
+    MMV(0, hx-pex*hw, hy-pey*hw, hz-pez*hw, edgeH); MMV(1, hx,hy,hz, colHead);
+    MMV(2, tx-pex*tw, ty-pey*tw, tz-pez*tw, edgeT); MMV(3, tx,ty,tz, colTail);
+    mm_flush(4, GL_TRIANGLE_STRIP);
+}
+static void afn_meteor_fire(float px, float py, float pz, float yaw) {
+    float yr = yaw * (3.14159265f/180.0f);
+    s_mm_fx = sinf(yr); s_mm_fy = 0.0f; s_mm_fz = cosf(yr);        // forward (level)
+    s_mm_ax = cosf(yr); s_mm_ay = 0.0f; s_mm_az = -sinf(yr);       // right
+    s_mm_bx = 0.0f;     s_mm_by = 1.0f; s_mm_bz = 0.0f;            // up
+    s_mm_ox = px + s_mm_fx*4.0f; s_mm_oy = py + 8.0f; s_mm_oz = pz + s_mm_fz*4.0f;   // muzzle just in front, chest height
+    s_mm_timer = MM_LIFE;
+}
+static void afn_meteor_step(void) { if (s_mm_timer > 0 && !afn_paused) s_mm_timer--; }
+static void afn_meteor_render(const float* view) {
+    if (s_mm_timer <= 0) return;
+    float prog = 1.0f - (float)s_mm_timer/(float)MM_LIFE;   // 0..1 over life
+    float t    = (float)(MM_LIFE - s_mm_timer);             // frames elapsed (animation clock)
+    float fadeIn  = prog < 0.10f ? prog/0.10f : 1.0f;
+    float fadeOut = s_mm_timer < 12 ? (float)s_mm_timer/12.0f : 1.0f;
+    float fade = fadeIn * fadeOut;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];   // camera right / up (world)
+    float Fx=s_mm_fx,Fy=s_mm_fy,Fz=s_mm_fz;                                       // shot forward
+    float Ax=s_mm_ax,Ay=s_mm_ay,Az=s_mm_az, Bx=s_mm_bx,By=s_mm_by,Bz=s_mm_bz;     // tube cross-section basis
+    float ox=s_mm_ox, oy=s_mm_oy, oz=s_mm_oz;                                     // launch point
+    float travel = prog * 34.0f;                                                 // distance flown
+    float Px=ox+Fx*travel, Py=oy+Fy*travel, Pz=oz+Fz*travel;                      // star (projectile) position
+    // camera-facing streak basis: forward projected into the screen plane (elongates the ovals
+    // along the direction of travel so they read as motion bullets, always facing the camera).
+    float fr=Fx*Rx+Fy*Ry+Fz*Rz, fu=Fx*Ux+Fy*Uy+Fz*Uz, fm=sqrtf(fr*fr+fu*fu);
+    if (fm<0.05f){ fr=1.0f; fu=0.0f; fm=1.0f; } fr/=fm; fu/=fm;
+    float MJx=Rx*fr+Ux*fu, MJy=Ry*fr+Uy*fu, MJz=Rz*fr+Uz*fu;                      // screen "along travel"
+    float MNx=Rx*(-fu)+Ux*fr, MNy=Ry*(-fu)+Uy*fr, MNz=Rz*(-fu)+Uz*fr;            // screen "across"
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive glow
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    // SUMMON RINGS: two rings at the launch point (facing down the shot), spinning; they
+    // shrink + fade as the star leaves — the star is "summoned" out of them.
+    for (int s=0;s<2;s++){ float sp=t*0.22f+(float)s*1.6f, cs=cosf(sp), ss=sinf(sp);
+        float RAx=Ax*cs+Bx*ss, RAy=Ay*cs+By*ss, RAz=Az*cs+Bz*ss;
+        float RBx=-Ax*ss+Bx*cs, RBy=-Ay*ss+By*cs, RBz=-Az*ss+Bz*cs;
+        float rad=(5.5f+(float)s*2.2f)*(1.0f-prog*0.55f); if(rad<0.4f)rad=0.4f;
+        int a=(int)(160*fade*(1.0f-prog*0.7f)); if(a<0)a=0;
+        mm_ring(ox,oy,oz, RAx,RAy,RAz, RBx,RBy,RBz, rad, rad, rad*0.16f, MM_COL(120,210,255,a)); }
+
+    // OVALS: a FIXED circular formation of small SOLID glowing "motion bullets" flying alongside
+    // the star (3D ring around the shot axis, camera-facing forward-streaks — no spin). Each one
+    // gets its own comet trail + glow halo, like a mini star.
+    int NOV=8;
+    for (int i=0;i<NOV;i++){ float base=(float)i*(6.2831853f/(float)NOV), ca=cosf(base), sa=sinf(base);
+        float rdx=Ax*ca+Bx*sa, rdy=Ay*ca+By*sa, rdz=Az*ca+Bz*sa;   // world radial (ring placement)
+        float R=3.4f; float pcx=Px+rdx*R, pcy=Py+rdy*R, pcz=Pz+rdz*R;
+        int a=(int)(220*fade);
+        mm_trail(pcx,pcy,pcz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, 6.0f, 1.6f, MM_COL(150,205,255,(int)(a*0.55f)), MM_COL(110,180,255,0));  // trail
+        mm_glow(pcx,pcy,pcz, MJx,MJy,MJz, MNx,MNy,MNz, 3.2f,1.4f, MM_COL(120,195,255,(int)(a*0.45f)), MM_COL(120,195,255,0));   // soft glow halo
+        mm_fill_oval(pcx,pcy,pcz, MJx,MJy,MJz, MNx,MNy,MNz, 1.4f,0.55f, MM_COL(215,238,255,a)); }             // small solid core
+
+    // STAR: single projectile at the head — comet GLOW TRAIL back along -forward, GLOW halo, star.
+    { float srad=2.6f*(1.0f-prog*0.20f), rot=t*0.18f; int a=(int)(255*fade);
+        mm_trail(Px,Py,Pz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, 12.0f, srad*1.5f, MM_COL(255,225,110,(int)(a*0.8f)), MM_COL(255,200,60,0));
+        mm_glow(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad*3.0f,srad*3.0f, MM_COL(255,220,80,(int)(a*0.5f)), MM_COL(255,210,70,0));   // soft glow halo
+        mm_star(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad, rot, MM_COL(255,225,90,a));
+        mm_star(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad*0.5f, rot, MM_COL(255,255,225,a)); }         // white core
+
+    // IMPACT FLASH: bright core disc at the launch point, fast expand + fade at the start.
+    if (prog < 0.35f){ float f=1.0f-prog/0.35f; float rad=4.0f+(1.0f-f)*9.0f;
+        mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, rad,rad,           MM_COL(200,235,255,(int)(170*f)), MM_COL(170,215,255,0));
+        mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, rad*0.5f,rad*0.5f, MM_COL(255,255,255,(int)(230*f)), MM_COL(255,255,255,0)); }
+
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
 // Beam pool: count each bolt's life down; expire at 0.
 static void afn_beam_update(void) {
     if (afn_paused) return;
@@ -2403,6 +2564,9 @@ float    afn_thunder_strike_w     = 0.8f;    // strike bolt width
 float    afn_thunder_strike_jit   = 2.4f;    // strike crackle
 int      afn_thunder_strike_fil   = 6;       // strike filaments
 unsigned afn_thunder_strike_col   = 0xFFFFD0A0u; // strike bolt colour
+int      afn_thunder_cam_pitch    = 40;      // cinematic camera UP-tilt while charging (degrees; 0 = none)
+float    afn_thunder_cam_smooth   = 0.06f;   // ease-in rate of that tilt (lower = gentler)
+int      afn_thunder_charging     = 0;       // 1 while charging — freezes player movement + the lock-pitch pull
 static int   s_thCharging = 0, s_thCharge = 0, s_thStrike = 0;
 static float s_thRetX = 0.0f, s_thRetZ = 0.0f;
 int afn_thunder_charge_req = 0;   // Thunder Charge node sets this each frame it runs
@@ -2426,6 +2590,14 @@ static void thunder_fan(float cx,float cy,float cz, float Rx,float Ry,float Rz,f
     glDrawArrays(GL_TRIANGLE_FAN,0,10);
 }
 
+// Stick free-aim state (declared before afn_thunder_apply, which sets the speeds from the layer).
+int   afn_aim_stick_req = 0;
+float afn_aim_speed     = 2.0f;   // reticle distance units / frame at full stick (back-and-forth)
+int   afn_aim_orbit     = 500;    // camera orbit brad / frame while L2/R2 held
+int   afn_aim_active    = 0;
+float afn_aim_dist      = 60.0f;  // reticle distance ahead of the player (left stick adjusts)
+float afn_aim_freeX = 0.0f, afn_aim_freeZ = 0.0f;
+
 #ifdef AFN_HAS_FX
 // Drive the Thunder globals from an authored Thunder (kind 2) effect layer — the editor's
 // 3D preview mirrors this exactly. Strike + reticle reuse the layer's bolt fields.
@@ -2437,8 +2609,33 @@ static void afn_thunder_apply(const AfnFxLayer* L) {
     afn_thunder_reticle_col = 0xFF000000u | ((unsigned)L->colb<<16)    | ((unsigned)L->colg<<8)    | (unsigned)L->colr;
     afn_thunder_strike_col  = afn_thunder_reticle_col;
     afn_thunder_strike_w = L->bWidth; afn_thunder_strike_jit = L->bJitter; afn_thunder_strike_fil = L->filaments;
+    afn_thunder_cam_pitch = (int)L->tCamPitch; afn_thunder_cam_smooth = L->tCamSmooth;
+    afn_aim_speed = L->tAimSpeed; afn_aim_orbit = (int)L->tAimOrbit;   // reticle slide + orbit speed (Effects panel)
 }
 #endif
+
+// Stick free-aim (node-driven; used while charging Thunder). The Aim Stick node sets the
+// request each frame it runs; the LEFT STICK slides the floor reticle around (camera-
+// relative); L2/R2 orbit. afn_thunder_step uses afn_aim_free* while active. (Globals above.)
+static void afn_aim_step(float px, float py, float pz, float yawDeg) {
+    if (!afn_aim_stick_req) { afn_aim_active = 0; return; }
+    afn_aim_stick_req = 0;
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_CAM_LOCK)
+    if (afn_cam_lock_target >= 0) { afn_aim_active = 0; return; }   // locked on: reticle snaps to target, no free-aim
+#endif
+    if (!afn_aim_active) { afn_aim_dist = afn_thunder_aim; afn_aim_active = 1; }
+    // LEFT STICK alone: forward/back slides the aim distance (back-and-forth), left/right orbits
+    // the camera (the reticle sweeps around with it). The player is frozen while charging, so the
+    // stick is free for aiming.
+    float sx = (float)(afn_stick_mag[3] - afn_stick_mag[2]) / 256.0f;   // right - left
+    float sy = (float)(afn_stick_mag[0] - afn_stick_mag[1]) / 256.0f;   // up - down
+    afn_aim_dist += sy * afn_aim_speed;
+    if (afn_aim_dist < 4.0f) afn_aim_dist = 4.0f;
+    orbit_angle -= (int)(sx * (float)afn_aim_orbit);   // stick left/right orbits (negate to flip)
+    float camAngle = (float)orbit_angle * (6.2831853f / 65536.0f);     // reticle rides the camera forward at `dist`
+    afn_aim_freeX = px + sinf(camAngle) * afn_aim_dist;
+    afn_aim_freeZ = pz + cosf(camAngle) * afn_aim_dist;
+}
 
 static void afn_thunder_step(const float* view, float px, float py, float pz, float yawDeg) {
 #ifdef AFN_HAS_FX
@@ -2446,14 +2643,19 @@ static void afn_thunder_step(const float* view, float px, float py, float pz, fl
 #endif
     // Node-driven: the Thunder Charge node sets afn_thunder_charge_req each frame it runs
     // (drive On Key Held); the Thunder Strike node sets afn_thunder_strike_req on release.
-#if 1   // dev test: Select also charges/strikes (the nodes set the same flags)
+#if 0   // dev test: Select also charges/strikes Thunder — DISABLED so Select casts Meteor Mash.
     if (afn_keys_held & KEY_SELECT) afn_thunder_charge_req = 1;
     if (afn_keys_released & KEY_SELECT) afn_thunder_strike_req = 1;
 #endif
     int charge = afn_thunder_charge_req; afn_thunder_charge_req = 0;
     int strike = afn_thunder_strike_req; afn_thunder_strike_req = 0;
     float yr = yawDeg * (3.14159265f/180.0f);
-    float retX = px + sinf(yr)*afn_thunder_aim, retZ = pz + cosf(yr)*afn_thunder_aim;  // aim ahead of facing
+    // Aim: snap dead onto the lock-on target if one is locked, else a fixed distance ahead.
+    float retX = px + sinf(yr)*afn_thunder_aim, retZ = pz + cosf(yr)*afn_thunder_aim;
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_CAM_LOCK)
+    if (afn_cam_lock_target >= 0 && afn_ai_slot >= 0) { retX = s_npcX[afn_ai_slot]; retZ = s_npcZ[afn_ai_slot]; }
+#endif
+    if (afn_aim_active) { retX = afn_aim_freeX; retZ = afn_aim_freeZ; }   // stick free-aim overrides
     if (charge) {
         if (!s_thCharging) { s_thCharging = 1; s_thCharge = 0; }
         s_thCharge++; s_thRetX = retX; s_thRetZ = retZ;
@@ -2475,6 +2677,8 @@ static void afn_thunder_step(const float* view, float px, float py, float pz, fl
     } else if (!charge) {
         s_thCharging = 0;   // released/cancelled without a strike → drop the clouds
     }
+    afn_thunder_charging = s_thCharging;   // freezes player movement + drives the LOCKED camera up-tilt
+                                           // (done in the camera block so it converges and holds cleanly)
     if (!s_thCharging && s_thStrike <= 0) return;
 
     float Rwx=view[0],Rwy=view[4],Rwz=view[8], Uwx=view[1],Uwy=view[5],Uwz=view[9];
@@ -4081,7 +4285,9 @@ int main(void)
         orbit_pitch   = (int)(atan2f(camHeight > 0.0f ? camHeight : 8.0f, camDist) * (65536.0f / 6.2831853f));
 
     SceCtrlData pad;
-    sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+    // ANALOG_WIDE + the Ext2 buffer surfaces L2/R2/L3/R3 (the base Vita maps these to the
+    // REAR TOUCH PANEL); the plain buffer never reports them. Front buttons are unchanged.
+    sceCtrlSetSamplingModeExt(SCE_CTRL_MODE_ANALOG_WIDE);
 #ifdef AFN_HAS_SPRITE_IDX
     // Sprites start visible + collidable UNLESS flagged "Hidden (effect)" — those
     // (e.g. the Focus Blast orb) stay hidden until a node shows them.
@@ -4098,7 +4304,7 @@ int main(void)
     script_start();   // OnStart + blueprint start hooks
 
     while (1) {
-        sceCtrlPeekBufferPositive(0, &pad, 1);
+        sceCtrlPeekBufferPositiveExt2(0, &pad, 1);   // Ext2 = includes L2/R2/L3/R3 (rear touch)
         // No hardcoded quit: Start is a normal node-readable key (KEY_START).
         // Exit the app via the PS/home menu. (Previously Start broke the loop,
         // so binding Start to a node closed the app — looked like a crash.)
@@ -4471,6 +4677,7 @@ int main(void)
                     float desiredP = heightP + trackP;
                     float curP = orbit_pitch * (6.2831853f / 65536.0f);
                     float diffP = desiredP - curP;
+                    if (!afn_thunder_charging)   // Thunder charge owns the pitch (see the override after the clamp)
                     orbit_pitch = orbit_pitch
                                  + (int)(diffP * (65536.0f / 6.2831853f) * 0.10f);   // ease toward
                 }
@@ -4508,6 +4715,23 @@ int main(void)
         if (orbit_pitch >  14563) orbit_pitch =  14563;
         if (orbit_pitch < -14563) orbit_pitch = -14563;
 
+        // Thunder cinematic up-tilt (LOCKED-only): the FINAL say on pitch this frame, so nothing
+        // else fights it. Eases toward the up-angle (smooth-in) then SNAPS + holds — no creep.
+        if (afn_thunder_charging && afn_thunder_cam_pitch != 0) {
+            int thLocked = 0;
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_CAM_LOCK)
+            thLocked = (afn_cam_lock_target >= 0);
+#endif
+            if (thLocked) {
+                int tgt = -(int)(afn_thunder_cam_pitch * (65536.0f/360.0f));   // negative = look up
+                float sm = afn_thunder_cam_smooth; if (sm < 0.005f) sm = 0.005f; if (sm > 1.0f) sm = 1.0f;
+                int d = tgt - orbit_pitch, step = (int)((float)d * sm);
+                if (step == 0) step = (d > 0) ? 1 : (d < 0 ? -1 : 0);   // guarantee arrival (no asymptote)
+                orbit_pitch += step;
+                if ((d > 0 && orbit_pitch > tgt) || (d < 0 && orbit_pitch < tgt)) orbit_pitch = tgt;   // arrive + hold
+            }
+        }
+
         // Camera yaw + pitch (radians) from the node/manual orbit_angle/pitch (brad).
         float camAngle = orbit_angle * (6.2831853f / 65536.0f);
         float pitch    = orbit_pitch * (6.2831853f / 65536.0f);
@@ -4518,6 +4742,9 @@ int main(void)
         // 8-Way Stick node: snap the analog move vector to the nearest 45 deg
         // octant (magnitude preserved) so movement AND the Strafe Anim clip pick
         // read a crisp 8-way direction instead of fighting analog drift.
+        // Thunder charge: the left stick aims (not move), so drop the move intent — the player
+        // stands IDLE (no walk anim / facing churn) instead of acting on the stick.
+        if (afn_thunder_charging) { afn_input_fwd = 0; afn_input_right = 0; }
         if (afn_stick_8way && (afn_input_fwd || afn_input_right)) {
             float m = sqrtf((float)afn_input_fwd*afn_input_fwd + (float)afn_input_right*afn_input_right);
             float a = atan2f((float)afn_input_right, (float)afn_input_fwd);
@@ -4568,7 +4795,7 @@ int main(void)
         // strafed. Without this the player model came up rotated on restart. afn_cam_reinit
         // is still set here (the camera-eye block clears it later this frame).
         if (afn_cam_reinit) sTankRelFace = 0.0f;
-        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen && afn_qa_phase == 0) {
+        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen && afn_qa_phase == 0 && !afn_thunder_charging) {
             float speed = afn_move_speed * 0.08f;
             float dx = mvX*speed, dz = mvZ*speed;
             float dlen = sqrtf(dx*dx + dz*dz);
@@ -4609,6 +4836,10 @@ int main(void)
             int so = ((int)lroundf(sa / 0.7853982f) + 8) & 7;
             afn_rig_clip = afn_strafe_clip[so];
         }
+        // Thunder charge: force the idle clip so a walk clip selected just before charging
+        // doesn't keep looping in place (zeroing the move intent stops RE-selection but the
+        // last-selected clip would otherwise hold and keep animating).
+        if (afn_thunder_charging) afn_rig_clip = AFN_PLAYER_DEFAULT_CLIP;
         // Tank heading owns the facing whenever camera-relative Direction
         // Facing isn't steering it. In tank drive the persisted relative
         // facing (sTankRelFace) rides on top — so after walking "down" the
@@ -5678,10 +5909,17 @@ int main(void)
 #endif
         // HARDCODED TEST: hold Select to charge the Thunder spell (rainclouds + floor reticle),
         // release to strike. Casts a vertical bolt at the reticle, drawn by afn_beam_render below.
+        afn_aim_step(playerX, playerY, playerZ, playerYaw);              // Aim Stick node (free-aim + orbit)
         afn_thunder_step(view, playerX, playerY, playerZ, playerYaw);
         afn_reticle_render(view, playerX, playerY, playerZ, playerYaw);   // Floor Reticle node
         afn_beam_resolve(playerX, playerY, playerZ, playerYaw);
         afn_beam_render(view);
+
+        // HARDCODED TEST: tap Select to cast Meteor Mash in place (ovals + circle streak +
+        // glowing stars/trails + impact flash). Migrate to an Effects layer once tuned.
+        if (afn_keys_pressed & KEY_SELECT) afn_meteor_fire(playerX, playerY, playerZ, playerYaw);
+        afn_meteor_render(view);
+        afn_meteor_step();
 
         }   // end 3D world (skipped in 2D menu mode)
 

@@ -110,8 +110,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                                           "KEY_X","KEY_Y",
                                           "KEY_LSTICK_UP","KEY_LSTICK_DOWN","KEY_LSTICK_LEFT","KEY_LSTICK_RIGHT",
                                           "KEY_RSTICK_UP","KEY_RSTICK_DOWN","KEY_RSTICK_LEFT","KEY_RSTICK_RIGHT",
-                                          "KEY_L3","KEY_R3" };
-            return (k >= 0 && k < 20) ? keys[k] : "KEY_A";
+                                          "KEY_L3","KEY_R3","KEY_L2","KEY_R2" };
+            return (k >= 0 && k < 24) ? keys[k] : "KEY_A";
         };
 
         // Recursive runtime-expression generator for the logic/flow nodes
@@ -1313,6 +1313,11 @@ void EmitNodeScriptBodies(std::ostream& f,
             case AfnScriptNodeType::ThunderStrike:
                 // Release the strike at the reticle (drive On Key Released).
                 f << "    afn_thunder_strike_req = 1;\n";
+                break;
+            case AfnScriptNodeType::AimStick:
+                // Request free-aim this frame (drive On Key Held). The slide/orbit SPEEDS come
+                // from the Thunder effect layer (Reticle speed / Reticle orbit on the Effects panel).
+                f << "    afn_aim_stick_req = 1;\n";
                 break;
             case AfnScriptNodeType::LockPlayerFunctions:
                 // Lock out player combat functions for this frame. The runtime masks HELD

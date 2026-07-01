@@ -202,6 +202,10 @@ struct FxLayer {
     float bColR=0.376f,bColG=0.690f,bColB=1.0f;  // bolt colour (light blue)
     // thunder (kind 2) — defaults = the runtime hardcode
     float tCloudH=56,tAim=60,tCharge=90,tSpread=26,tCloudSize=12,tReticle=4; int tPuffs=18;
+    float tCamPitch=40;        // cinematic camera up-tilt while charging (deg)
+    float tCamSmooth=0.06f;    // ease-in rate of the tilt (lower = gentler)
+    float tAimSpeed=2.0f;      // reticle distance slide speed (units/frame)
+    float tAimOrbit=500;       // reticle L2/R2 orbit speed (brad/frame)
     float tCloudR=0.157f,tCloudG=0.188f,tCloudB=0.282f;
     std::vector<ImVec2> spline; std::vector<float> thick;
     // transient (not serialized)
@@ -952,6 +956,7 @@ enum class VsNodeType : int {
     FloorReticle,    // action: draw a glowing aim reticle on the floor ahead of the player (per frame while it runs)
     ThunderCharge,   // action: charge the Thunder spell (clouds gather + reticle) — drive On Key Held
     ThunderStrike,   // action: release the Thunder strike at the aim — drive On Key Released
+    AimStick,        // action: left stick slides the floor reticle + auto-orbits the camera (drive On Key Held)
     COUNT
 };
 
@@ -973,7 +978,7 @@ struct VsNodeTypeDef {
 static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right", "X", "Y",
     "L-Stick Up", "L-Stick Down", "L-Stick Left", "L-Stick Right",
     "R-Stick Up", "R-Stick Down", "R-Stick Left", "R-Stick Right",
-    "L3", "R3" };
+    "L3", "R3", "L2", "R2" };
 static constexpr int kVsKeyCount = 22;   // 0-11 buttons/d-pad, 12-15 left stick, 16-19 right stick, 20-21 L3/R3
 static const char* sVsAxisNames[] = { "Left", "Right", "Up", "Down" };
 static constexpr int kVsAxisCount = 4;
@@ -1373,6 +1378,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Floor Reticle",    0xFF44AACC, 1, 1, 5, 0, {"Distance","Size x10","Red","Green","Blue"}, {}, {} },
     { "Thunder Charge",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
     { "Thunder Strike",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
+    { "Aim Stick",        0xFF44AACC, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1686,6 +1692,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::FloorReticle: desc = "Draws a glowing aim RETICLE on the floor a set distance ahead of the player's facing — a spinning ring + pulsing centre, additive. Drive it from On Update (or while a spell is charging) so it tracks the aim every frame; stop running it and the reticle disappears. Pins: Distance = how far ahead of the player it sits (world units); Size x10 = ring radius ×10 (40 = 4.0); Red / Green / Blue = colour 0-255. Great as the targeting marker for a Thunder-style strike, a teleport target, an AoE indicator, etc."; break;
     case VsNodeType::ThunderCharge: desc = "CHARGES the Thunder spell — a plane of dark rainclouds gathers overhead and a reticle tracks the aim on the floor ahead of the player, building toward a strike. Drive it from On Key Held (call it every frame the cast button is down). Stop calling it without a Thunder Strike and the clouds disperse (cancel). All look/params come from the Thunder layer in the Effects tab (cloud height, charge time, colours, aim distance, strike). Pair with Thunder Strike on release."; break;
     case VsNodeType::ThunderStrike: desc = "Releases the THUNDER STRIKE — a vertical lightning bolt slams down from the cloud to the reticle, with an impact flash + spark burst. Drive it from On Key Released (the frame the cast button is let go) after Thunder Charge. Uses the Thunder layer's bolt params (width/crackle/filaments/colour). If called without charging first, it strikes instantly at the current aim."; break;
+    case VsNodeType::AimStick: desc = "FREE-AIM the reticle with the LEFT STICK — while this runs, forward/back slides the floor reticle (the Thunder strike target) nearer/farther, and left/right orbits the camera (the reticle sweeps around with it). ONLY active when NOT locked on (locked = the reticle snaps to the target). The player is frozen while charging so the stick is free to aim. Drive it from On Key Held alongside Thunder Charge. The slide + orbit SPEEDS are set on the Thunder layer in the Effects panel (Reticle speed / Reticle orbit) — this node is just the trigger."; break;
     case VsNodeType::SpawnParticles: desc = "Emits a burst of billboard particles at the player — a pure-code sim: each particle integrates velocity + gravity per frame, fades over its life, and faces the camera. Fire it from any event: a one-shot On Key Pressed = a burst, On Update = a continuous stream (it emits Count particles every frame it runs). Pins: Sprite = graphic frame for the billboard (-1 = solid quad); Count = particles per emit; Speed x100 = initial speed in world-units/frame ×100 (150 = 1.5); Spread 0-100 = lateral cone width (0 = straight up); Life = lifetime in frames; Size x100 = start size ×100 (shrinks to 0); Gravity x1000 = downward pull ×1000 (40 = 0.04). Spawns at the player + a small height offset (spline pathing + emitter presets come from the Effects tab)."; break;
     case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
     case VsNodeType::AiDodgeClips: desc = "Sets the enemy's DODGE animation clips — the only enemy clips the AI Clips node doesn't cover. Run once from On Update (alongside AI Clips). Two sets: the standard sidestep/roll (Dodge L/R, Dodge FW/BWD = DodgeL/DodgeR/DodgeFW/DodgeBWD) used when reacting to an incoming blast, and the charge-dodge (Chg Dodge L/R = atk_spc_chg_dodge_L/_R) it plays when it sidesteps WITHOUT dropping a charge. Like AI Clips, each UNWIRED pin is name-resolved AT EXPORT to the rig's current index so a glTF re-sort can't drift them (defaults: Chg Dodge L/R = 9/10, Dodge L/R/FW/BWD = 28/29/27/26). The L/R clip the runtime picks is facing-relative (it projects the dodge move onto the enemy's actual render facing), so wire L=DodgeL and R=DodgeR straight. Wire a pin to a Skeletal Animation node to override. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
@@ -7857,12 +7864,12 @@ static bool SaveProject(const std::string& path)
     for (const auto& In : sFxInstances) {
         fprintf(f, "fxInstance=%s|%d\n", In.name, (int)In.layers.size());
         for (const auto& Lf : In.layers) {
-            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d|%g|%g|%g\n",
+            fprintf(f, "fxLayer=%s|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g\n",
                 Lf.name, Lf.kind, Lf.visible?1:0, Lf.pCount, Lf.pSpeed, Lf.pSpread, Lf.pLife, Lf.pGrav, Lf.pSize, Lf.pStream?1:0,
                 Lf.bWidth, Lf.bBow, Lf.bJitter, Lf.bDecay, Lf.bPulse, Lf.bSegs, Lf.bBounces, Lf.bSurge?1:0,
                 Lf.bTaperS, Lf.bTaperE, Lf.bLifeIn, Lf.bLifeOut, Lf.bFalloffS, Lf.bFalloffE, Lf.bTravel?1:0, Lf.bTravelBounces, Lf.bTravelLife, Lf.bTravelPersist, Lf.bTravelFade, Lf.bArcLen,
                 Lf.bFilaments, Lf.bOrbSize, Lf.bColR, Lf.bColG, Lf.bColB,
-                Lf.tCloudH, Lf.tAim, Lf.tCharge, Lf.tSpread, Lf.tCloudSize, Lf.tReticle, Lf.tPuffs, Lf.tCloudR, Lf.tCloudG, Lf.tCloudB);
+                Lf.tCloudH, Lf.tAim, Lf.tCharge, Lf.tSpread, Lf.tCloudSize, Lf.tReticle, Lf.tPuffs, Lf.tCloudR, Lf.tCloudG, Lf.tCloudB, Lf.tCamPitch, Lf.tCamSmooth, Lf.tAimSpeed, Lf.tAimOrbit);
             fprintf(f, "fxSpline=%d", (int)Lf.spline.size());
             for (size_t i = 0; i < Lf.spline.size(); i++)
                 fprintf(f, " %g,%g,%g", Lf.spline[i].x, Lf.spline[i].y, i < Lf.thick.size() ? Lf.thick[i] : 1.0f);
@@ -9068,12 +9075,12 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "fxLayerCount=", 13) == 0) { sFxInstances.clear(); sFxInst = 0; sFxActive = 0; sFxSel = -1; fxFlatLegacy = true; }  // legacy flat list
             else if (strncmp(line, "fxLayer=", 8) == 0) {
                 FxLayer Lf; int vis = 1, str = 1, surge = 0, travel = 0;
-                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d|%g|%g|%g",
+                sscanf(line + 8, "%23[^|]|%d|%d|%d|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%d|%d|%d|%g|%g|%g|%g|%g|%g|%d|%d|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g|%g|%g|%g|%d|%g|%g|%g|%g|%g|%g|%g",
                     Lf.name, &Lf.kind, &vis, &Lf.pCount, &Lf.pSpeed, &Lf.pSpread, &Lf.pLife, &Lf.pGrav, &Lf.pSize, &str,
                     &Lf.bWidth, &Lf.bBow, &Lf.bJitter, &Lf.bDecay, &Lf.bPulse, &Lf.bSegs, &Lf.bBounces, &surge,
                     &Lf.bTaperS, &Lf.bTaperE, &Lf.bLifeIn, &Lf.bLifeOut, &Lf.bFalloffS, &Lf.bFalloffE, &travel, &Lf.bTravelBounces, &Lf.bTravelLife, &Lf.bTravelPersist, &Lf.bTravelFade, &Lf.bArcLen,
                     &Lf.bFilaments, &Lf.bOrbSize, &Lf.bColR, &Lf.bColG, &Lf.bColB,
-                    &Lf.tCloudH, &Lf.tAim, &Lf.tCharge, &Lf.tSpread, &Lf.tCloudSize, &Lf.tReticle, &Lf.tPuffs, &Lf.tCloudR, &Lf.tCloudG, &Lf.tCloudB);
+                    &Lf.tCloudH, &Lf.tAim, &Lf.tCharge, &Lf.tSpread, &Lf.tCloudSize, &Lf.tReticle, &Lf.tPuffs, &Lf.tCloudR, &Lf.tCloudG, &Lf.tCloudB, &Lf.tCamPitch, &Lf.tCamSmooth, &Lf.tAimSpeed, &Lf.tAimOrbit);
                 Lf.visible = vis != 0; Lf.pStream = str != 0; Lf.bSurge = surge != 0; Lf.bTravel = travel != 0;
                 if (fxFlatLegacy || sFxInstances.empty()) {   // legacy: each layer is its own instance
                     FxInstance In; snprintf(In.name, sizeof(In.name), "%s", Lf.name); sFxInstances.push_back(In);
@@ -19324,7 +19331,7 @@ void FrameTick(float dt)
                         fe.bSurge=fl.bSurge; fe.bTaperS=fl.bTaperS; fe.bTaperE=fl.bTaperE; fe.bLifeIn=fl.bLifeIn; fe.bLifeOut=fl.bLifeOut; fe.bFalloffS=fl.bFalloffS; fe.bFalloffE=fl.bFalloffE;
                         fe.bTravel=fl.bTravel; fe.bTravelBounces=fl.bTravelBounces; fe.bTravelLife=fl.bTravelLife; fe.bTravelPersist=fl.bTravelPersist; fe.bTravelFade=fl.bTravelFade; fe.bArcLen=fl.bArcLen;
                         fe.bFilaments=fl.bFilaments; fe.bOrbSize=fl.bOrbSize; fe.bColR=fl.bColR; fe.bColG=fl.bColG; fe.bColB=fl.bColB;
-                        fe.tCloudH=fl.tCloudH; fe.tAim=fl.tAim; fe.tCharge=fl.tCharge; fe.tSpread=fl.tSpread; fe.tCloudSize=fl.tCloudSize; fe.tReticle=fl.tReticle; fe.tPuffs=fl.tPuffs;
+                        fe.tCloudH=fl.tCloudH; fe.tAim=fl.tAim; fe.tCharge=fl.tCharge; fe.tSpread=fl.tSpread; fe.tCloudSize=fl.tCloudSize; fe.tReticle=fl.tReticle; fe.tPuffs=fl.tPuffs; fe.tCamPitch=fl.tCamPitch; fe.tCamSmooth=fl.tCamSmooth; fe.tAimSpeed=fl.tAimSpeed; fe.tAimOrbit=fl.tAimOrbit;
                         fe.tCloudR=fl.tCloudR; fe.tCloudG=fl.tCloudG; fe.tCloudB=fl.tCloudB;
                         for (size_t i=0;i<fl.spline.size();i++) fe.spline.push_back({ fl.spline[i].x, fl.spline[i].y, (i<fl.thick.size()?fl.thick[i]:1.0f) });
                         ie.layers.push_back(fe);
@@ -26083,8 +26090,9 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_thunder_charge",
                         "    afn_thunder_charge_req = 1;   // request charge THIS frame (drive On Key Held)\n"
                         "    // --- Runtime (psv main.c) ---\n"
-                        "    // afn_thunder_step() reads the request: ramps s_thCharge, sets the reticle at\n"
-                        "    //   player + facing*afn_thunder_aim, and draws the dark cloud puffs + floor ring.\n"
+                        "    // afn_thunder_step() reads the request: ramps s_thCharge, sets the reticle at the\n"
+                        "    //   LOCK-ON target (snaps onto the NPC) or player + facing*afn_thunder_aim if unlocked,\n"
+                        "    //   and draws the dark cloud puffs + floor ring.\n"
                         "    //   Params come from the Thunder (kind 2) effect layer via afn_thunder_apply().\n"
                         "    //   Stop calling it (no Thunder Strike) -> s_thCharging cleared, clouds disperse.");
                     break;
@@ -26096,6 +26104,18 @@ void FrameTick(float dt)
                         "    // afn_thunder_step(): on the request, afn_beam_cast()s a straight (bow 0) jagged\n"
                         "    //   bundle from (reticle, cloud_h) down to the floor, spawns impact sparks, and\n"
                         "    //   flashes s_thStrike. Strike width/crackle/filaments/colour from the Thunder layer.");
+                    break;
+                case VsNodeType::AimStick:
+                    editorCode = "// Left stick free-aims: fwd/back = distance, left/right = orbit (when not locked)";
+                    setActionFunc(infoNode, "_aim_stick",
+                        "    afn_aim_stick_req = 1;   // request free-aim THIS frame (drive On Key Held)\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_aim_step(): if NOT locked on, the LEFT STICK fwd/back slides afn_aim_dist and\n"
+                        "    //   left/right adds to orbit_angle (afn_stick_mag[]); the reticle = player +\n"
+                        "    //   (charging also zeroes the move intent AND forces the idle clip so no walk anim)\n"
+                        "    //   camera-forward*afn_aim_dist. Speeds (afn_aim_speed/afn_aim_orbit) come from the\n"
+                        "    //   Thunder layer via afn_thunder_apply. Charging zeroes the move intent (idle).\n"
+                        "    //   Locked on -> snaps to target.");
                     break;
                 case VsNodeType::PlayCameraAnim: {
                     editorCode = "// Take over the camera + play the player's keyframed cutscene path";
@@ -31701,6 +31721,10 @@ void FrameTick(float dt)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("How far ahead of the player the reticle / strike lands.");
             if (ImGui::SliderFloat("Charge frames", &L.tCharge, 10.0f, 240.0f, "%.0f f")) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames to reach full charge before the strike can fire.");
+            if (ImGui::SliderFloat("Cam up-tilt", &L.tCamPitch, 0.0f, 80.0f, "%.0f deg")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("While charging, the camera eases UP this many degrees for a\ncinematic look at the gathering clouds. In-game it applies ONLY\nwhen LOCKED ON; the preview shows it so you can tune the angle.");
+            if (ImGui::SliderFloat("Cam smooth-in", &L.tCamSmooth, 0.01f, 0.4f, "%.2f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How gently the up-tilt eases in (fraction/frame). Lower =\nslower, smoother orbit up; higher = snappier. 0.06 default.");
             ImGui::PopItemWidth();
             ImGui::Spacing(); ImGui::TextDisabled("Clouds");
             ImGui::PushItemWidth(Scaled(110));
@@ -31713,6 +31737,10 @@ void FrameTick(float dt)
             ImGui::Spacing(); ImGui::TextDisabled("Strike & reticle");
             ImGui::PushItemWidth(Scaled(110));
             if (ImGui::SliderFloat("Reticle size", &L.tReticle, 1.0f, 16.0f, "%.1f")) sProjectDirty = true;
+            if (ImGui::SliderFloat("Reticle X speed", &L.tAimOrbit, 50.0f, 4000.0f, "%.0f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Free-aim (unlocked): HORIZONTAL speed — how fast the LEFT\nSTICK left/right sweeps the reticle around (brad/frame).\nHigher = faster. Crank this to aim sideways quickly.");
+            if (ImGui::SliderFloat("Reticle Y speed", &L.tAimSpeed, 0.2f, 16.0f, "%.1f")) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Free-aim (unlocked): DEPTH speed — how fast the LEFT STICK\nforward/back slides the reticle nearer/farther (units/frame).");
             if (ImGui::SliderFloat("Bolt width", &L.bWidth, 0.1f, 3.0f, "%.2f")) sProjectDirty = true;
             if (ImGui::SliderFloat("Bolt crackle", &L.bJitter, 0.0f, 6.0f, "%.2f")) sProjectDirty = true;
             if (ImGui::SliderInt("Bolt filaments", &L.bFilaments, 1, 12)) sProjectDirty = true;
@@ -31754,7 +31782,16 @@ void FrameTick(float dt)
             else if (Q.kind==2) { if(Q.tCloudH>maxRange)maxRange=Q.tCloudH; if(Q.tSpread*2.0f>maxRange)maxRange=Q.tSpread*2.0f; if(Q.tCloudH*0.45f>tgtY)tgtY=Q.tCloudH*0.45f; }
         }
         float dist = (maxRange*0.95f + 8.0f) / sFxScale;   // bigger scale = closer camera = bigger preview
-        float cyaw=cosf(sFxYaw), syaw=sinf(sFxYaw), cpit=cosf(sFxPitch), spit=sinf(sFxPitch);
+        // Demonstrate the Thunder cinematic cam UP-tilt: while a thunder layer is in its charge
+        // phase, ease the preview camera up toward Cam up-tilt (so the slider is tunable here).
+        static float sFxCamTilt = 0.0f;
+        { float tiltTgt = 0.0f;
+          for (auto& Q : Inst.layers) if (Q.visible && Q.kind==2) {
+              int chargeF=(int)Q.tCharge; if(chargeF<1)chargeF=1; int cyc=chargeF+16+14;
+              if ((((int)sFxClk)%cyc) < chargeF && Q.tCamPitch!=0.0f) tiltTgt = Q.tCamPitch*(3.14159265f/180.0f);
+              float sm=Q.tCamSmooth>0.005f?Q.tCamSmooth:0.005f; sFxCamTilt += (tiltTgt - sFxCamTilt)*sm; break; } }
+        float pitchEff = sFxPitch - sFxCamTilt; if (pitchEff < -1.45f) pitchEff = -1.45f;   // tilt up = look toward the clouds
+        float cyaw=cosf(sFxYaw), syaw=sinf(sFxYaw), cpit=cosf(pitchEff), spit=sinf(pitchEff);
         float odx=cpit*syaw, ody=spit, odz=cpit*cyaw;                    // unit orbit dir
         float ex=dist*odx, ey=tgtY+dist*ody, ez=dist*odz;               // eye (orbits (0,tgtY,0))
         float fwx=-odx, fwy=-ody, fwz=-odz;                             // forward (toward target)

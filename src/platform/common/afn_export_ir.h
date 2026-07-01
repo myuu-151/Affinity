@@ -188,6 +188,10 @@ struct AfnCameraExport
         float bColR=0.376f,bColG=0.690f,bColB=1.0f;
         // thunder (kind 2) params — defaults = the runtime hardcode
         float tCloudH=56,tAim=60,tCharge=90,tSpread=26,tCloudSize=12,tReticle=4; int tPuffs=18;
+        float tCamPitch=40;        // cinematic camera up-tilt while charging (deg)
+        float tCamSmooth=0.06f;    // ease-in rate of the tilt (lower = gentler)
+        float tAimSpeed=2.0f;      // reticle distance slide speed (units/frame at full stick)
+        float tAimOrbit=500;       // reticle L2/R2 orbit speed (brad/frame)
         float tCloudR=0.157f,tCloudG=0.188f,tCloudB=0.282f;
         std::vector<FxPt> spline;
     };
@@ -603,6 +607,7 @@ enum class AfnScriptNodeType : int {
     FloorReticle,    // action: draw a glowing aim reticle on the floor ahead of the player
     ThunderCharge,   // action: charge the Thunder spell (clouds + reticle)
     ThunderStrike,   // action: release the Thunder strike at the aim
+    AimStick,        // action: left stick moves the floor reticle + auto-orbits the camera
     COUNT
 };
 
