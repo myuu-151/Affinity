@@ -1175,6 +1175,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_ai_sfx_charge = " << (d0?resolveInt(d0):4) << "; afn_ai_charge_begin();\n";
                 break;
             }
+            case AfnScriptNodeType::AiOrbScale: {
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Min / Max Scale% (default 5 / 55)
+                f << "    afn_ai_orb_min = " << (d0?resolveInt(d0):5) << " * 0.01f; afn_ai_orb_max = " << (d1?resolveInt(d1):55) << " * 0.01f;\n";
+                break;
+            }
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
             case AfnScriptNodeType::AiFireBeam: {
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Charged / Tap SFX (5 / 6)

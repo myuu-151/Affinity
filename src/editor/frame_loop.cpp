@@ -957,6 +957,7 @@ enum class VsNodeType : int {
     ThunderCharge,   // action: charge the Thunder spell (clouds gather + reticle) — drive On Key Held
     ThunderStrike,   // action: release the Thunder strike at the aim — drive On Key Released
     AimStick,        // action: left stick slides the floor reticle + auto-orbits the camera (drive On Key Held)
+    AiOrbScale,      // action (enemy AI): set the enemy focus-orb charge Min/Max Scale%
     COUNT
 };
 
@@ -1379,6 +1380,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Thunder Charge",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
     { "Thunder Strike",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
     { "Aim Stick",        0xFF44AACC, 1, 1, 0, 0, {}, {}, {} },
+    { "Ai Orb Scale",     0xFFAA4422, 1, 1, 2, 0, {"Min Scale% (int)","Max Scale% (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1692,6 +1694,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::FloorReticle: desc = "Draws a glowing aim RETICLE on the floor a set distance ahead of the player's facing — a spinning ring + pulsing centre, additive. Drive it from On Update (or while a spell is charging) so it tracks the aim every frame; stop running it and the reticle disappears. Pins: Distance = how far ahead of the player it sits (world units); Size x10 = ring radius ×10 (40 = 4.0); Red / Green / Blue = colour 0-255. Great as the targeting marker for a Thunder-style strike, a teleport target, an AoE indicator, etc."; break;
     case VsNodeType::ThunderCharge: desc = "CHARGES the Thunder spell — a plane of dark rainclouds gathers overhead and a reticle tracks the aim on the floor ahead of the player, building toward a strike. Drive it from On Key Held (call it every frame the cast button is down). Stop calling it without a Thunder Strike and the clouds disperse (cancel). All look/params come from the Thunder layer in the Effects tab (cloud height, charge time, colours, aim distance, strike). Pair with Thunder Strike on release."; break;
     case VsNodeType::ThunderStrike: desc = "Releases the THUNDER STRIKE — a vertical lightning bolt slams down from the cloud to the reticle, with an impact flash + spark burst. Drive it from On Key Released (the frame the cast button is let go) after Thunder Charge. Uses the Thunder layer's bolt params (width/crackle/filaments/colour). If called without charging first, it strikes instantly at the current aim."; break;
+    case VsNodeType::AiOrbScale: desc = "Sets the ENEMY focus-orb charge scale — Min Scale%% (the seed size when the wind-up starts) and Max Scale%% (the full-charge + in-flight size), as percentages of the focus_gfx base (like the player's Charge Shot). Run it once from On Update so the enemy's charge orb grows from Min to Max over the wind-up. Defaults: Min 5, Max 55. Only affects the CHARGE shot (the tap shot keeps its own size)."; break;
     case VsNodeType::AimStick: desc = "FREE-AIM the reticle with the LEFT STICK — while this runs, forward/back slides the floor reticle (the Thunder strike target) nearer/farther, and left/right orbits the camera (the reticle sweeps around with it). ONLY active when NOT locked on (locked = the reticle snaps to the target). The player is frozen while charging so the stick is free to aim. Drive it from On Key Held alongside Thunder Charge. The slide + orbit SPEEDS are set on the Thunder layer in the Effects panel (Reticle speed / Reticle orbit) — this node is just the trigger."; break;
     case VsNodeType::SpawnParticles: desc = "Emits a burst of billboard particles at the player — a pure-code sim: each particle integrates velocity + gravity per frame, fades over its life, and faces the camera. Fire it from any event: a one-shot On Key Pressed = a burst, On Update = a continuous stream (it emits Count particles every frame it runs). Pins: Sprite = graphic frame for the billboard (-1 = solid quad); Count = particles per emit; Speed x100 = initial speed in world-units/frame ×100 (150 = 1.5); Spread 0-100 = lateral cone width (0 = straight up); Life = lifetime in frames; Size x100 = start size ×100 (shrinks to 0); Gravity x1000 = downward pull ×1000 (40 = 0.04). Spawns at the player + a small height offset (spline pathing + emitter presets come from the Effects tab)."; break;
     case VsNodeType::LockPlayerFunctions: desc = "While this runs, LOCKS OUT the player's combat functions — no Charge Up (aura/energy fill), Focus Blast charge/fire, Quick Attack, Dodge, or Block can fire, even though the buttons are still pressed. HUD/menu navigation (cursor Up/Down, confirm — all On Key Pressed) still works, so it's safe to run while a menu is up. Use it for the game-over / results screen so navigating restart/title with the D-pad doesn't also trigger gameplay (e.g. holding Down to pick an option charging the player). Drive it per-frame: On Update -> Is Hud Visible(results menu) -> Lock Player Functions. Runtime: it masks the HELD keys (so On-Key-Held abilities like Charge never run — stopping the energy fill at its source) and clears the per-frame ability triggers after the graph runs (dodge/quick-attack/focus/block + the charge aura)."; break;
@@ -7960,11 +7963,11 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
                 const auto& sub = sp.subSprites[si];
-                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d\n",
+                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d,%d\n",
                     sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                     sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
                     sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
-                    sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
+                    sub.driveThroughElement ? 1 : 0, sub.driveElementIdx, sub.effectKind);
             }
         }
         // Attached models (3D mesh layers) — own block, independent of sub-sprites.
@@ -8493,11 +8496,11 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
                     const auto& sub = sp.subSprites[si];
-                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d\n",
+                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
-                        sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
+                        sub.driveThroughElement ? 1 : 0, sub.driveElementIdx, sub.effectKind);
                 }
             }
             if (sp.subModelCount > 0) {
@@ -8649,11 +8652,11 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
                     const auto& sub = sp.subSprites[si2];
-                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d\n",
+                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
-                        sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
+                        sub.driveThroughElement ? 1 : 0, sub.driveElementIdx, sub.effectKind);
                 }
             }
             if (sp.subModelCount > 0) {
@@ -9289,10 +9292,10 @@ static bool LoadProject(const std::string& path)
                     if (sp2.subSprites[si].assetIdx != -1) loaded++;
                 if (loaded < sp2.subSpriteCount) {
                     auto& sub = sp2.subSprites[loaded];
-                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1; float sScale = 1.0f;
-                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d",
+                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1, fEffect = 0; float sScale = 1.0f;
+                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d,%d",
                         &sub.assetIdx, &sub.animIdx, &aEn,
-                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem);
+                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem, &fEffect);
                     sub.animEnabled = (aEn != 0);
                     sub.drawOrder = (m >= 7) ? dOrder : 1;
                     sub.scale = (m >= 8) ? sScale : 1.0f;
@@ -9302,6 +9305,7 @@ static bool LoadProject(const std::string& path)
                     sub.boneIdx = (m >= 12) ? fBone : -1;
                     sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
                     sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
+                    sub.effectKind = (m >= 15) ? fEffect : 0;
                 }
             }
             else if (strncmp(line, "subModel=", 9) == 0 && sSpriteCount > 0) {
@@ -10668,10 +10672,10 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1, fEffect = 0; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem, &fEffect);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
@@ -10681,6 +10685,7 @@ static bool LoadProject(const std::string& path)
                         sub.boneIdx = (m >= 12) ? fBone : -1;
                         sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
                         sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
+                    sub.effectKind = (m >= 15) ? fEffect : 0;
                     }
                 }
             }
@@ -11176,10 +11181,10 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1, fEffect = 0; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem, &fEffect);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
@@ -11189,6 +11194,7 @@ static bool LoadProject(const std::string& path)
                         sub.boneIdx = (m >= 12) ? fBone : -1;
                         sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
                         sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
+                    sub.effectKind = (m >= 15) ? fEffect : 0;
                     }
                 }
             }
@@ -17032,6 +17038,21 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
             ImGui::Checkbox("Hidden (effect)##sub", &sub.hidden);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible (and hidden here so it doesn't clutter the view). A Cast Effect node shows it, plays its anim once, then auto-hides it. Set the anim to Once.");
+            // Effect: draw an Effects-tab INSTANCE at this sub-sprite instead of the sprite graphic.
+            // The effect rides the sub-sprite's live position + scale (so Charge Shot's Min/Max Scale
+            // still grows it). effectKind stores instance index + 1 (0 = none / draw the sprite).
+            { int cur = sub.effectKind;
+              const char* prev = (cur > 0 && cur-1 < (int)sFxInstances.size()) ? sFxInstances[cur-1].name : "None (sprite)";
+              ImGui::SetNextItemWidth(Scaled(150));
+              if (ImGui::BeginCombo("Effect##sub", prev)) {
+                  if (ImGui::Selectable("None (sprite)##efxnone", cur == 0)) { sub.effectKind = 0; sProjectDirty = true; }
+                  for (int fi = 0; fi < (int)sFxInstances.size(); fi++) {
+                      std::string lbl = std::string(sFxInstances[fi].name) + "##efx" + std::to_string(fi);
+                      if (ImGui::Selectable(lbl.c_str(), cur == fi+1)) { sub.effectKind = fi+1; sProjectDirty = true; }
+                  }
+                  ImGui::EndCombo();
+              }
+              if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw an Effects-tab instance here instead of the sprite graphic.\nThe effect follows this sub-sprite's live position + scale (so a\ncharging Focus Blast still grows it). Build the effect in the\nEffects tab; None = draw the normal sprite."); }
             // Bone attach (player rig): pin this sub-sprite to a rig bone so it
             // rides the animated joint; X/Y/Z become offsets relative to the bone.
             if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
@@ -19262,6 +19283,7 @@ void FrameTick(float dt)
                             subSe.boneIdx = sub.boneIdx;
                             subSe.driveElementIdx = (sub.driveThroughElement && sub.driveElementIdx >= 0)
                                                   ? sub.driveElementIdx : -1;
+                            subSe.effectKind = sub.effectKind;   // 0 = sprite; >0 = procedural effect (aura...)
                             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
                                 subSe.palIdx = sSpriteAssets[sub.assetIdx].palBank;
                             else
@@ -26218,6 +26240,17 @@ void FrameTick(float dt)
                         "    //   re-asserts the SAME instance if it gets stolen.");
                     break;
                 }
+                case VsNodeType::AiOrbScale: {
+                    editorCode = "// Set the enemy focus-orb charge Min/Max Scale% (drive from On Update)";
+                    setActionFunc(infoNode, "_ai_orb_scale",
+                        "    afn_ai_orb_min = <Min Scale% (int)> * 0.01f;   // seed size at charge start\n"
+                        "    afn_ai_orb_max = <Max Scale% (int)> * 0.01f;   // full-charge + in-flight size\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_charge_begin(): s_efbScale = afn_ai_orb_min;\n"
+                        "    // afn_ai_charge_step():  s_efbScale = afn_ai_orb_min + (afn_ai_orb_max - afn_ai_orb_min)*frac;\n"
+                        "    // afn_ai_fire_beam():    s_efbScale = afn_ai_orb_max; (charge shot in-flight)");
+                    break;
+                }
                 case VsNodeType::AiChargeStep: {
                     editorCode = "// Grow the charge orb at the muzzle (sets 'charge_done' when wound up)";
                     setActionFunc(infoNode, "_ai_charge_step",
@@ -31635,7 +31668,7 @@ void FrameTick(float dt)
         for (int i = 0; i < (int)Inst.layers.size(); i++) {
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
-            const char* kindTag = Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
+            const char* kindTag = Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
             char lbl[64]; snprintf(lbl, sizeof(lbl), "%s: %s%s", kindTag,
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
@@ -31649,8 +31682,8 @@ void FrameTick(float dt)
         // ---- Presets: pick from the dropdown + "Add" to drop in a pre-configured layer ----
         ImGui::SameLine(); ImGui::TextDisabled("| Preset:"); ImGui::SameLine();
         static int sFxPreset = 0;
-        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf" };
-        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere" };
+        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 };
         ImGui::SetNextItemWidth(Scaled(120));
         ImGui::Combo("##fxpreset", &sFxPreset, fxPresetNames, IM_ARRAYSIZE(fxPresetNames));
         ImGui::SameLine();
@@ -31677,7 +31710,7 @@ void FrameTick(float dt)
         ImGui::SetNextItemWidth(Scaled(120));
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
-        { const char* kindName = L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
+        { const char* kindName = L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
           ImGui::TextDisabled("Kind: %s", kindName); }   // set by the preset you added (no radio)
         ImGui::Separator();
         if (L.kind == 0) {
@@ -31848,6 +31881,21 @@ void FrameTick(float dt)
                                "PLAYER RIDES it — carried forward just behind the crest.");
             ImGui::Spacing();
             ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 13) {
+            // Flamethrower — a sustained forward jet of turbulent fire, white-hot at the mouth fading
+            // to orange-red out front, widening into a cone with flying embers.
+            ImGui::TextWrapped("Flamethrower: a sustained forward jet of turbulent fire — white-hot at "
+                               "the mouth fading to orange-red out front, widening into a flickering cone "
+                               "with flying embers.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 14) {
+            // Aura Sphere — a glowing blue energy orb that travels forward: soft blue -> cyan pulsing
+            // halo, a white-hot core, and a comet trail.
+            ImGui::TextWrapped("Aura Sphere: a glowing blue energy orb that flies forward — a soft "
+                               "blue -> cyan pulsing halo with a white-hot core and a comet trail.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -31890,6 +31938,8 @@ void FrameTick(float dt)
             else if (Q.kind==10) { if(50.0f>maxRange)maxRange=50.0f; }  // psybeam: frame the forward zap
             else if (Q.kind==11) { if(40.0f>maxRange)maxRange=40.0f; }  // psychic: frame the ring funnel
             else if (Q.kind==12) { if(48.0f>maxRange)maxRange=48.0f; }  // surf: frame the wave sweep
+            else if (Q.kind==13) { if(36.0f>maxRange)maxRange=36.0f; }  // flamethrower: frame the fire jet
+            else if (Q.kind==14) { if(44.0f>maxRange)maxRange=44.0f; }  // aura sphere: frame the orb travel
         }
         float dist = (maxRange*0.95f + 8.0f) / sFxScale;   // bigger scale = closer camera = bigger preview
         // Demonstrate the Thunder cinematic cam UP-tilt: while a thunder layer is in its charge
@@ -32158,6 +32208,42 @@ void FrameTick(float dt)
                     for(int i=0;i<NX-1;i++){ if(!(gok[j][i]&&gok[j][i+1]&&gok[j+1][i]&&gok[j+1][i+1]))continue;
                         dl->AddQuadFilled(gpP[j][i],gpP[j][i+1],gpP[j+1][i+1],gpP[j+1][i], col); } }
                 for(int i=0;i<NX;i++){ if(gok[NZ-1][i]) dl->AddCircleFilled(gpP[NZ-1][i], 4.0f, IM_COL32(255,255,255,(int)(150*ef))); }   // foam crest
+                continue;
+            }
+            if (Q.kind == 13) {
+                // ---- FLAMETHROWER preview: forward fire jet, white-hot -> orange-red, cone widens ----
+                float php=fmodf(sFxClk,100.0f); float front=php/6.0f; if(front>1.0f)front=1.0f;
+                float ef=(100.0f-php)<16.0f?(100.0f-php)/16.0f:1.0f; if(php<8.0f)ef*=php/8.0f;
+                float ox=-16.0f,oy=5.0f,oz=0.0f, range=32.0f, coneR=6.5f;
+                for(int i2=0;i2<46;i2++){ unsigned h=(unsigned)(i2+1)*2654435761u ^ 0x9E3779B9u;
+                    float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f;
+                    float ph=fmodf(php*0.032f+fc,1.0f); if(ph>front)continue;
+                    float dist=ph*range, sAng=fa*6.2831853f, sR=coneR*ph*(0.30f+fb*0.70f);
+                    float wa=sinf(php*0.35f+(float)i2*1.7f)*1.3f*ph, wb=cosf(php*0.40f+(float)i2*2.1f)*1.3f*ph;
+                    float cx=ox+dist, cy=oy+(sinf(sAng)*sR+wb), cz=oz+(cosf(sAng)*sR+wa);
+                    float av=(ph>0.82f)?(1.0f-ph)/0.18f:1.0f; if(av<0)av=0; float sz=1.3f+ph*2.7f;
+                    float vz; ImVec2 P=proj(cx,cy,cz,&vz); if(vz<=0.05f)continue; float r=sz*focal/vz; if(r<2)r=2;
+                    int oR=(int)(255+(190-255)*ph), oG=(int)(110+(35-110)*ph), oB=(int)(20+(0-20)*ph);
+                    int iR=255, iG=(int)(238+(165-238)*ph), iB=(int)(185+(50-185)*ph);
+                    dl->AddCircleFilled(P, r*1.2f, IM_COL32(oR,oG,oB,(int)(90*av*ef)));       // orange-red glow
+                    dl->AddCircleFilled(P, r*0.7f, IM_COL32(iR,iG,iB,(int)(130*av*ef)));      // yellow body
+                    if(ph<0.32f) dl->AddCircleFilled(P, r*0.4f, IM_COL32(255,250,225,(int)(150*ef))); }   // white-hot
+                continue;
+            }
+            if (Q.kind == 14) {
+                // ---- AURA SPHERE preview: glowing blue orb travelling +X with a comet trail ----
+                float php=fmodf(sFxClk,92.0f); float t=php/92.0f;
+                float ef=(92.0f-php)<14.0f?(92.0f-php)/14.0f:1.0f; if(php<8.0f)ef*=php/8.0f;
+                float ox=-18.0f,oy=5.0f,oz=0.0f, dist=t*40.0f, pulse=1.0f+0.09f*sinf(sFxClk*0.35f);
+                float cxw=ox+dist, cyw=oy, czw=oz;
+                for(int k=1;k<=8;k++){ float f=(float)k/8.0f; float vz; ImVec2 Tp=proj(cxw-f*11.0f,cyw,czw,&vz); if(vz<=0.05f)continue;
+                    float rr=(2.6f*(1.0f-f))*focal/vz; if(rr<1)rr=1; dl->AddCircleFilled(Tp,rr,IM_COL32(90,170,255,(int)(120*(1.0f-f)*ef))); }   // trail
+                float vz; ImVec2 P=proj(cxw,cyw,czw,&vz);
+                if(vz>0.05f){ float s=focal/vz;
+                    dl->AddCircleFilled(P, 5.4f*pulse*s, IM_COL32(70,140,255,(int)(115*ef)));
+                    dl->AddCircleFilled(P, 3.3f*pulse*s, IM_COL32(150,210,255,(int)(150*ef)));
+                    dl->AddCircleFilled(P, 1.8f*pulse*s, IM_COL32(220,240,255,(int)(220*ef)));
+                    dl->AddCircleFilled(P, 0.9f*s,       IM_COL32(240,250,255,(int)(235*ef))); }
                 continue;
             }
             if (Q.kind != 1) continue;

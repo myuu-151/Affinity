@@ -173,6 +173,7 @@ int afn_ai_charge_done = 0, afn_ai_dodge_done = 0, afn_ai_fire_done = 0, afn_ai_
 // Tunables (Enemy AI node, defaults match the original #defines).
 int afn_ai_detect_r = 60, afn_ai_lose_r = 95, afn_ai_pref_r = 22, afn_ai_atkcd = 80;
 int afn_ai_chargeprob = 40, afn_ai_dodgeprob = 70, afn_ai_movespd_m = 800;
+float afn_ai_orb_min = 0.05f, afn_ai_orb_max = ENEMY_CHG_SCALE;   // Ai Orb Scale node: enemy focus-orb charge seed / full size
 int afn_ai_dodge_trig = 24;   // dodge reaction range to an incoming blast (world px)
 // Block: while blocking, an incoming hit is reduced to afn_block_pct % (20 = take
 // 20%, block 80%) — for the player (afn_player_blocking, set by your Block node) and
@@ -1037,9 +1038,12 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         int eidx = afn_spr_editor_idx[i];
 #ifdef AFN_HAS_PLAYER_RIG
         if (i == afn_fb_inst) {
-            // Focus Blast owns this instance's visibility: the single orb is the
-            // CHARGE ball only (drawn while charging). In-flight shots are the pool,
-            // drawn separately below, so several can coexist.
+#ifdef AFN_HAS_SPR_EFFECT
+            // Effect set on the focus orb (aura): the sprite is drawn as an FX
+            // (afn_focusblast_aura_render) instead of this quad — skip it.
+            if (afn_spr_effect[i]) continue;
+#endif
+            // Otherwise the sprite IS the charge ball (drawn only while charging).
             if (!afn_fb_charging) continue;
         } else
 #endif
@@ -1198,6 +1202,9 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         float Rwx = view[0], Rwy = view[4], Rwz = view[8];
         float Uwx = view[1], Uwy = view[5], Uwz = view[9];
         for (int k = 0; k < AFN_FB_POOL; k++) {
+#ifdef AFN_HAS_SPR_EFFECT
+            if (afn_fb_inst >= 0 && afn_spr_effect[afn_fb_inst]) break;   // drawn as aura spheres instead
+#endif
             if (!s_fbPool[k].active) continue;
             float sz = base * s_fbPool[k].scale * 0.25f, hh = sz * 0.5f, hw = sz * 0.5f;
             float px = s_fbPool[k].x, cyq = s_fbPool[k].y, pz = s_fbPool[k].z;
@@ -2023,6 +2030,11 @@ static void enemy_orb_render(const float* view) {
 #if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
     int fb = resolve_focus_inst();
     if (fb < 0) return;
+#ifdef AFN_HAS_SPR_EFFECT
+    // Effect assigned to the focus orb: the enemy orb is drawn as that FX in the aura pass
+    // (afn_focusblast_aura_render), same as the player's — skip this sprite quad.
+    if (afn_spr_effect[fb] > 0) return;
+#endif
     int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
     int cf = afn_spr_fstart[fb]; if (cf < 0) cf = 0; if (cf > NF-1) cf = NF-1;
     float sz = afn_spr_basesize[fb] * s_efbScale * 0.25f;
@@ -2217,17 +2229,18 @@ static void mm_glow(float cx,float cy,float cz, float Ax,float Ay,float Az, floa
         MMV(n, cx+Ax*(rx*ca)+Bx*(ry*sa), cy+Ay*(rx*ca)+By*(ry*sa), cz+Az*(rx*ca)+Bz*(ry*sa), rim); n++; }
     mm_flush(n, GL_TRIANGLE_FAN);
 }
-// Comet GLOW TRAIL: a SOFT camera-facing streak from head backward along -dir. A bright
-// centre spine (colHead -> colTail along the length) fades to transparent EDGES across the
-// width, so it glows softly both ways instead of being a hard-edged ribbon.
+// Comet GLOW TRAIL: a soft streak from head backward along -dir. The LENGTH follows the true
+// WORLD travel direction (so it stays anchored as the camera orbits — no side-swing); only the
+// WIDTH billboards to face the camera. Bright centre spine fading to transparent edges + tail.
 static void mm_trail(float hx,float hy,float hz, float dux,float duy,float duz,
                      float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
                      float len, float wHead, unsigned colHead, unsigned colTail) {
-    float dr = dux*Rx+duy*Ry+duz*Rz, dv = dux*Ux+duy*Uy+duz*Uz;   // outward dir in screen plane
-    float m = sqrtf(dr*dr+dv*dv); if (m<0.001f) m=0.001f; dr/=m; dv/=m;
-    float alx=Rx*dr+Ux*dv, aly=Ry*dr+Uy*dv, alz=Rz*dr+Uz*dv;      // world "along" (screen-projected)
-    float pex=Rx*(-dv)+Ux*dr, pey=Ry*(-dv)+Uy*dr, pez=Rz*(-dv)+Uz*dr;  // world "perp"
-    float tx=hx-alx*len, ty=hy-aly*len, tz=hz-alz*len;            // tail streams back toward centre
+    float dl = sqrtf(dux*dux+duy*duy+duz*duz); if (dl<0.001f) dl=0.001f;
+    float ax=dux/dl, ay=duy/dl, az=duz/dl;                        // WORLD travel dir (not screen-projected)
+    float Fx=Ry*Uz-Rz*Uy, Fy=Rz*Ux-Rx*Uz, Fz=Rx*Uy-Ry*Ux;        // camera forward = right x up
+    float pex=ay*Fz-az*Fy, pey=az*Fx-ax*Fz, pez=ax*Fy-ay*Fx;      // width = dir x camFwd (perp to dir, faces cam)
+    float pl=sqrtf(pex*pex+pey*pey+pez*pez); if(pl<0.001f)pl=0.001f; pex/=pl; pey/=pl; pez/=pl;
+    float tx=hx-ax*len, ty=hy-ay*len, tz=hz-az*len;              // tail streams back in WORLD space
     float hw=wHead*0.5f, tw=wHead*0.12f;
     unsigned edgeH = colHead & 0x00FFFFFFu, edgeT = colTail & 0x00FFFFFFu;   // same rgb, alpha 0
     // left half (edge -> centre spine), then right half — soft falloff across the width.
@@ -2866,6 +2879,166 @@ static void afn_surf_render(const float* view){
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
+// ---------------------------------------------------------------------------
+// Flamethrower — HARDCODED prototype. A sustained forward JET of turbulent fire:
+// a looping fleet of flame puffs that stream out of the mouth, widen into a cone,
+// flicker/turbulate, and fade at the tips. White-hot at the mouth -> yellow ->
+// orange-red out front, plus flying embers. Additive. Migrate to a preset later.
+// ---------------------------------------------------------------------------
+static int   s_fl_active=0, s_fl_life=0;
+static float s_fl_ox,s_fl_oy,s_fl_oz, s_fl_fx,s_fl_fy,s_fl_fz, s_fl_ax,s_fl_ay,s_fl_az, s_fl_bx,s_fl_by,s_fl_bz;
+#define FL_MAXLIFE 100
+static void afn_flame_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f);
+    s_fl_fx=sinf(yr); s_fl_fy=0.0f; s_fl_fz=cosf(yr);
+    s_fl_ax=cosf(yr); s_fl_ay=0.0f; s_fl_az=-sinf(yr);
+    s_fl_bx=0.0f;     s_fl_by=1.0f; s_fl_bz=0.0f;
+    s_fl_ox=px+s_fl_fx*4.0f; s_fl_oy=py+7.0f; s_fl_oz=pz+s_fl_fz*4.0f;   // from the mouth
+    s_fl_life=FL_MAXLIFE; s_fl_active=1;
+}
+static void afn_flame_step(void){ if(s_fl_active && !afn_paused){ if(--s_fl_life<=0) s_fl_active=0; } }
+static void afn_flame_render(const float* view){
+    if(!s_fl_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float ef=(s_fl_life<16)?(float)s_fl_life/16.0f:1.0f;
+    if(FL_MAXLIFE-s_fl_life<8) ef*=(float)(FL_MAXLIFE-s_fl_life)/8.0f;   // ease in
+    static int frame=0; frame++;
+    float ox=s_fl_ox,oy=s_fl_oy,oz=s_fl_oz;
+    float Fx=s_fl_fx,Fy=s_fl_fy,Fz=s_fl_fz, Ax=s_fl_ax,Ay=s_fl_ay,Az=s_fl_az, Bx=s_fl_bx,By=s_fl_by,Bz=s_fl_bz;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive fire
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int N=46; float range=32.0f, coneR=6.5f;
+    float front=(float)(FL_MAXLIFE - s_fl_life)/6.0f; if(front>1.0f)front=1.0f;   // jet reaches full length fast
+    for(int i=0;i<N;i++){ unsigned h=(unsigned)(i+1)*2654435761u ^ 0x9E3779B9u;
+        float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f;
+        float ph=fmodf((float)frame*0.032f+fc,1.0f); if(ph>front)continue;
+        float dist=ph*range, sAng=fa*6.2831853f, sR=coneR*ph*(0.30f+fb*0.70f);
+        float wa=sinf((float)frame*0.35f+(float)i*1.7f)*1.3f*ph, wb=cosf((float)frame*0.40f+(float)i*2.1f)*1.3f*ph;
+        float ua=cosf(sAng)*sR+wa, ub=sinf(sAng)*sR+wb;
+        float cx=ox+Fx*dist+Ax*ua+Bx*ub, cy=oy+Fy*dist+Ay*ua+By*ub, cz=oz+Fz*dist+Az*ua+Bz*ub;
+        float av=(ph>0.82f)?(1.0f-ph)/0.18f:1.0f; if(av<0)av=0;
+        float sz=1.3f+ph*2.7f+sinf((float)frame*0.3f+(float)i)*0.3f;
+        unsigned outer=mm_lerp_col(MM_COL(255,110,20,0),MM_COL(190,35,0,0),ph);   // rgb only; alpha set below
+        unsigned inner=mm_lerp_col(MM_COL(255,238,185,0),MM_COL(255,165,50,0),ph);
+        outer=(outer&0x00FFFFFFu)|((unsigned)((int)(110*av*ef)&0xFF)<<24);
+        inner=(inner&0x00FFFFFFu)|((unsigned)((int)(140*av*ef)&0xFF)<<24);
+        mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, sz*1.25f,sz*1.25f, outer, outer&0x00FFFFFFu);       // orange-red glow
+        mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, sz*0.72f,sz*0.72f, inner, inner&0x00FFFFFFu);       // yellow body
+        if(ph<0.32f) mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, sz*0.4f,sz*0.4f, MM_COL(255,250,225,(int)(150*ef)), MM_COL(255,250,225,0)); }  // white-hot near the mouth
+    // flying embers/sparks
+    for(int j=0;j<14;j++){ float ph=fmodf((float)frame*0.05f+(float)j*0.13f,1.0f);
+        float dist=ph*range*1.1f, sAng=(float)j*2.4f, sR=coneR*ph*((float)(j%3)*0.3f+0.5f);
+        float arc=sinf(ph*3.14159265f)*2.5f-ph*ph*3.0f;
+        float cx=ox+Fx*dist+(Ax*cosf(sAng)+Bx*sinf(sAng))*sR+Bx*arc;
+        float cy=oy+Fy*dist+(Ay*cosf(sAng)+By*sinf(sAng))*sR+By*arc;
+        float cz=oz+Fz*dist+(Az*cosf(sAng)+Bz*sinf(sAng))*sR+Bz*arc;
+        mm_fill_oval(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.35f,0.35f, MM_COL(255,205,95,(int)(200*(1.0f-ph)*ef))); }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Aura Sphere — HARDCODED prototype. A glowing blue energy orb that travels
+// forward: soft blue -> cyan halo, a white-hot pulsing core, three spinning
+// aura rings, orbiting energy motes, and a comet trail. Additive. Migrate later.
+// ---------------------------------------------------------------------------
+static int   s_au_active=0, s_au_life=0;
+static float s_au_ox,s_au_oy,s_au_oz, s_au_fx,s_au_fy,s_au_fz, s_au_ax,s_au_ay,s_au_az, s_au_bx,s_au_by,s_au_bz;
+#define AU_MAXLIFE 92
+static void afn_aura_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f);
+    s_au_fx=sinf(yr); s_au_fy=0.0f; s_au_fz=cosf(yr);
+    s_au_ax=cosf(yr); s_au_ay=0.0f; s_au_az=-sinf(yr);
+    s_au_bx=0.0f;     s_au_by=1.0f; s_au_bz=0.0f;
+    s_au_ox=px+s_au_fx*4.0f; s_au_oy=py+8.0f; s_au_oz=pz+s_au_fz*4.0f;
+    s_au_life=AU_MAXLIFE; s_au_active=1;
+}
+static void afn_aura_step(void){ if(s_au_active && !afn_paused){ if(--s_au_life<=0) s_au_active=0; } }
+// Reusable aura ORB: layered blue -> cyan halo + a white-hot core, sized by R (the core-glow
+// radius; R=1.8 reproduces the standalone Aura Sphere's proportions). Assumes additive blend set.
+static void afn_aura_orb(float Rx,float Ry,float Rz,float Ux,float Uy,float Uz, float cx,float cy,float cz, float R, float ef){
+    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*3.00f,R*3.00f, MM_COL(70,140,255,(int)(120*ef)), MM_COL(60,120,255,0));
+    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*1.83f,R*1.83f, MM_COL(150,210,255,(int)(150*ef)), MM_COL(120,190,255,0));
+    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*1.00f,R*1.00f, MM_COL(220,240,255,(int)(220*ef)), MM_COL(200,230,255,0));
+    mm_fill_oval(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*0.47f,R*0.47f, MM_COL(240,250,255,(int)(235*ef)));
+}
+static void afn_aura_render(const float* view){
+    if(!s_au_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float t=(float)(AU_MAXLIFE - s_au_life)/(float)AU_MAXLIFE;
+    float ef=(s_au_life<14)?(float)s_au_life/14.0f:1.0f; if(AU_MAXLIFE-s_au_life<8) ef*=(float)(AU_MAXLIFE-s_au_life)/8.0f;
+    static int frame=0; frame++;
+    float dist=t*40.0f;
+    float cx=s_au_ox+s_au_fx*dist, cy=s_au_oy+s_au_fy*dist, cz=s_au_oz+s_au_fz*dist;
+    float pulse=1.0f+0.09f*sinf((float)frame*0.35f);
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive aura glow
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    mm_trail(cx,cy,cz, s_au_fx,s_au_fy,s_au_fz, Rx,Ry,Rz, Ux,Uy,Uz, 11.0f, 3.4f, MM_COL(90,170,255,(int)(0.7f*200*ef)), MM_COL(60,130,255,0));
+    afn_aura_orb(Rx,Ry,Rz,Ux,Uy,Uz, cx,cy,cz, 1.8f*pulse, ef);
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+// Draw an Effects-tab INSTANCE's orb-type layers at a fixed point (R = orb radius). Geometry only
+// (additive blend must already be set). Currently supports the Aura Sphere layer (kind 14); add
+// more sphere-type kinds here as they're built.
+static void afn_fx_orb_at(float Rx,float Ry,float Rz,float Ux,float Uy,float Uz, int instIdx,
+                          float cx,float cy,float cz, float R, float ef, float pulse){
+#ifdef AFN_HAS_FX
+    if(instIdx < 0 || instIdx >= AFN_FX_COUNT) return;
+    const AfnFxInstance* In = &afn_fx_instances[instIdx];
+    for(int i=0;i<In->layerCount;i++){
+        int kind = afn_fx_layers[In->layerStart + i].kind;
+        if(kind == 14) afn_aura_orb(Rx,Ry,Rz,Ux,Uy,Uz, cx,cy,cz, R*pulse, ef);   // Aura Sphere
+    }
+#else
+    (void)Rx;(void)Ry;(void)Rz;(void)Ux;(void)Uy;(void)Uz;(void)instIdx;(void)cx;(void)cy;(void)cz;(void)R;(void)ef;(void)pulse;
+#endif
+}
+// Focus Blast orb drawn as the sub-sprite's assigned Effects INSTANCE — the charge ball (grows with
+// afn_fb_scale = Min%->Max%) and each in-flight pooled shot (with a trail). Radius comes from the
+// SAME sprite base*scale the focus_gfx quad used, so it honours Charge Shot's Min/Max Scale%.
+static void afn_focusblast_aura_render(const float* view){
+#if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_EFFECT) && defined(AFN_HAS_FX)
+    int fbi = resolve_focus_inst();   // NOT afn_fb_inst — that's only cached once the PLAYER charges;
+                                      // the enemy orb needs the resolved instance too.
+    if(fbi < 0 || afn_spr_effect[fbi] <= 0) return;   // 0 = no effect assigned
+    int instIdx = afn_spr_effect[fbi] - 1;            // effectKind = instance index + 1
+    int anyFlight=0; for(int k=0;k<AFN_FB_POOL;k++) if(s_fbPool[k].active){ anyFlight=1; break; }
+    if(!afn_fb_charging && !anyFlight && !s_efbActive && !s_efbCharging) return;   // player OR enemy orb
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    static int frame=0; frame++; float pulse=1.0f+0.09f*sinf((float)frame*0.35f);
+    float base=afn_spr_basesize[fbi];
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    if(afn_fb_charging){
+        float R=base*afn_fb_scale*0.25f*0.6f; if(R<0.15f)R=0.15f;   // orb radius from the ball's world size
+        afn_fx_orb_at(Rx,Ry,Rz,Ux,Uy,Uz, instIdx, afn_fb_x, afn_fb_y, afn_fb_z, R, 1.0f, pulse);
+    }
+    for(int k=0;k<AFN_FB_POOL;k++){ if(!s_fbPool[k].active) continue;
+        float R=base*s_fbPool[k].scale*0.25f*0.6f; if(R<0.15f)R=0.15f;
+        mm_trail(s_fbPool[k].x,s_fbPool[k].y,s_fbPool[k].z, s_fbPool[k].dirx,0.0f,s_fbPool[k].dirz, Rx,Ry,Rz, Ux,Uy,Uz, R*6.0f, R*1.9f, MM_COL(90,170,255,140), MM_COL(60,130,255,0));
+        afn_fx_orb_at(Rx,Ry,Rz,Ux,Uy,Uz, instIdx, s_fbPool[k].x,s_fbPool[k].y,s_fbPool[k].z, R, 1.0f, pulse);
+    }
+    // ENEMY orb (charge spot / in flight) — same focus_gfx effect, at its s_efb position.
+    if(s_efbActive || s_efbCharging){
+        float R=base*s_efbScale*0.25f*0.6f; if(R<0.15f)R=0.15f;
+        if(s_efbActive && !s_efbCharging)
+            mm_trail(s_efbX,s_efbY,s_efbZ, s_efbDirX,0.0f,s_efbDirZ, Rx,Ry,Rz, Ux,Uy,Uz, R*6.0f, R*1.9f, MM_COL(90,170,255,140), MM_COL(60,130,255,0));
+        afn_fx_orb_at(Rx,Ry,Rz,Ux,Uy,Uz, instIdx, s_efbX,s_efbY,s_efbZ, R, 1.0f, pulse);
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+#else
+    (void)view;
+#endif
+}
+
 // Beam pool: count each bolt's life down; expire at 0.
 static void afn_beam_update(void) {
     if (afn_paused) return;
@@ -3361,6 +3534,10 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
         afn_psychic_fire(px, py, pz, yawDeg);      // Psychic (funnel of 6 rings)
     } else if (L->kind == 12) {
         afn_surf_fire(px, py, pz, yawDeg);         // Surf (wave sweeps forward + the player rides it)
+    } else if (L->kind == 13) {
+        afn_flame_fire(px, py, pz, yawDeg);        // Flamethrower (forward fire jet)
+    } else if (L->kind == 14) {
+        afn_aura_fire(px, py, pz, yawDeg);         // Aura Sphere (traveling energy orb)
     } else {
         // Lightning bundle — all params are WORLD units straight from the layer (the editor's
         // 3D sim authors in the same units, so it mirrors this exactly). No px scaling.
@@ -3795,7 +3972,7 @@ void afn_ai_charge_begin(void) {
     s_aiChargeShot = ai_chance(afn_ai_chargeprob * 0.01f);
     // Same charge time as the player: full charge takes afn_fb_max frames (Focus Blast).
     s_aiTimer = s_aiChargeShot ? afn_fb_max : afn_ait_tap_windup;
-    s_efbScale = 0.05f; s_efbCharging = 1; afn_ai_charge_done = 0;   // seed small; charge_step grows it
+    s_efbScale = afn_ai_orb_min; s_efbCharging = 1; afn_ai_charge_done = 0;   // seed at Min Scale%; charge_step grows it
     // Charge wind-up SFX — track OUR voice so stopping it can't cut the player's
     // chargefocus (same shared instance/sample). Shield it from the player's
     // sample-wide chargefocus StopSound (fired when the player launches the blast
@@ -3820,11 +3997,11 @@ void afn_ai_charge_step(void) {
     // Grow the orb LINEARLY across the whole wind-up (like the player's level-based
     // growth), so the charge visibly fills instead of snapping to full in a few
     // frames (old exp lerp). frac = 0..1 over the wind-up.
-    float tgt = s_aiChargeShot ? ENEMY_CHG_SCALE : ENEMY_TAP_SCALE;
+    float tgt = s_aiChargeShot ? afn_ai_orb_max : afn_ai_orb_min;   // tap stays at Min Scale% (no wind-up growth)
     int total = s_aiChargeShot ? afn_fb_max : afn_ait_tap_windup;   // match player charge time
     float frac = total > 0 ? (1.0f - (float)s_aiTimer / (float)total) : 1.0f;
     if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
-    s_efbScale = 0.05f + (tgt - 0.05f) * frac;
+    s_efbScale = afn_ai_orb_min + (tgt - afn_ai_orb_min) * frac;
     afn_ai_charge_done = (--s_aiTimer <= 0) ? 1 : 0;
 
     // --- Charge-dodge: sidestep an incoming blast WITHOUT dropping the charge. The orb
@@ -3876,8 +4053,8 @@ void afn_ai_fire_beam(void) {
     float ddx = px - mx, ddz = pz - mz, dl = sqrtf(ddx*ddx + ddz*ddz); if (dl < 1e-3f) dl = 1.0f;
     s_efbDirX = ddx/dl; s_efbDirZ = ddz/dl;
     s_efbX = mx + s_efbDirX*8.0f; s_efbZ = mz + s_efbDirZ*8.0f; s_efbY = my;
-    if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = afn_ai_chg_speed_t / 10.0f; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; s_ebBeamFull = 1; }
-    else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = afn_ai_tap_speed_t / 10.0f; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; s_ebBeamFull = 0; }
+    if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = afn_ai_chg_speed_t / 10.0f; s_efbScale = afn_ai_orb_max; s_efbHoming = ENEMY_CHG_HOMING; s_ebBeamFull = 1; }
+    else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = afn_ai_tap_speed_t / 10.0f; s_efbScale = afn_ai_orb_min; s_efbHoming = 0.0f; s_ebBeamFull = 0; }   // tap = Min Scale%
     s_efbActive = 1; s_efbCharging = 0; s_efbLife = ENEMY_SHOT_LIFE;
     // Charged shot always charges to FULL, so it plays the big 'shoot' SFX (what the
     // player plays at >=95% charge), not midblast. Tap shots stay smallblast.
@@ -6569,6 +6746,13 @@ int main(void)
         // in the movement block keys off s_su_active, so it carries the player either way.
         afn_surf_render(view);
         afn_surf_step();
+        // Flamethrower is node-driven now (Play Effect -> kind=13 layer -> afn_flame_fire).
+        afn_flame_render(view);
+        afn_flame_step();
+        // Aura Sphere is node-driven now (Play Effect -> kind=14 layer -> afn_aura_fire).
+        afn_aura_render(view);
+        afn_aura_step();
+        afn_focusblast_aura_render(view);   // Focus Blast orb rendered as an aura sphere (charge + flight)
 
         }   // end 3D world (skipped in 2D menu mode)
 

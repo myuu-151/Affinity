@@ -506,6 +506,9 @@ struct FloorSprite
                                    // (rotation/scale) on this sub-sprite's own graphic,
                                    // keeping its exact 3D/bone position
         int   driveElementIdx = -1;        // which HUD element supplies the animation (-1 = none)
+        int   effectKind = 0;              // 0 = draw the sprite graphic; >0 = draw a procedural
+                                           // effect at this sub-sprite instead (1 = Aura Sphere).
+                                           // Lets an attached orb (e.g. the focus ball) be a glow FX.
     };
     static constexpr int kMaxSubSprites = 4;
     SubSprite subSprites[kMaxSubSprites];

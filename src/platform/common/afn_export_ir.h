@@ -29,6 +29,8 @@ struct AfnSpriteExport
     int   boneIdx = -1;   // attached sub-sprite: ride this parent-rig bone (-1 = parent origin)
     int   driveElementIdx = -1; // attached sub-sprite: run this HUD element's keyframe animation
                                 // (rotation/scale) on the sub-sprite's own graphic (-1 = none)
+    int   effectKind = 0;       // attached sub-sprite: 0 = draw the sprite; >0 = draw a procedural
+                                // effect there instead (1 = Aura Sphere)
     bool  forceStatic = false; // force static rendering (ignore directions)
     bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
     bool  startHidden = false; // start invisible; a Cast Effect node shows + one-shots it
@@ -608,6 +610,7 @@ enum class AfnScriptNodeType : int {
     ThunderCharge,   // action: charge the Thunder spell (clouds + reticle)
     ThunderStrike,   // action: release the Thunder strike at the aim
     AimStick,        // action: left stick moves the floor reticle + auto-orbits the camera
+    AiOrbScale,      // action (enemy AI): set the enemy focus-orb charge Min/Max Scale%
     COUNT
 };
 
