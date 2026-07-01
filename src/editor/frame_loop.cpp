@@ -183,7 +183,7 @@ static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 struct FxPart { float x,y,vx,vy,life,maxLife; bool active; };
 struct FxLayer {
     char  name[24] = "Layer";
-    int   kind = 1;            // 0 = particles, 1 = lightning
+    int   kind = 0;            // default = particles (0); 1 = jolt, 2 = thunder, 3 = meteor, 4 = wild charge
     bool  visible = true;
     // particle params
     int   pCount=10; float pSpeed=1.6f,pSpread=0.6f,pLife=45.0f,pGrav=0.05f,pSize=10.0f; bool pStream=true;
@@ -31617,7 +31617,7 @@ void FrameTick(float dt)
         ImGui::SameLine(); ImGui::TextDisabled("(instances — saved with the project; play one with the Play Effect node)");
         ImGui::Separator();
 
-        if (sFxInstances.empty()) { FxInstance I0; snprintf(I0.name, sizeof(I0.name), "Effect 1"); I0.layers.push_back(FxLayer()); sFxInstances.push_back(I0); }
+        if (sFxInstances.empty()) { FxInstance I0; snprintf(I0.name, sizeof(I0.name), "Effect 1"); sFxInstances.push_back(I0); }   // empty by default (add layers/presets)
         if (sFxInst < 0 || sFxInst >= (int)sFxInstances.size()) sFxInst = 0;
 
         FxInstance& Inst = sFxInstances[sFxInst];
@@ -31635,8 +31635,8 @@ void FrameTick(float dt)
         for (int i = 0; i < (int)Inst.layers.size(); i++) {
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
-            char lbl[64]; snprintf(lbl, sizeof(lbl), "%s %s%s",
-                Inst.layers[i].kind == 2 ? "\xE2\x98\x81" : Inst.layers[i].kind == 1 ? "\xE2\x9A\xA1" : "\xE2\x9C\xB1",   // ☁ thunder / ⚡ lightning / ✱ particle
+            const char* kindTag = Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "%s: %s%s", kindTag,
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
             if (sel) ImGui::PopStyleColor();
@@ -31645,22 +31645,40 @@ void FrameTick(float dt)
         if (ImGui::Button("+ Layer")) { FxLayer Ln; snprintf(Ln.name, sizeof(Ln.name), "Layer %d", (int)Inst.layers.size()+1); Inst.layers.push_back(Ln); sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true; }
         ImGui::SameLine();
         if (ImGui::Button("Dup")) { FxLayer Ln = Inst.layers[sFxActive]; snprintf(Ln.name, sizeof(Ln.name), "Layer %d", (int)Inst.layers.size()+1); Inst.layers.push_back(Ln); sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true; }
-        if ((int)Inst.layers.size() > 1) { ImGui::SameLine(); if (ImGui::Button("- Layer")) { Inst.layers.erase(Inst.layers.begin()+sFxActive); if (sFxActive >= (int)Inst.layers.size()) sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true; } }
+        if (!Inst.layers.empty()) { ImGui::SameLine(); if (ImGui::Button("- Layer")) { Inst.layers.erase(Inst.layers.begin()+sFxActive); if (sFxActive >= (int)Inst.layers.size()) sFxActive = (int)Inst.layers.size()-1; if (sFxActive < 0) sFxActive = 0; sFxSel = -1; sProjectDirty = true; } }
+        // ---- Presets: pick from the dropdown + "Add" to drop in a pre-configured layer ----
+        ImGui::SameLine(); ImGui::TextDisabled("| Preset:"); ImGui::SameLine();
+        static int sFxPreset = 0;
+        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam" };
+        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7 };
+        ImGui::SetNextItemWidth(Scaled(120));
+        ImGui::Combo("##fxpreset", &sFxPreset, fxPresetNames, IM_ARRAYSIZE(fxPresetNames));
+        ImGui::SameLine();
+        if (ImGui::Button("Add##fxpreset")) {
+            FxLayer Ln; Ln.kind = fxPresetKinds[sFxPreset]; snprintf(Ln.name, sizeof(Ln.name), "%s", fxPresetNames[sFxPreset]);
+            Inst.layers.push_back(Ln); sFxActive = (int)Inst.layers.size()-1; sFxSel = -1; sProjectDirty = true;
+        }
         ImGui::EndChild();
 
-        if (sFxActive < 0 || sFxActive >= (int)Inst.layers.size()) sFxActive = 0;
-        FxLayer& L = Inst.layers[sFxActive];
         // The controls + canvas fill the middle, leaving room for the bottom Instances bar.
         float fxMidH = ImGui::GetContentRegionAvail().y - fxBarH - ImGui::GetStyle().ItemSpacing.y;
+        if (Inst.layers.empty()) {
+            // An effect instance can be EMPTY (Clear button below) — show a hint, not the editor.
+            ImGui::BeginChild("##fxempty", ImVec2(0, fxMidH), true);
+            ImGui::Spacing(); ImGui::TextDisabled("This effect has no layers.");
+            ImGui::TextWrapped("Add one with the + Layer button or a preset (Meteor Mash / Jolt / Thunder / Particles) above.");
+            ImGui::EndChild();
+        } else {
+        if (sFxActive < 0 || sFxActive >= (int)Inst.layers.size()) sFxActive = 0;
+        FxLayer& L = Inst.layers[sFxActive];
 
         // ---- controls (left): edit the active layer ----
         ImGui::BeginChild("##fxctrl", ImVec2(Scaled(210), fxMidH), true);
         ImGui::SetNextItemWidth(Scaled(120));
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
-        if (ImGui::RadioButton("Particles", &L.kind, 0)) sProjectDirty = true; ImGui::SameLine();
-        if (ImGui::RadioButton("Lightning", &L.kind, 1)) sProjectDirty = true; ImGui::SameLine();
-        if (ImGui::RadioButton("Thunder", &L.kind, 2)) sProjectDirty = true;
+        { const char* kindName = L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
+          ImGui::TextDisabled("Kind: %s", kindName); }   // set by the preset you added (no radio)
         ImGui::Separator();
         if (L.kind == 0) {
             ImGui::PushItemWidth(Scaled(110));
@@ -31711,7 +31729,7 @@ void FrameTick(float dt)
             if (ImGui::SliderFloat("Fade falloff", &L.bTravelFade, 0.0f, 1.0f, "%.2f")) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = uniform bright streak; 1 = comet fading to nothing.");
             ImGui::PopItemWidth();
-        } else {
+        } else if (L.kind == 2) {
             // ---- Thunder spell — hold to charge (rainclouds + floor reticle), release to
             // strike. WORLD units, defaults = the runtime hardcode. Strike reuses the bundle. ----
             ImGui::TextDisabled("Storm");
@@ -31748,6 +31766,48 @@ void FrameTick(float dt)
             float bcol[3] = { L.bColR, L.bColG, L.bColB };
             if (ImGui::ColorEdit3("Bolt colour", bcol, ImGuiColorEditFlags_NoInputs)) { L.bColR=bcol[0]; L.bColG=bcol[1]; L.bColB=bcol[2]; sProjectDirty = true; }
             ImGui::Spacing(); ImGui::TextDisabled("Preview plays the charge -> strike loop.");
+        } else if (L.kind == 3) {
+            // Meteor Mash — the tuned runtime prototype (afn_meteor_* in psv main.c). A projectile
+            // star + comet trail, blue speed-streaks rushing through the path corridor, summon rings,
+            // impact flash. Fired by the Play Effect node; the look is fixed for now (tunables TBD).
+            ImGui::TextWrapped("Meteor Mash: a star projectile shoots forward with a comet trail; small "
+                               "blue speed-streaks rush through the path corridor and vanish; two summon "
+                               "rings + an impact flash at the launch point.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node; tunables are coming next.");
+        } else if (L.kind == 4) {
+            // Wild Charge — reuses the Quick Attack dash (rush a locked enemy, else forward) with
+            // electric visuals: a yellow afterimage trail + light-blue sparks crackling around the
+            // player. Play Effect starts the dash; afn_wild_charge drives the visuals in the runtime.
+            ImGui::TextWrapped("Wild Charge: the same rush-dash as Quick Attack, but with a yellow "
+                               "afterimage trail and light-blue electric sparks crackling around the "
+                               "player for the length of the dash.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node (or the hardcoded Select test).");
+        } else if (L.kind == 5) {
+            // Electroweb — a status move: spawns a crackling spider-web lattice on the ground ahead
+            // of the player; anyone who walks into it is snared (immobilised) for ~2 seconds.
+            ImGui::TextWrapped("Electroweb: drops a crackling electric web on the ground ahead. "
+                               "Walk into it and you're snared (can't move) for ~2 seconds. The strands "
+                               "jitter and a shimmer ripples through the lattice.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node (or the hardcoded Select test).");
+        } else if (L.kind == 6) {
+            // Fire Spin — a swirling vortex of flames on the ground around the player: a dense
+            // spiral of camera-facing flame triangles that rotates + flickers. Follows the player.
+            ImGui::TextWrapped("Fire Spin: a swirling spiral of flames on the ground around the "
+                               "player. The spiral rotates and flickers; each flame is a hot base "
+                               "tapering to a faded tip. Follows the player's position.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+        } else if (L.kind == 7) {
+            // Bubble Beam — a forward stream of translucent bubbles that ramps out from the mouth,
+            // spreads into a cone, wobbles, and pops at the end.
+            ImGui::TextWrapped("Bubble Beam: a forward stream of translucent bubbles (soft body + "
+                               "bright rim + white highlight). Ramps out from the mouth, spreads into "
+                               "a cone, wobbles, and the bubbles pop at the end.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -31780,6 +31840,11 @@ void FrameTick(float dt)
         for (auto& Q : Inst.layers) if (Q.visible) {
             if (Q.kind==1) { float r=Q.bArcLen*(Q.bBounces<1?1:Q.bBounces); if(r>maxRange)maxRange=r; }
             else if (Q.kind==2) { if(Q.tCloudH>maxRange)maxRange=Q.tCloudH; if(Q.tSpread*2.0f>maxRange)maxRange=Q.tSpread*2.0f; if(Q.tCloudH*0.45f>tgtY)tgtY=Q.tCloudH*0.45f; }
+            else if (Q.kind==3) { if(34.0f>maxRange)maxRange=34.0f; }   // meteor travels ~34 units
+            else if (Q.kind==4) { if(14.0f>maxRange)maxRange=14.0f; }   // wild charge: frame the player-radius sparks
+            else if (Q.kind==5) { if(40.0f>maxRange)maxRange=40.0f; }   // electroweb: frame the lattice ahead
+            else if (Q.kind==6) { if(18.0f>maxRange)maxRange=18.0f; }   // fire spin: frame the ground spiral
+            else if (Q.kind==7) { if(44.0f>maxRange)maxRange=44.0f; }   // bubble beam: frame the forward stream
         }
         float dist = (maxRange*0.95f + 8.0f) / sFxScale;   // bigger scale = closer camera = bigger preview
         // Demonstrate the Thunder cinematic cam UP-tilt: while a thunder layer is in its charge
@@ -31854,6 +31919,107 @@ void FrameTick(float dt)
                     if(vz>0.05f){ float fr=8.0f*(1.2f-f)*focal/vz; if(fr<2)fr=2; dl->AddCircleFilled(S,fr*0.6f,IM_COL32(255,255,255,(int)(230*f))); dl->AddCircleFilled(S,fr*0.3f,IM_COL32(255,255,255,(int)(255*f))); } }
                 continue;
             }
+            if (Q.kind == 3) {
+                // ---- METEOR MASH preview: mirror afn_meteor_render (projectile star + comet trail,
+                // blue speed-streaks rushing through the path corridor, summon rings, impact flash) ----
+                float MMLIFE=56.0f; float php=fmodf(sFxClk,MMLIFE); float prog=php/MMLIFE; float tt=php;
+                float fIn=prog<0.10f?prog/0.10f:1.0f, fOut=(MMLIFE-php)<12.0f?(MMLIFE-php)/12.0f:1.0f, fade=fIn*fOut;
+                float Ox=-17.0f,Oy=3.0f,Oz=0.0f, travel=prog*34.0f, Sx=Ox+travel,Sy=Oy,Sz=Oz;
+                float Fx=1,Fy=0,Fz=0, Ax=0,Ay=0,Az=1, Bx=0,By=1,Bz=0;
+                for(int s=0;s<2;s++){ float sp=tt*0.22f+(float)s*1.6f, cs=cosf(sp), ss=sinf(sp);
+                    float RAx=Ax*cs+Bx*ss,RAy=Ay*cs+By*ss,RAz=Az*cs+Bz*ss, RBx=-Ax*ss+Bx*cs,RBy=-Ay*ss+By*cs,RBz=-Az*ss+Bz*cs;
+                    float rad=(5.5f+(float)s*2.2f)*(1.0f-prog*0.55f); if(rad<0.4f)rad=0.4f; int a=(int)(160*fade*(1.0f-prog*0.7f)); if(a<0)a=0;
+                    ImVec2 rp[25]; int okc=1; for(int j=0;j<25;j++){ float aa=(float)j*(6.2831853f/24.0f); float vz; rp[j]=proj(Ox+(RAx*cosf(aa)+RBx*sinf(aa))*rad,Oy+(RAy*cosf(aa)+RBy*sinf(aa))*rad,Oz+(RAz*cosf(aa)+RBz*sinf(aa))*rad,&vz); if(vz<=0.05f)okc=0; }
+                    if(okc) dl->AddPolyline(rp,25,IM_COL32(120,210,255,a),0,2.2f); }
+                { float span=travel<1.0f?1.0f:travel;
+                  for(int i2=0;i2<28;i2++){ unsigned h=(unsigned)(i2+1)*2654435761u^0x9E3779B9u;
+                    float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f;
+                    float ph=fmodf(tt*0.055f+fc,1.0f), lf=fmodf(fa+ph,1.0f), dist=lf*span;
+                    float ang=(float)i2*2.399963f+fb*6.2831853f; float rdx=Ax*cosf(ang)+Bx*sinf(ang), rdy=Ay*cosf(ang)+By*sinf(ang), rdz=Az*cosf(ang)+Bz*sinf(ang);
+                    float R=2.6f*(0.20f+fb*0.80f); float av=sinf(ph*3.14159265f); int a=(int)(200*fade*av); if(a<=0)continue;
+                    float vz; ImVec2 P=proj(Ox+Fx*dist+rdx*R,Oy+Fy*dist+rdy*R,Oz+Fz*dist+rdz*R,&vz); if(vz<=0.05f)continue;
+                    float sr=0.5f*focal/vz; if(sr<1.5f)sr=1.5f; dl->AddCircleFilled(P,sr,IM_COL32(70,150,255,a)); } }
+                for(int k=1;k<=8;k++){ float f=(float)k/8.0f; float vz; ImVec2 P=proj(Sx-Fx*f*11.0f,Sy-Fy*f*11.0f,Sz-Fz*f*11.0f,&vz); if(vz<=0.05f)continue; float sr=(2.0f*(1.0f-f))*focal/vz; if(sr<1)sr=1; int a=(int)(150*fade*(1.0f-f)); dl->AddCircleFilled(P,sr,IM_COL32(100,180,255,a)); }
+                { float vz; ImVec2 S=proj(Sx,Sy,Sz,&vz);
+                  if(vz>0.05f){ float sbase=2.6f*focal/vz;
+                    for(int r=5;r>=1;r--){ float rr=sbase*1.6f*(float)r/5.0f; int aa=(int)(60*fade*(1.0f-(float)r/6.0f))+8; dl->AddCircleFilled(S,rr,IM_COL32(90,170,255,aa)); }
+                    float sr=sbase; ImVec2 pts[10]; for(int j=0;j<10;j++){ float aa=(-1.5707963f)+(float)j*(6.2831853f/10.0f); float rr=(j&1)?sr*0.42f:sr; pts[j]=ImVec2(S.x+cosf(aa)*rr,S.y+sinf(aa)*rr); }
+                    int ay=(int)(255*fade); for(int j=0;j<10;j++) dl->AddTriangleFilled(S,pts[j],pts[(j+1)%10],IM_COL32(255,225,70,ay));
+                    dl->AddCircleFilled(S,sr*0.35f,IM_COL32(255,255,190,ay)); } }
+                if(prog<0.35f){ float f=1.0f-prog/0.35f; float vz; ImVec2 S=proj(Ox,Oy,Oz,&vz); if(vz>0.05f){ float rad=(4.0f+(1.0f-f)*9.0f)*focal/vz; if(rad<2)rad=2; dl->AddCircleFilled(S,rad*0.6f,IM_COL32(200,235,255,(int)(150*f))); dl->AddCircleFilled(S,rad*0.3f,IM_COL32(255,255,255,(int)(220*f))); } }
+                continue;
+            }
+            if (Q.kind == 4) {
+                // ---- WILD CHARGE preview: light-blue crackle bolts around a centre + a yellow dash trail ----
+                float tt=sFxClk; float cx=0.0f,cy=4.0f,cz=0.0f;
+                for(int k=1;k<=7;k++){ float f=(float)k/7.0f; float vz; ImVec2 P=proj(cx-f*10.0f,cy,cz,&vz); if(vz<=0.05f)continue; float sr=(3.0f*(1.0f-f))*focal/vz; if(sr<2)sr=2; dl->AddCircleFilled(P,sr,IM_COL32(255,224,0,(int)(150*(1.0f-f)))); }   // yellow trail
+                unsigned rng=(unsigned)((int)tt)*2654435761u ^ 0x9E3779B9u;
+                for(int b=0;b<8;b++){ float base=(float)b*(6.2831853f/8.0f); ImVec2 pts[5]; int ok=1; float rr=0.0f;
+                    for(int s=0;s<5;s++){ rr+=1.4f;
+                        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5; float j1=((float)(rng&0xFFFF)/32768.0f-1.0f)*0.5f;
+                        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5; float j2=((float)(rng&0xFFFF)/32768.0f-1.0f)*0.6f;
+                        float ang=base+j1; float vz; pts[s]=proj(cx+cosf(ang)*rr+j2, cy+((float)s-2.0f)*1.2f+j2, cz+sinf(ang)*rr, &vz); if(vz<=0.05f)ok=0; }
+                    if(ok) dl->AddPolyline(pts,5,IM_COL32(200,224,255,200),0,2.0f); }   // light-blue crackle
+                { float vz; ImVec2 S=proj(cx,cy,cz,&vz); if(vz>0.05f){ float r=4.0f*focal/vz; for(int k=4;k>=1;k--){ float rr=r*(float)k/4.0f; int aa=(int)(50*(1.0f-(float)k/5.0f))+10; dl->AddCircleFilled(S,rr,IM_COL32(200,224,255,aa)); } } }
+                continue;
+            }
+            if (Q.kind == 5) {
+                // ---- ELECTROWEB preview: crackling spider-web lattice on the ground (8 spokes x 3 rings) ----
+                float tt=sFxClk; float ecx=0.0f,ecy=0.5f,ecz=0.0f, r=18.0f; int SP=8,RG=3;
+                auto ewEdge = [&](float ax,float az, float bx,float bz, int alpha, unsigned rng){
+                    int M=5; ImVec2 pts[6]; int ok=1;
+                    float dx=bx-ax, dz=bz-az; float dl2=sqrtf(dx*dx+dz*dz); if(dl2<0.001f)dl2=0.001f;
+                    float hpx=-dz/dl2, hpz=dx/dl2;
+                    for(int i=0;i<=M;i++){ float t=(float)i/(float)M;
+                        float px=ax+(bx-ax)*t, pz=az+(bz-az)*t;
+                        float edge=t<0.5f?t:(1.0f-t), amt=edge*4.0f<1.0f?edge*4.0f:1.0f;
+                        rng^=rng<<13;rng^=rng>>17;rng^=rng<<5; float j=((float)(rng&0xFFFF)/32768.0f-1.0f)*1.1f*amt;
+                        float vz; pts[i]=proj(px+hpx*j, ecy, pz+hpz*j, &vz); if(vz<=0.05f)ok=0; }
+                    if(ok) dl->AddPolyline(pts,M+1,IM_COL32(255,235,110,alpha),0,2.2f); };
+                unsigned eidx=0;
+                for(int si=0;si<SP;si++){ float a0=(float)si*(6.2831853f/SP), a1=(float)(si+1)*(6.2831853f/SP);
+                    float c0=cosf(a0),s0=sinf(a0),c1=cosf(a1),s1=sinf(a1); float prevx=ecx,prevz=ecz;
+                    for(int ri=1;ri<=RG;ri++){ float rr=r*(float)ri/(float)RG; float px=ecx+c0*rr, pz=ecz+s0*rr;
+                        int a=(int)(210*(0.55f+0.45f*sinf(tt*0.28f+(float)(eidx++)*0.7f)));
+                        ewEdge(prevx,prevz, px,pz, a, (eidx*2654435761u)^(unsigned)(int)tt); prevx=px; prevz=pz;
+                        float qx=ecx+c1*rr, qz=ecz+s1*rr;
+                        int a2=(int)(210*(0.55f+0.45f*sinf(tt*0.28f+(float)(eidx++)*0.7f)));
+                        ewEdge(px,pz, qx,qz, a2, (eidx*2654435761u)^(unsigned)(int)tt); } }
+                continue;
+            }
+            if (Q.kind == 6) {
+                // ---- FIRE SPIN preview: a rotating ground spiral of flame triangles ----
+                float tt=sFxClk; float pcx=0.0f,pcz=0.0f, fy=0.5f; int M=56; float turns=2.5f, Rmax=9.0f, spin=tt*0.055f;
+                for(int k=0;k<M;k++){ float t=(float)k/(float)M; float ang=t*6.2831853f*turns+spin, rad=Rmax*(0.14f+0.86f*t);
+                    float fx=pcx+cosf(ang)*rad, fz=pcz+sinf(ang)*rad;
+                    unsigned h=(unsigned)(k*2+1)*2654435761u ^ (unsigned)(int)tt; h^=h<<13;h^=h>>17;h^=h<<5; float fl=0.55f+0.45f*((float)(h&0xFF)/255.0f);
+                    float endT=t<0.08f?t/0.08f:(t>0.92f?(1.0f-t)/0.08f:1.0f), A=fl*endT;
+                    float fh=3.2f+fl*2.2f, fw=1.0f+fl*0.5f;
+                    float vz; ImVec2 baseC=proj(fx,fy,fz,&vz); if(vz<=0.05f)continue; float apzv; ImVec2 apex=proj(fx,fy+fh,fz,&apzv);
+                    float wpx=fw*focal/vz; if(wpx<1.0f)wpx=1.0f;
+                    dl->AddTriangleFilled(ImVec2(baseC.x-wpx,baseC.y),ImVec2(baseC.x+wpx,baseC.y),apex, IM_COL32(255,90,20,(int)(90*A)));    // orange
+                    ImVec2 apex2=proj(fx,fy+fh*0.8f,fz,&apzv);
+                    dl->AddTriangleFilled(ImVec2(baseC.x-wpx*0.55f,baseC.y),ImVec2(baseC.x+wpx*0.55f,baseC.y),apex2, IM_COL32(255,200,90,(int)(130*A)));   // yellow
+                    dl->AddCircleFilled(baseC, wpx*0.4f+1.0f, IM_COL32(255,240,190,(int)(150*A))); }   // white-hot base
+                continue;
+            }
+            if (Q.kind == 7) {
+                // ---- BUBBLE BEAM preview: translucent bubble stream shooting +X, ramping out ----
+                float php=fmodf(sFxClk,120.0f); float front=php/26.0f; if(front>1.0f)front=1.0f;
+                float bfade=(120.0f-php)<20.0f?(120.0f-php)/20.0f:1.0f;
+                float ox=-16.0f,oy=5.0f,oz=0.0f, range=40.0f;   // stream shoots +X; spread in Z (horizontal) + Y (vertical)
+                for(int i2=0;i2<26;i2++){ unsigned h=(unsigned)(i2+1)*2654435761u ^ 0x9E3779B9u;
+                    float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f;
+                    float ph=fmodf(php*0.02f+fc,1.0f); if(ph>front)continue; float dist=ph*range;
+                    float sAng=fa*6.2831853f, sR=(0.5f+fb*2.5f)*(0.3f+ph*1.6f); float wob=sinf(php*0.15f+(float)i2)*0.7f;
+                    float cx=ox+dist, cz=oz+cosf(sAng)*sR, cyv=oy+sinf(sAng)*sR+wob;
+                    float rad=0.6f+fb*1.1f; float A=bfade; if(ph>0.85f)A*=(1.0f-ph)/0.15f; if(ph<0.05f)A*=ph/0.05f;
+                    float vz; ImVec2 P=proj(cx,cyv,cz,&vz); if(vz<=0.05f)continue; float sr=rad*focal/vz; if(sr<1.5f)sr=1.5f;
+                    dl->AddCircleFilled(P,sr,IM_COL32(150,200,255,(int)(70*A)));                 // translucent body
+                    dl->AddCircle(P,sr,IM_COL32(215,235,255,(int)(190*A)),0,1.6f);               // bright rim
+                    dl->AddCircleFilled(ImVec2(P.x-sr*0.32f,P.y-sr*0.36f), sr*0.24f+0.6f, IM_COL32(255,255,255,(int)(200*A))); }   // highlight
+                continue;
+            }
             if (Q.kind != 1) continue;
             int nb = Q.bBounces<1?1:Q.bBounces;
             int N = Q.bSegs; { int need=nb*8; if(need>N)N=need; } if(N<2)N=2; if(N>48)N=48;   // matches runtime cap
@@ -31905,6 +32071,7 @@ void FrameTick(float dt)
         }
         ImGui::PopClipRect();
         ImGui::EndChild();   // end canvas
+        }   // end (instance has layers)
 
         // ===== BOTTOM BAR: INSTANCES (horizontal) — each is a callable effect; the [n]
         // index is the Play Effect node's "Instance" pin value. =====
@@ -31921,9 +32088,13 @@ void FrameTick(float dt)
             if (sel) ImGui::PopStyleColor();
             ImGui::PopID(); ImGui::SameLine();
         }
-        if (ImGui::Button("+ Add")) { FxInstance In; snprintf(In.name, sizeof(In.name), "Effect %d", (int)sFxInstances.size()+1); In.layers.push_back(FxLayer()); sFxInstances.push_back(In); sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; }
+        if (ImGui::Button("+ Add")) { FxInstance In; snprintf(In.name, sizeof(In.name), "Effect %d", (int)sFxInstances.size()+1); sFxInstances.push_back(In); sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; }   // empty by default
         ImGui::SameLine();
         if (ImGui::Button("Duplicate")) { FxInstance In = sFxInstances[sFxInst]; snprintf(In.name, sizeof(In.name), "Effect %d", (int)sFxInstances.size()+1); sFxInstances.push_back(In); sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; }
+        // Clear = empty this instance's layers (leaves the instance so the Play Effect index stays valid).
+        if (!sFxInstances[sFxInst].layers.empty()) { ImGui::SameLine();
+            if (ImGui::Button("Clear")) { sFxInstances[sFxInst].layers.clear(); sFxActive = 0; sFxSel = -1; sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove ALL layers from this effect (leaves it empty).\nThe instance stays so the Play Effect index doesn't shift."); }
         if ((int)sFxInstances.size() > 1) { ImGui::SameLine(); if (ImGui::Button("- Remove")) { sFxInstances.erase(sFxInstances.begin()+sFxInst); if (sFxInst >= (int)sFxInstances.size()) sFxInst = (int)sFxInstances.size()-1; sFxActive = 0; sFxSel = -1; sProjectDirty = true; } }
         ImGui::EndChild();
 

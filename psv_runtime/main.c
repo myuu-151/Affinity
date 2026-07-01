@@ -665,6 +665,7 @@ extern int afn_player_frozen;            // defined later; forward-declared so r
 // Length = how many of the 6 trail samples to draw (nearest N). Defaults = original look.
 int afn_qa_trail_alpha = 96, afn_qa_trail_len = 6;    // player (cyan)
 int afn_eqa_trail_alpha = 96, afn_eqa_trail_len = 6;  // enemy (white)
+int afn_wild_charge = 0;   // 1 while a Wild Charge dash is running: yellow trail + blue sparks (Quick Attack reused)
 
 // tint24 = 0xBBGGRR speed-ghost colour (player cyan, enemy red); alpha 0..255.
 static void draw_rig_afterimage(const AfnRig* R, const float* view,
@@ -758,9 +759,10 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
             if (paBack[k] >= s_paFilled) continue;
             int gi = (s_paHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
             int a = (18 + (k + 1) * 13) * afn_qa_trail_alpha / 96;   // far fainter -> near brighter, scaled by Trail Alpha
+            unsigned trailCol = afn_wild_charge ? 0x0000E0FFu : 0x00FFDC96u;   // Wild Charge = yellow, else cyan (0xBBGGRR)
             draw_rig_afterimage(PR, view, s_paTrail[gi][0], s_paTrail[gi][1],
                                 s_paTrail[gi][2], s_paTrail[gi][3],
-                                AFN_PLAYER_SCALE, floorN, a, 0x00FFDC96u);   // light cyan
+                                AFN_PLAYER_SCALE, floorN, a, trailCol);
         }
     }
 
@@ -2278,24 +2280,29 @@ static void afn_meteor_render(const float* view) {
         int a=(int)(160*fade*(1.0f-prog*0.7f)); if(a<0)a=0;
         mm_ring(ox,oy,oz, RAx,RAy,RAz, RBx,RBy,RBz, rad, rad, rad*0.16f, MM_COL(120,210,255,a)); }
 
-    // OVALS: a FIXED circular formation of small SOLID glowing "motion bullets" flying alongside
-    // the star (3D ring around the shot axis, camera-facing forward-streaks — no spin). Each one
-    // gets its own comet trail + glow halo, like a mini star.
-    int NOV=8;
-    for (int i=0;i<NOV;i++){ float base=(float)i*(6.2831853f/(float)NOV), ca=cosf(base), sa=sinf(base);
-        float rdx=Ax*ca+Bx*sa, rdy=Ay*ca+By*sa, rdz=Az*ca+Bz*sa;   // world radial (ring placement)
-        float R=3.4f; float pcx=Px+rdx*R, pcy=Py+rdy*R, pcz=Pz+rdz*R;
-        int a=(int)(220*fade);
-        mm_trail(pcx,pcy,pcz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, 6.0f, 1.6f, MM_COL(150,205,255,(int)(a*0.55f)), MM_COL(110,180,255,0));  // trail
-        mm_glow(pcx,pcy,pcz, MJx,MJy,MJz, MNx,MNy,MNz, 3.2f,1.4f, MM_COL(120,195,255,(int)(a*0.45f)), MM_COL(120,195,255,0));   // soft glow halo
-        mm_fill_oval(pcx,pcy,pcz, MJx,MJy,MJz, MNx,MNy,MNz, 1.4f,0.55f, MM_COL(215,238,255,a)); }             // small solid core
+    // OVALS: small blue speed-streaks that shoot FORWARD faster than the star, scattered THROUGH
+    // the whole path corridor (varied radius within the tube). Each loops on its own fast phase —
+    // fades in, streaks up toward the head, then VANISHES — so it reads like a comet's particle rush.
+    int NOV=28; float span = travel < 1.0f ? 1.0f : travel; float pathR = 2.6f;
+    for (int i=0;i<NOV;i++){ unsigned h=(unsigned)(i+1)*2654435761u ^ 0x9E3779B9u;
+        float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f;
+        float ph=fmodf(t*0.055f + fc, 1.0f);                                   // fast forward cycle, staggered per streak
+        float lf=fmodf(fa + ph, 1.0f);                                         // longitudinal fraction 0..1 (moves fwd fast, wraps)
+        float dist=lf*span;                                                    // world distance from launch along forward
+        float ang=(float)i*2.399963f + fb*6.2831853f, ca=cosf(ang), sa=sinf(ang);
+        float rdx=Ax*ca+Bx*sa, rdy=Ay*ca+By*sa, rdz=Az*ca+Bz*sa;
+        float R=pathR*(0.20f + fb*0.80f);                                      // within the path radius, spread across it
+        float pcx=ox+Fx*dist+rdx*R, pcy=oy+Fy*dist+rdy*R, pcz=oz+Fz*dist+rdz*R;
+        float av=sinf(ph*3.14159265f);                                         // appear -> peak -> VANISH over the cycle
+        int a=(int)(200*fade*av); if(a<0)a=0;
+        mm_fill_oval(pcx,pcy,pcz, MJx,MJy,MJz, MNx,MNy,MNz, 0.5f,0.16f, MM_COL(70,150,255,a)); }   // tiny blue speed-streaks
 
     // STAR: single projectile at the head — comet GLOW TRAIL back along -forward, GLOW halo, star.
     { float srad=2.6f*(1.0f-prog*0.20f), rot=t*0.18f; int a=(int)(255*fade);
-        mm_trail(Px,Py,Pz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, 12.0f, srad*1.5f, MM_COL(255,225,110,(int)(a*0.8f)), MM_COL(255,200,60,0));
-        mm_glow(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad*3.0f,srad*3.0f, MM_COL(255,220,80,(int)(a*0.5f)), MM_COL(255,210,70,0));   // soft glow halo
-        mm_star(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad, rot, MM_COL(255,225,90,a));
-        mm_star(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad*0.5f, rot, MM_COL(255,255,225,a)); }         // white core
+        mm_trail(Px,Py,Pz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, 12.0f, srad*1.7f, MM_COL(110,185,255,(int)(a*0.75f)), MM_COL(80,150,255,0));   // BLUE trail
+        mm_glow(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad*3.2f,srad*3.2f, MM_COL(90,170,255,(int)(a*0.55f)), MM_COL(80,150,255,0));   // BLUE glow halo
+        mm_star(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad, rot, MM_COL(255,225,70,a));                 // yellow star
+        mm_star(Px,Py,Pz, Rx,Ry,Rz, Ux,Uy,Uz, srad*0.5f, rot, MM_COL(255,255,190,a)); }         // bright yellow core
 
     // IMPACT FLASH: bright core disc at the launch point, fast expand + fade at the start.
     if (prog < 0.35f){ float f=1.0f-prog/0.35f; float rad=4.0f+(1.0f-f)*9.0f;
@@ -2304,6 +2311,247 @@ static void afn_meteor_render(const float* view) {
 
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Electroweb — HARDCODED status-move prototype. Spawns a spider-web lattice of
+// crackling electric lines on the ground ahead of the player. Anyone who walks
+// into its radius is SNARED (immobilised) for ~2 seconds. Additive, jittery,
+// with a shimmer that ripples through the strands. Migrate to a node/effect later.
+// ---------------------------------------------------------------------------
+static int   s_ew_active = 0, s_ew_life = 0, s_ew_inPrev = 0;
+static float s_ew_x = 0.0f, s_ew_y = 0.0f, s_ew_z = 0.0f, s_ew_r = 22.0f;
+int afn_player_stuck = 0;   // frames the player is immobilised by an Electroweb (0 = free)
+#define EW_MAXLIFE 360      // web persists ~6s
+
+static void afn_electroweb_fire(float px, float py, float pz, float yaw) {
+    float yr = yaw * (3.14159265f/180.0f);
+    s_ew_x = px + sinf(yr)*22.0f; s_ew_z = pz + cosf(yr)*22.0f; s_ew_y = py + 0.5f;   // on the ground ahead
+    s_ew_r = 22.0f; s_ew_life = EW_MAXLIFE; s_ew_active = 1; s_ew_inPrev = 0;
+}
+static void afn_electroweb_step(void) { if (s_ew_active && !afn_paused) { if (--s_ew_life <= 0) s_ew_active = 0; } }
+
+// One crackling web strand a->b: a billboarded additive ribbon jittered sideways (in the
+// ground plane) + a little in Y, tapering the jitter to 0 at the endpoints so the web joints stay put.
+static void afn_ew_edge(float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
+                        float ax,float ay,float az, float bx,float by,float bz,
+                        float w, unsigned col, unsigned rng) {
+    float dx=bx-ax, dz=bz-az; float dl=sqrtf(dx*dx+dz*dz); if(dl<0.001f)dl=0.001f;
+    float hpx=-dz/dl, hpz=dx/dl;                                  // horizontal perp (crackle jitter)
+    float sdr=dx*Rx+dz*Rz, sdu=dx*Ux+dz*Uz; float sm=sqrtf(sdr*sdr+sdu*sdu); if(sm<0.001f)sm=0.001f; sdr/=sm; sdu/=sm;
+    float wpx=Rx*(-sdu)+Ux*sdr, wpy=Ry*(-sdu)+Uy*sdr, wpz=Rz*(-sdu)+Uz*sdr;   // screen-perp (ribbon width)
+    int M=5, n=0;
+    for (int i=0;i<=M;i++){ float t=(float)i/(float)M;
+        float px=ax+(bx-ax)*t, py=ay+(by-ay)*t, pz=az+(bz-az)*t;
+        float edge=t<0.5f?t:(1.0f-t), amt=edge*4.0f<1.0f?edge*4.0f:1.0f;
+        rng^=rng<<13; rng^=rng>>17; rng^=rng<<5; px += hpx*((float)(rng&0xFFFF)/32768.0f-1.0f)*1.1f*amt;
+        rng^=rng<<13; rng^=rng>>17; rng^=rng<<5; pz += hpz*((float)(rng&0xFFFF)/32768.0f-1.0f)*1.1f*amt;
+        rng^=rng<<13; rng^=rng>>17; rng^=rng<<5; py += ((float)(rng&0xFFFF)/32768.0f-1.0f)*0.7f*amt;
+        MMV(n, px-wpx*w, py-wpy*w, pz-wpz*w, col); n++;
+        MMV(n, px+wpx*w, py+wpy*w, pz+wpz*w, col); n++;
+    }
+    mm_flush(n, GL_TRIANGLE_STRIP);
+}
+static void afn_electroweb_render(const float* view) {
+    if (!s_ew_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float cx=s_ew_x, cy=s_ew_y, cz=s_ew_z;
+    float age = 1.0f - (float)s_ew_life/(float)EW_MAXLIFE;
+    float fade = (s_ew_life < 30) ? (float)s_ew_life/30.0f : 1.0f;   // fade out at the end
+    if (age < 0.08f) fade *= age/0.08f;                             // ...and in at the start
+    static int frame = 0; frame++;                                  // shimmer clock (frame counter, resume-safe)
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int SP=8, RG=3; float w=0.35f; unsigned eidx=0;
+    for (int si=0; si<SP; si++){
+        float a0=(float)si*(6.2831853f/(float)SP), a1=(float)(si+1)*(6.2831853f/(float)SP);
+        float c0=cosf(a0), s0=sinf(a0), c1=cosf(a1), s1=sinf(a1);
+        float prevx=cx, prevz=cz;                                   // start each spoke at the centre
+        for (int ri=1; ri<=RG; ri++){
+            float rr=s_ew_r*(float)ri/(float)RG;
+            float px=cx+c0*rr, pz=cz+s0*rr;
+            float pul=0.55f+0.45f*sinf((float)frame*0.28f+(float)(eidx++)*0.7f);   // shimmer ripples along the web
+            int a=(int)(210*fade*pul); if(a<0)a=0;
+            afn_ew_edge(Rx,Ry,Rz,Ux,Uy,Uz, prevx,cy,prevz, px,cy,pz, w, MM_COL(255,235,110,a), (eidx*2654435761u)^(unsigned)frame);   // spoke segment
+            prevx=px; prevz=pz;
+            float qx=cx+c1*rr, qz=cz+s1*rr;
+            float pul2=0.55f+0.45f*sinf((float)frame*0.28f+(float)(eidx++)*0.7f);
+            int a2=(int)(210*fade*pul2); if(a2<0)a2=0;
+            afn_ew_edge(Rx,Ry,Rz,Ux,Uy,Uz, px,cy,pz, qx,cy,qz, w, MM_COL(255,235,110,a2), (eidx*2654435761u)^(unsigned)frame);   // ring segment
+        }
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Fire Spin — HARDCODED prototype. A swirling vortex of flames around the player:
+// camera-facing flame billboards (orange glow + yellow core) laid out along a
+// helix that winds up a column, rotating + rising + looping so it reads as a
+// spinning fire tornado. Follows the player each frame. Migrate to a preset later.
+// ---------------------------------------------------------------------------
+static int s_fs_active = 0, s_fs_life = 0;
+#define FS_MAXLIFE 240
+static void afn_firespin_fire(void)  { s_fs_active = 1; s_fs_life = FS_MAXLIFE; }
+static void afn_firespin_step(void)  { if (s_fs_active && !afn_paused) { if (--s_fs_life <= 0) s_fs_active = 0; } }
+// One camera-facing FLAME: a triangle standing on the floor — base is camera-right wide, apex
+// points straight UP in world. Per-vertex gradient (hot colBase at the floor -> colTip fading at
+// the apex) so it reads as a licking flame rather than a soft blob.
+static void mm_flame(float cx,float cz,float fy, float Rx,float Ry,float Rz, float w,float h, unsigned colBase, unsigned colTip) {
+    int n=0;
+    MMV(n, cx-Rx*w, fy-Ry*w, cz-Rz*w, colBase); n++;
+    MMV(n, cx+Rx*w, fy+Ry*w, cz+Rz*w, colBase); n++;
+    MMV(n, cx,      fy+h,     cz,      colTip ); n++;
+    mm_flush(n, GL_TRIANGLES);
+}
+static void afn_firespin_render(const float* view, float px, float py, float pz) {
+    if (!s_fs_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8];
+    float fade = (s_fs_life < 20) ? (float)s_fs_life/20.0f : 1.0f;
+    if (FS_MAXLIFE - s_fs_life < 12) fade *= (float)(FS_MAXLIFE - s_fs_life)/12.0f;   // ease in
+    static int frame = 0; frame++;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive fire
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    // A dense SPIRAL of small flames on the GROUND, rotating over time (the "spin").
+    float fy = py + 0.5f;                                    // floor height
+    int M=56; float turns=2.5f, Rmax=9.0f, spin=(float)frame*0.055f;
+    for (int k=0;k<M;k++){
+        float t = (float)k/(float)M;
+        float ang = t*6.2831853f*turns + spin;               // winds around; +spin rotates it
+        float rad = Rmax*(0.14f + 0.86f*t);                  // spirals outward from the player
+        float fx = px + cosf(ang)*rad, fz = pz + sinf(ang)*rad;
+        unsigned h=(unsigned)(k*2+1)*2654435761u ^ (unsigned)frame;
+        h^=h<<13; h^=h>>17; h^=h<<5; float fl = 0.55f + 0.45f*((float)(h&0xFF)/255.0f);   // per-flame flicker
+        float endT = t<0.08f ? t/0.08f : (t>0.92f ? (1.0f-t)/0.08f : 1.0f);              // soften the spiral ends
+        float A = fade*fl*endT;
+        float fh = 3.2f + fl*2.2f, fw = 1.0f + fl*0.5f;      // flame height / width (flicker)
+        mm_flame(fx,fz,fy, Rx,Ry,Rz, fw*1.15f, fh*1.15f, MM_COL(255, 80,15,(int)(110*A)), MM_COL(180,20, 0,0));   // outer red-orange glow
+        mm_flame(fx,fz,fy, Rx,Ry,Rz, fw*0.60f, fh*0.80f, MM_COL(255,200,90,(int)(150*A)), MM_COL(255,90,20,0));   // yellow body
+        mm_flame(fx,fz,fy, Rx,Ry,Rz, fw*0.32f, fh*0.42f, MM_COL(255,240,190,(int)(160*A)), MM_COL(255,180,80,0)); // white-hot base
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Bubble Beam — HARDCODED prototype. A forward stream of TRANSLUCENT bubbles: a
+// looping fleet of camera-facing bubbles (soft blue body + bright rim + a white
+// highlight) that drift forward, spread into a cone, wobble, and pop at the end.
+// Uses ALPHA blend (not additive) so the bubbles read as see-through. Migrate later.
+// ---------------------------------------------------------------------------
+static int   s_bb_active = 0, s_bb_life = 0;
+static float s_bb_ox,s_bb_oy,s_bb_oz, s_bb_fx,s_bb_fy,s_bb_fz, s_bb_ax,s_bb_ay,s_bb_az, s_bb_bx,s_bb_by,s_bb_bz;
+#define BB_MAXLIFE 120
+static void afn_bubblebeam_fire(float px, float py, float pz, float yaw) {
+    float yr = yaw * (3.14159265f/180.0f);
+    s_bb_fx=sinf(yr); s_bb_fy=0.0f; s_bb_fz=cosf(yr);      // forward
+    s_bb_ax=cosf(yr); s_bb_ay=0.0f; s_bb_az=-sinf(yr);     // right (cone spread basis)
+    s_bb_bx=0.0f;     s_bb_by=1.0f; s_bb_bz=0.0f;          // up
+    s_bb_ox=px+s_bb_fx*4.0f; s_bb_oy=py+7.0f; s_bb_oz=pz+s_bb_fz*4.0f;   // mouth height, just ahead
+    s_bb_life=BB_MAXLIFE; s_bb_active=1;
+}
+static void afn_bubblebeam_step(void) { if (s_bb_active && !afn_paused) { if (--s_bb_life <= 0) s_bb_active = 0; } }
+static void afn_bubblebeam_render(const float* view) {
+    if (!s_bb_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float fade = (s_bb_life < 20) ? (float)s_bb_life/20.0f : 1.0f;
+    static int frame=0; frame++;
+    float ox=s_bb_ox,oy=s_bb_oy,oz=s_bb_oz;
+    float Fx=s_bb_fx,Fy=s_bb_fy,Fz=s_bb_fz, Ax=s_bb_ax,Ay=s_bb_ay,Az=s_bb_az, Bx=s_bb_bx,By=s_bb_by,Bz=s_bb_bz;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // TRANSLUCENT (not additive)
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int N=26; float range=40.0f;
+    float front = (float)(BB_MAXLIFE - s_bb_life) / 26.0f; if (front > 1.0f) front = 1.0f;   // stream extends forward over ~26 frames (ramp, not instant)
+    for (int i=0;i<N;i++){ unsigned h=(unsigned)(i+1)*2654435761u ^ 0x9E3779B9u;
+        float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f;
+        float ph=fmodf((float)frame*0.02f + fc, 1.0f);                    // travel phase (loops -> a steady stream)
+        if (ph > front) continue;                                         // the stream front hasn't reached this bubble yet
+        float dist=ph*range;
+        float sAng=fa*6.2831853f, sR=(0.5f+fb*2.5f)*(0.3f+ph*1.6f);        // cone spread widens with distance
+        float wob=sinf((float)frame*0.15f + (float)i)*0.7f;               // gentle wobble
+        float cx=ox+Fx*dist+(Ax*cosf(sAng)+Bx*sinf(sAng))*sR+Ax*wob;
+        float cy=oy+Fy*dist+(Ay*cosf(sAng)+By*sinf(sAng))*sR+Ay*wob;
+        float cz=oz+Fz*dist+(Az*cosf(sAng)+Bz*sinf(sAng))*sR+Az*wob;
+        float rad=0.6f+fb*1.1f;                                           // varied bubble sizes (smaller)
+        float A=fade; if(ph>0.85f) A*=(1.0f-ph)/0.15f; if(ph<0.05f) A*=ph/0.05f;   // fade in / pop at the end
+        mm_fill_oval(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, rad,rad, MM_COL(150,200,255,(int)(75*A)));          // translucent body
+        mm_ring     (cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, rad,rad, rad*0.16f, MM_COL(215,235,255,(int)(185*A)));  // bright rim
+        float hx=cx+Ux*rad*0.4f-Rx*rad*0.35f, hy=cy+Uy*rad*0.4f-Ry*rad*0.35f, hz=cz+Uz*rad*0.4f-Rz*rad*0.35f;
+        mm_fill_oval(hx,hy,hz, Rx,Ry,Rz, Ux,Uy,Uz, rad*0.24f,rad*0.24f, MM_COL(255,255,255,(int)(200*A))); // highlight
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Ice Beam — HARDCODED prototype. Three strands of ice DIAMONDS along a forward
+// beam: a STRAIGHT light-blue centre line, plus TWO dark-blue side strands that
+// wind around the axis in a helix (180 deg apart) and rotate over time. Translucent
+// crystals. The beam shoots out (front ramps forward) then holds. Migrate later.
+// ---------------------------------------------------------------------------
+static int   s_ib_active = 0, s_ib_life = 0;
+static float s_ib_ox,s_ib_oy,s_ib_oz, s_ib_fx,s_ib_fy,s_ib_fz, s_ib_ax,s_ib_ay,s_ib_az, s_ib_bx,s_ib_by,s_ib_bz;
+#define IB_MAXLIFE 130
+// A camera-facing DIAMOND (rhombus): center + up/right/down/left as a triangle fan.
+static void mm_diamond(float cx,float cy,float cz, float Rx,float Ry,float Rz, float Ux,float Uy,float Uz,
+                       float w,float h, unsigned col) {
+    int n=0;
+    MMV(n,cx,cy,cz,col); n++;
+    MMV(n, cx+Ux*h, cy+Uy*h, cz+Uz*h, col); n++;   // top
+    MMV(n, cx+Rx*w, cy+Ry*w, cz+Rz*w, col); n++;   // right
+    MMV(n, cx-Ux*h, cy-Uy*h, cz-Uz*h, col); n++;   // bottom
+    MMV(n, cx-Rx*w, cy-Ry*w, cz-Rz*w, col); n++;   // left
+    MMV(n, cx+Ux*h, cy+Uy*h, cz+Uz*h, col); n++;   // close back to top
+    mm_flush(n, GL_TRIANGLE_FAN);
+}
+static void afn_icebeam_fire(float px, float py, float pz, float yaw) {
+    float yr = yaw * (3.14159265f/180.0f);
+    s_ib_fx=sinf(yr); s_ib_fy=0.0f; s_ib_fz=cosf(yr);      // forward
+    s_ib_ax=cosf(yr); s_ib_ay=0.0f; s_ib_az=-sinf(yr);     // helix cross-section basis
+    s_ib_bx=0.0f;     s_ib_by=1.0f; s_ib_bz=0.0f;
+    s_ib_ox=px+s_ib_fx*4.0f; s_ib_oy=py+7.0f; s_ib_oz=pz+s_ib_fz*4.0f;
+    s_ib_life=IB_MAXLIFE; s_ib_active=1;
+}
+static void afn_icebeam_step(void) { if (s_ib_active && !afn_paused) { if (--s_ib_life <= 0) s_ib_active = 0; } }
+static void afn_icebeam_render(const float* view) {
+    if (!s_ib_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float fade = (s_ib_life < 18) ? (float)s_ib_life/18.0f : 1.0f;
+    static int frame=0; frame++;
+    float ox=s_ib_ox,oy=s_ib_oy,oz=s_ib_oz;
+    float Fx=s_ib_fx,Fy=s_ib_fy,Fz=s_ib_fz, Ax=s_ib_ax,Ay=s_ib_ay,Az=s_ib_az, Bx=s_ib_bx,By=s_ib_by,Bz=s_ib_bz;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // translucent ice crystals
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    int N=22; float range=46.0f, coils=3.0f, helixR=3.0f;
+    float front = (float)(IB_MAXLIFE - s_ib_life)/20.0f; if (front > 1.0f) front = 1.0f;   // beam shoots out over ~20 frames
+    int a=(int)(255*fade);
+    // CENTER strand: straight down the beam axis (no spiral), LIGHT BLUE crystal.
+    for (int i=0;i<N;i++){ float t=(float)i/(float)(N-1); if (t > front) continue;
+        float dist=t*range; float cx=ox+Fx*dist, cy=oy+Fy*dist, cz=oz+Fz*dist;
+        mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 1.6f, 2.3f, MM_COL(150,210,255,(int)(150*fade)));    // light-blue body
+        mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.9f, 1.4f, MM_COL(240,250,255,(int)(0.85f*a)));     // white core
+    }
+    // TWO SIDE strands: wind around the axis in a helix (180 deg apart), DARK BLUE.
+    for (int s=0;s<2;s++){ float ph0=(float)s*3.14159265f;
+        for (int i=0;i<N;i++){ float t=(float)i/(float)(N-1); if (t > front) continue;
+            float dist=t*range; float ang=t*coils*6.2831853f + (float)frame*0.12f + ph0;   // helix winds + rotates
+            float cx=ox+Fx*dist+(Ax*cosf(ang)+Bx*sinf(ang))*helixR;
+            float cy=oy+Fy*dist+(Ay*cosf(ang)+By*sinf(ang))*helixR;
+            float cz=oz+Fz*dist+(Az*cosf(ang)+Bz*sinf(ang))*helixR;
+            mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 1.3f, 1.9f, MM_COL(25,60,180,(int)(180*fade)));  // dark-blue body
+            mm_diamond(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, 0.7f, 1.1f, MM_COL(80,130,230,(int)(0.85f*a)));  // lighter core
+        }
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
 // Beam pool: count each bolt's life down; expire at 0.
@@ -2776,6 +3024,21 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
         afn_part_grav  = L->pGrav;  afn_part_size0 = L->pSize * 0.1f; afn_part_size1 = 0.0f;
         afn_part_col0 = 0xFFFFFFFFu; afn_part_col1 = 0x00FFFFFFu;
         afn_particles_emit(px, py + 14.0f, pz);
+    } else if (L->kind == 3) {
+        afn_meteor_fire(px, py, pz, yawDeg);   // Meteor Mash projectile (tuned prototype)
+    } else if (L->kind == 4) {
+        // Wild Charge: reuse the Quick Attack dash, flagged for the electric visuals (yellow
+        // trail + light-blue sparks). The movement block picks up the trigger next frame.
+        afn_qa_trigger = 1; afn_wild_charge = 1; afn_qa_tgt = -1;
+#if defined(AFN_HAS_SPRITE_IDX) && defined(AFN_HAS_CAM_LOCK)
+        if (afn_cam_lock_target >= 0) afn_qa_tgt = afn_cam_lock_target;   // rush the locked target
+#endif
+    } else if (L->kind == 5) {
+        afn_electroweb_fire(px, py, pz, yawDeg);   // Electroweb snare lattice (status move)
+    } else if (L->kind == 6) {
+        afn_firespin_fire();                       // Fire Spin vortex on the player (follows live pos)
+    } else if (L->kind == 7) {
+        afn_bubblebeam_fire(px, py, pz, yawDeg);   // Bubble Beam forward stream
     } else {
         // Lightning bundle — all params are WORLD units straight from the layer (the editor's
         // 3D sim authors in the same units, so it mirrors this exactly). No px scaling.
@@ -4745,6 +5008,13 @@ int main(void)
         // Thunder charge: the left stick aims (not move), so drop the move intent — the player
         // stands IDLE (no walk anim / facing churn) instead of acting on the stick.
         if (afn_thunder_charging) { afn_input_fwd = 0; afn_input_right = 0; }
+        // Electroweb snare: stepping into a live web immobilises the player for ~2s (rising edge).
+        if (s_ew_active) {
+            float ex = playerX - s_ew_x, ez = playerZ - s_ew_z; int inside = (ex*ex + ez*ez) < s_ew_r*s_ew_r;
+            if (inside && !s_ew_inPrev) afn_player_stuck = 120;
+            s_ew_inPrev = inside;
+        }
+        if (afn_player_stuck > 0) { afn_input_fwd = 0; afn_input_right = 0; afn_player_stuck--; }
         if (afn_stick_8way && (afn_input_fwd || afn_input_right)) {
             float m = sqrtf((float)afn_input_fwd*afn_input_fwd + (float)afn_input_right*afn_input_right);
             float a = atan2f((float)afn_input_right, (float)afn_input_fwd);
@@ -5120,6 +5390,7 @@ int main(void)
 #if defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
         afn_qa_hit = 0;   // 1 only on the frame contact lands (Quick Attack Hit gate)
         afn_qa_started = 0;   // 1 only on the frame the dash begins (Quick Attack Started gate)
+        // Wild Charge is node-driven now (Play Effect -> kind=4 layer -> afn_qa_trigger + afn_wild_charge).
         if (afn_qa_trigger && afn_qa_phase == 0 && afn_dodge_frames <= 0 && !afn_player_frozen) {
             float dirx = 0.0f, dirz = 1.0f; int haveDir = 0;
             if (afn_qa_tgt >= 0) {
@@ -5179,6 +5450,26 @@ int main(void)
         }
         if (afn_qa_cd > 0) afn_qa_cd--;   // spam-gate countdown
         if (s_qaCamPunch > 0.001f) s_qaCamPunch -= s_qaCamPunch * 0.12f; else s_qaCamPunch = 0.0f;   // ease the punch back out
+        // Wild Charge visuals: crackle short BLUE electric bolts around the player each dash frame
+        // (via the beam pool). The yellow trail is handled in rigs_render's afterimage.
+        if (afn_wild_charge) {
+            if (afn_qa_active && !afn_player_frozen) {
+                static unsigned wcs = 0x1234567u;
+                for (int k = 0; k < 2; k++) {
+                    wcs^=wcs<<13; wcs^=wcs>>17; wcs^=wcs<<5; float a1=(float)(wcs&0xFFFF)/65536.0f*6.2831853f;
+                    wcs^=wcs<<13; wcs^=wcs>>17; wcs^=wcs<<5; float r1=1.0f+(float)(wcs&0xFF)/255.0f*3.5f;
+                    wcs^=wcs<<13; wcs^=wcs>>17; wcs^=wcs<<5; float h1=(float)(wcs&0xFF)/255.0f*11.0f;
+                    wcs^=wcs<<13; wcs^=wcs>>17; wcs^=wcs<<5; float a2=(float)(wcs&0xFFFF)/65536.0f*6.2831853f;
+                    wcs^=wcs<<13; wcs^=wcs>>17; wcs^=wcs<<5; float r2=1.0f+(float)(wcs&0xFF)/255.0f*3.5f;
+                    wcs^=wcs<<13; wcs^=wcs>>17; wcs^=wcs<<5; float h2=(float)(wcs&0xFF)/255.0f*11.0f;
+                    afn_beam_width=0.22f; afn_beam_bow=0.0f; afn_beam_jitter=1.5f; afn_beam_segs=8;
+                    afn_beam_decay=1.0f; afn_beam_pulse=0.0f; afn_beam_life=4; afn_beam_travel=0;
+                    afn_beam_col=0xFFFFC878u; afn_beam_filaments=2; afn_beam_orb=0.0f;   // light blue (0xAABBGGRR: B=FF,G=C8,R=78)
+                    afn_beam_cast(playerX+cosf(a1)*r1, playerY+h1, playerZ+sinf(a1)*r1,
+                                  playerX+cosf(a2)*r2, playerY+h2, playerZ+sinf(a2)*r2);
+                }
+            } else { afn_wild_charge = 0; }   // dash ended -> stop the sparks/trail
+        }
 #endif
 
         // Node-driven world-axis push velocity (boost pads / knockback). 8.8
@@ -5915,11 +6206,24 @@ int main(void)
         afn_beam_resolve(playerX, playerY, playerZ, playerYaw);
         afn_beam_render(view);
 
-        // HARDCODED TEST: tap Select to cast Meteor Mash in place (ovals + circle streak +
-        // glowing stars/trails + impact flash). Migrate to an Effects layer once tuned.
-        if (afn_keys_pressed & KEY_SELECT) afn_meteor_fire(playerX, playerY, playerZ, playerYaw);
+        // Meteor Mash is now node-driven (Play Effect -> kind=3 layer -> afn_meteor_fire); Select
+        // is reused by Wild Charge. Keep rendering/stepping the projectile whenever one is live.
         afn_meteor_render(view);
         afn_meteor_step();
+        // Electroweb is node-driven now (Play Effect -> kind=5 layer -> afn_electroweb_fire).
+        afn_electroweb_render(view);
+        afn_electroweb_step();
+        // Fire Spin is node-driven now (Play Effect -> kind=6 layer -> afn_firespin_fire); it
+        // follows the player's live position, so keep rendering/stepping whenever one is active.
+        afn_firespin_render(view, playerX, playerY, playerZ);
+        afn_firespin_step();
+        // Bubble Beam is node-driven now (Play Effect -> kind=7 layer -> afn_bubblebeam_fire).
+        afn_bubblebeam_render(view);
+        afn_bubblebeam_step();
+        // HARDCODED TEST: tap Select to fire an Ice Beam (spiraling helix of ice diamonds).
+        if (afn_keys_pressed & KEY_SELECT) afn_icebeam_fire(playerX, playerY, playerZ, playerYaw);
+        afn_icebeam_render(view);
+        afn_icebeam_step();
 
         }   // end 3D world (skipped in 2D menu mode)
 
