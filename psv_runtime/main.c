@@ -2946,6 +2946,8 @@ static void afn_flame_render(const float* view){
 // ---------------------------------------------------------------------------
 static int   s_au_active=0, s_au_life=0;
 static float s_au_ox,s_au_oy,s_au_oz, s_au_fx,s_au_fy,s_au_fz, s_au_ax,s_au_ay,s_au_az, s_au_bx,s_au_by,s_au_bz;
+static int   s_au_cr=96, s_au_cg=176, s_au_cb=255;   // base tint (set from the kind-14 layer colour)
+static int   s_au_tr=94, s_au_tg=162, s_au_tb=222;   // trail tint (set from the kind-14 layer trail colour)
 #define AU_MAXLIFE 92
 static void afn_aura_fire(float px,float py,float pz,float yaw){
     float yr=yaw*(3.14159265f/180.0f);
@@ -2956,13 +2958,18 @@ static void afn_aura_fire(float px,float py,float pz,float yaw){
     s_au_life=AU_MAXLIFE; s_au_active=1;
 }
 static void afn_aura_step(void){ if(s_au_active && !afn_paused){ if(--s_au_life<=0) s_au_active=0; } }
-// Reusable aura ORB: layered blue -> cyan halo + a white-hot core, sized by R (the core-glow
-// radius; R=1.8 reproduces the standalone Aura Sphere's proportions). Assumes additive blend set.
-static void afn_aura_orb(float Rx,float Ry,float Rz,float Ux,float Uy,float Uz, float cx,float cy,float cz, float R, float ef){
-    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*3.00f,R*3.00f, MM_COL(70,140,255,(int)(120*ef)), MM_COL(60,120,255,0));
-    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*1.83f,R*1.83f, MM_COL(150,210,255,(int)(150*ef)), MM_COL(120,190,255,0));
-    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*1.00f,R*1.00f, MM_COL(220,240,255,(int)(220*ef)), MM_COL(200,230,255,0));
-    mm_fill_oval(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*0.47f,R*0.47f, MM_COL(240,250,255,(int)(235*ef)));
+// Reusable aura ORB: layered coloured halo whitening into a hot core, sized by R (the core-glow
+// radius; R=1.8 reproduces the standalone Aura Sphere's proportions). (cr,cg,cb) is the base tint;
+// each inner layer is blended toward white so the core reads white-hot regardless of hue. Assumes
+// additive blend set. Default blue tint (96,176,255) reproduces the original prototype colours.
+static void afn_aura_orb_c(float Rx,float Ry,float Rz,float Ux,float Uy,float Uz, float cx,float cy,float cz, float R, float ef, int cr,int cg,int cb){
+    if(cr+cg+cb < 24){ cr=96; cg=176; cb=255; }   // unset/black layer colour -> default blue (black is invisible on additive)
+    #define AU_BR(c,t) ((int)((c) + (255-(c))*(t)))
+    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*3.00f,R*3.00f, MM_COL(cr,cg,cb,(int)(120*ef)), MM_COL(cr,cg,cb,0));
+    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*1.83f,R*1.83f, MM_COL(AU_BR(cr,0.42f),AU_BR(cg,0.34f),AU_BR(cb,0.20f),(int)(150*ef)), MM_COL(AU_BR(cr,0.30f),AU_BR(cg,0.24f),AU_BR(cb,0.14f),0));
+    mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*1.00f,R*1.00f, MM_COL(AU_BR(cr,0.70f),AU_BR(cg,0.62f),AU_BR(cb,0.50f),(int)(220*ef)), MM_COL(AU_BR(cr,0.60f),AU_BR(cg,0.52f),AU_BR(cb,0.42f),0));
+    mm_fill_oval(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, R*0.47f,R*0.47f, MM_COL(AU_BR(cr,0.82f),AU_BR(cg,0.76f),AU_BR(cb,0.66f),(int)(235*ef)));
+    #undef AU_BR
 }
 static void afn_aura_render(const float* view){
     if(!s_au_active) return;
@@ -2977,11 +2984,29 @@ static void afn_aura_render(const float* view){
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive aura glow
     glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
     glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-    mm_trail(cx,cy,cz, s_au_fx,s_au_fy,s_au_fz, Rx,Ry,Rz, Ux,Uy,Uz, 11.0f, 3.4f, MM_COL(90,170,255,(int)(0.7f*200*ef)), MM_COL(60,130,255,0));
-    afn_aura_orb(Rx,Ry,Rz,Ux,Uy,Uz, cx,cy,cz, 1.8f*pulse, ef);
+    mm_trail(cx,cy,cz, s_au_fx,s_au_fy,s_au_fz, Rx,Ry,Rz, Ux,Uy,Uz, 11.0f, 3.4f, MM_COL(s_au_tr,s_au_tg,s_au_tb,(int)(0.7f*200*ef)), MM_COL((int)(s_au_tr*0.6f),(int)(s_au_tg*0.72f),(int)(s_au_tb*0.72f),0));
+    afn_aura_orb_c(Rx,Ry,Rz,Ux,Uy,Uz, cx,cy,cz, 1.8f*pulse, ef, s_au_cr,s_au_cg,s_au_cb);
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
+// Resolve the aura tint (ar,ag,ab) and trail tint (tr,tg,tb) from an instance's kind-14 layer.
+// Unset/near-black aura -> default blue; dark/unset trail -> a bright trail derived from the aura.
+#ifdef AFN_HAS_FX
+static void afn_fx_aura_cols(int instIdx, int* ar,int* ag,int* ab, int* tr,int* tg,int* tb){
+    int cr=96,cg=176,cb=255, xr=0,xg=0,xb=0;
+    if(instIdx>=0 && instIdx<AFN_FX_COUNT){
+        const AfnFxInstance* In=&afn_fx_instances[instIdx];
+        for(int i=0;i<In->layerCount;i++){ const AfnFxLayer* L=&afn_fx_layers[In->layerStart+i];
+            if(L->kind==14){ cr=(int)L->colr; cg=(int)L->colg; cb=(int)L->colb;
+                             xr=(int)L->tcloudr; xg=(int)L->tcloudg; xb=(int)L->tcloudb; break; } }
+    }
+    if(cr+cg+cb<24){ cr=96; cg=176; cb=255; }
+    int tmax=xr; if(xg>tmax)tmax=xg; if(xb>tmax)tmax=xb;
+    if(tmax<90){ xr=(int)(cr*0.72f+26); xg=(int)(cg*0.80f+22); xb=(int)(cb*0.80f+18); }  // dark/unset -> bright from aura
+    if(xr>255)xr=255; if(xg>255)xg=255; if(xb>255)xb=255;
+    *ar=cr;*ag=cg;*ab=cb; *tr=xr;*tg=xg;*tb=xb;
+}
+#endif
 // Draw an Effects-tab INSTANCE's orb-type layers at a fixed point (R = orb radius). Geometry only
 // (additive blend must already be set). Currently supports the Aura Sphere layer (kind 14); add
 // more sphere-type kinds here as they're built.
@@ -2991,8 +3016,9 @@ static void afn_fx_orb_at(float Rx,float Ry,float Rz,float Ux,float Uy,float Uz,
     if(instIdx < 0 || instIdx >= AFN_FX_COUNT) return;
     const AfnFxInstance* In = &afn_fx_instances[instIdx];
     for(int i=0;i<In->layerCount;i++){
-        int kind = afn_fx_layers[In->layerStart + i].kind;
-        if(kind == 14) afn_aura_orb(Rx,Ry,Rz,Ux,Uy,Uz, cx,cy,cz, R*pulse, ef);   // Aura Sphere
+        const AfnFxLayer* L = &afn_fx_layers[In->layerStart + i];
+        if(L->kind == 14)   // Aura Sphere — tinted by the layer's colour
+            afn_aura_orb_c(Rx,Ry,Rz,Ux,Uy,Uz, cx,cy,cz, R*pulse, ef, (int)L->colr,(int)L->colg,(int)L->colb);
     }
 #else
     (void)Rx;(void)Ry;(void)Rz;(void)Ux;(void)Uy;(void)Uz;(void)instIdx;(void)cx;(void)cy;(void)cz;(void)R;(void)ef;(void)pulse;
@@ -3012,6 +3038,9 @@ static void afn_focusblast_aura_render(const float* view){
     float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
     static int frame=0; frame++; float pulse=1.0f+0.09f*sinf((float)frame*0.35f);
     float base=afn_spr_basesize[fbi];
+    int ar,ag,ab,tr,tg,tb; afn_fx_aura_cols(instIdx,&ar,&ag,&ab,&tr,&tg,&tb);   // trail tint from the layer
+    (void)ar;(void)ag;(void)ab;   // orb tint is read per-layer inside afn_fx_orb_at
+    unsigned trCol=MM_COL(tr,tg,tb,140), trEdge=MM_COL((int)(tr*0.6f),(int)(tg*0.72f),(int)(tb*0.72f),0);
     glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
@@ -3022,14 +3051,14 @@ static void afn_focusblast_aura_render(const float* view){
     }
     for(int k=0;k<AFN_FB_POOL;k++){ if(!s_fbPool[k].active) continue;
         float R=base*s_fbPool[k].scale*0.25f*0.6f; if(R<0.15f)R=0.15f;
-        mm_trail(s_fbPool[k].x,s_fbPool[k].y,s_fbPool[k].z, s_fbPool[k].dirx,0.0f,s_fbPool[k].dirz, Rx,Ry,Rz, Ux,Uy,Uz, R*6.0f, R*1.9f, MM_COL(90,170,255,140), MM_COL(60,130,255,0));
+        mm_trail(s_fbPool[k].x,s_fbPool[k].y,s_fbPool[k].z, s_fbPool[k].dirx,0.0f,s_fbPool[k].dirz, Rx,Ry,Rz, Ux,Uy,Uz, R*6.0f, R*1.9f, trCol, trEdge);
         afn_fx_orb_at(Rx,Ry,Rz,Ux,Uy,Uz, instIdx, s_fbPool[k].x,s_fbPool[k].y,s_fbPool[k].z, R, 1.0f, pulse);
     }
     // ENEMY orb (charge spot / in flight) — same focus_gfx effect, at its s_efb position.
     if(s_efbActive || s_efbCharging){
         float R=base*s_efbScale*0.25f*0.6f; if(R<0.15f)R=0.15f;
         if(s_efbActive && !s_efbCharging)
-            mm_trail(s_efbX,s_efbY,s_efbZ, s_efbDirX,0.0f,s_efbDirZ, Rx,Ry,Rz, Ux,Uy,Uz, R*6.0f, R*1.9f, MM_COL(90,170,255,140), MM_COL(60,130,255,0));
+            mm_trail(s_efbX,s_efbY,s_efbZ, s_efbDirX,0.0f,s_efbDirZ, Rx,Ry,Rz, Ux,Uy,Uz, R*6.0f, R*1.9f, trCol, trEdge);
         afn_fx_orb_at(Rx,Ry,Rz,Ux,Uy,Uz, instIdx, s_efbX,s_efbY,s_efbZ, R, 1.0f, pulse);
     }
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
@@ -3537,6 +3566,13 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
     } else if (L->kind == 13) {
         afn_flame_fire(px, py, pz, yawDeg);        // Flamethrower (forward fire jet)
     } else if (L->kind == 14) {
+        // Orb tint from the layer's Aura colour; trail tint from its Trail colour (both with fallbacks).
+        s_au_cr=(int)L->colr; s_au_cg=(int)L->colg; s_au_cb=(int)L->colb;
+        if(s_au_cr+s_au_cg+s_au_cb < 24){ s_au_cr=96; s_au_cg=176; s_au_cb=255; }
+        { int tmax=(int)L->tcloudr; if((int)L->tcloudg>tmax)tmax=(int)L->tcloudg; if((int)L->tcloudb>tmax)tmax=(int)L->tcloudb;
+          if(tmax<90){ s_au_tr=(int)(s_au_cr*0.72f+26); s_au_tg=(int)(s_au_cg*0.80f+22); s_au_tb=(int)(s_au_cb*0.80f+18); }
+          else { s_au_tr=(int)L->tcloudr; s_au_tg=(int)L->tcloudg; s_au_tb=(int)L->tcloudb; }
+          if(s_au_tr>255)s_au_tr=255; if(s_au_tg>255)s_au_tg=255; if(s_au_tb>255)s_au_tb=255; }
         afn_aura_fire(px, py, pz, yawDeg);         // Aura Sphere (traveling energy orb)
     } else {
         // Lightning bundle — all params are WORLD units straight from the layer (the editor's

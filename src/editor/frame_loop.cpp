@@ -31890,12 +31890,18 @@ void FrameTick(float dt)
             ImGui::Spacing();
             ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
         } else if (L.kind == 14) {
-            // Aura Sphere — a glowing blue energy orb that travels forward: soft blue -> cyan pulsing
-            // halo, a white-hot core, and a comet trail.
-            ImGui::TextWrapped("Aura Sphere: a glowing blue energy orb that flies forward — a soft "
-                               "blue -> cyan pulsing halo with a white-hot core and a comet trail.");
+            // Aura Sphere — a glowing energy orb: soft coloured halo -> whitening core + comet trail.
+            ImGui::TextWrapped("Aura Sphere: a glowing energy orb — a soft coloured halo pulsing into a "
+                               "white-hot core, with a comet trail. Colour below sets the halo/tint.");
             ImGui::Spacing();
-            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node.");
+            { float acol[3] = { L.bColR, L.bColG, L.bColB };
+              if (ImGui::ColorEdit3("Aura colour", acol, ImGuiColorEditFlags_NoInputs)) { L.bColR=acol[0]; L.bColG=acol[1]; L.bColB=acol[2]; sProjectDirty = true; } }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Base colour of the aura (halo/tint). The core whitens toward this.\nUsed anywhere this instance drives an orb (Focus Blast, enemy orb, Play Effect).");
+            { float tcol[3] = { L.tCloudR, L.tCloudG, L.tCloudB };
+              if (ImGui::ColorEdit3("Trail colour", tcol, ImGuiColorEditFlags_NoInputs)) { L.tCloudR=tcol[0]; L.tCloudG=tcol[1]; L.tCloudB=tcol[2]; sProjectDirty = true; } }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colour of the comet trail behind the orb.\nLeave dark to auto-derive a bright trail from the aura colour.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Trigger it with the Play Effect node, or assign this instance\nas an attached-sprite Effect (e.g. the focus ball).");
         }
         ImGui::EndChild();
         ImGui::SameLine();
