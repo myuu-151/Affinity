@@ -31668,7 +31668,7 @@ void FrameTick(float dt)
         for (int i = 0; i < (int)Inst.layers.size(); i++) {
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
-            const char* kindTag = Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
+            const char* kindTag = Inst.layers[i].kind == 15 ? "Iw" : Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
             char lbl[64]; snprintf(lbl, sizeof(lbl), "%s: %s%s", kindTag,
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
@@ -31682,8 +31682,8 @@ void FrameTick(float dt)
         // ---- Presets: pick from the dropdown + "Add" to drop in a pre-configured layer ----
         ImGui::SameLine(); ImGui::TextDisabled("| Preset:"); ImGui::SameLine();
         static int sFxPreset = 0;
-        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere" };
-        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 };
+        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere", "Icy Wind" };
+        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
         ImGui::SetNextItemWidth(Scaled(120));
         ImGui::Combo("##fxpreset", &sFxPreset, fxPresetNames, IM_ARRAYSIZE(fxPresetNames));
         ImGui::SameLine();
@@ -31710,7 +31710,7 @@ void FrameTick(float dt)
         ImGui::SetNextItemWidth(Scaled(120));
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
-        { const char* kindName = L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
+        { const char* kindName = L.kind==15?"Icy Wind":L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
           ImGui::TextDisabled("Kind: %s", kindName); }   // set by the preset you added (no radio)
         ImGui::Separator();
         if (L.kind == 0) {
@@ -31902,6 +31902,13 @@ void FrameTick(float dt)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Colour of the comet trail behind the orb.\nLeave dark to auto-derive a bright trail from the aura colour.");
             ImGui::Spacing();
             ImGui::TextDisabled("Trigger it with the Play Effect node, or assign this instance\nas an attached-sprite Effect (e.g. the focus ball).");
+        } else if (L.kind == 15) {
+            // Icy Wind — a tall wide ice-mist wall that sweeps forward like a projectile.
+            ImGui::TextWrapped("Icy Wind: a tall, wide curtain of ice mist that sweeps forward across the "
+                               "map like a projectile — with white four-point sparkles and thin ice shards "
+                               "firing through it.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node (fires along the player's facing).");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -32250,6 +32257,28 @@ void FrameTick(float dt)
                     dl->AddCircleFilled(P, 3.3f*pulse*s, IM_COL32(150,210,255,(int)(150*ef)));
                     dl->AddCircleFilled(P, 1.8f*pulse*s, IM_COL32(220,240,255,(int)(220*ef)));
                     dl->AddCircleFilled(P, 0.9f*s,       IM_COL32(240,250,255,(int)(235*ef))); }
+                continue;
+            }
+            if (Q.kind == 15) {
+                // ---- ICY WIND preview: a pale mist band sweeps +X with white sparkles + shards ----
+                float php=fmodf(sFxClk,110.0f); float prog=php/110.0f;
+                float ef=(110.0f-php)<20.0f?(110.0f-php)/20.0f:1.0f; if(php<8.0f)ef*=php/8.0f;
+                float ox=-20.0f, front=ox+prog*40.0f;   // leading edge sweeps across
+                for(int k=0;k<26;k++){ unsigned h=(unsigned)(k+1)*2246822519u^0x85EBCA6Bu;
+                    float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fd=(float)((h>>24)&0xFF)/255.0f;
+                    float back=fb*9.0f; float dx=front-back; if(dx<ox)continue;
+                    float lat=(fa*2.0f-1.0f)*8.0f, vy=fd*8.0f;
+                    float vz; ImVec2 P=proj(dx,vy,lat,&vz); if(vz<=0.05f)continue;
+                    float rr=(6.0f+fb*4.0f)*focal/vz; if(rr<2)rr=2;
+                    dl->AddCircleFilled(P, rr, IM_COL32(205,228,255,(int)(30*ef))); }               // mist puffs
+                for(int k=0;k<14;k++){ unsigned h=(unsigned)(k+1)*2654435761u^0x27D4EB2Fu;
+                    float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f, fd=(float)((h>>24)&0xFF)/255.0f;
+                    float cyc=fmodf(fa+php*0.05f+fc,1.0f); float dx=(front-9.0f)+cyc*11.0f; if(dx<ox)continue;
+                    float lat=(fb*2.0f-1.0f)*8.0f, vy=fd*8.0f; float av=sinf(cyc*3.14159265f);
+                    float vz; ImVec2 P=proj(dx,vy,lat,&vz); if(vz<=0.05f)continue; float s=focal/vz;
+                    float vz2; ImVec2 Pb=proj(dx+(1.8f+fb*2.0f),vy,lat,&vz2);
+                    if(vz2>0.05f) dl->AddLine(P,Pb, IM_COL32(255,255,255,(int)(200*av*ef)), 1.5f);   // shard streak
+                    dl->AddCircleFilled(P, (0.7f+fb*1.2f)*s, IM_COL32(255,255,255,(int)(220*av*ef))); }  // sparkle
                 continue;
             }
             if (Q.kind != 1) continue;
