@@ -2431,17 +2431,6 @@ static void mm_flame(float cx,float cz,float fy, float Rx,float Ry,float Rz, flo
     MMV(n, cx,      fy+h,     cz,      colTip ); n++;
     mm_flush(n, GL_TRIANGLES);
 }
-// Directional flame tuft: a triangle whose base billboards to the camera (± width along cam-right R)
-// and whose tip licks along an ARBITRARY world dir (dx,dy,dz unit) — for flames pointing outward
-// around a ring rather than straight up. Hot colBase at the base -> colTip fading at the tip.
-static void mm_flame_dir(float cx,float cy,float cz, float dx,float dy,float dz,
-                         float Rx,float Ry,float Rz, float w,float h, unsigned colBase, unsigned colTip) {
-    int n=0;
-    MMV(n, cx-Rx*w, cy-Ry*w, cz-Rz*w, colBase); n++;
-    MMV(n, cx+Rx*w, cy+Ry*w, cz+Rz*w, colBase); n++;
-    MMV(n, cx+dx*h, cy+dy*h, cz+dz*h, colTip ); n++;
-    mm_flush(n, GL_TRIANGLES);
-}
 static void afn_firespin_render(const float* view, float px, float py, float pz) {
     if (!s_fs_active) return;
     float Rx=view[0],Ry=view[4],Rz=view[8];
@@ -2473,6 +2462,35 @@ static void afn_firespin_render(const float* view, float px, float py, float pz)
     glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
+// Procedural FIRE-PARTICLE sprite (generated once): a soft round radial gradient whose alpha is
+// GUARANTEED zero at every quad edge (so stretched particles never show their card), broken up by
+// noise that only DARKENS (never adds) so edges stay wispy. White RGB — the vertex colour tints it
+// through the particle's heat ramp (white-yellow -> orange -> red) as it ages.
+static GLuint s_fireTex = 0;
+static void afn_fire_tex_init(void){
+    if (s_fireTex) return;
+    enum { S=64 }; static unsigned char px[S*S*4];
+    for (int y=0;y<S;y++) for (int x=0;x<S;x++){
+        float fx=((float)x+0.5f)/S*2.0f-1.0f, fy=((float)y+0.5f)/S*2.0f-1.0f;
+        float r=sqrtf(fx*fx+fy*fy);
+        float a=1.0f-r/0.92f; if(a<0.0f)a=0.0f; a=a*a;                            // quadratic falloff, hard 0 before the edge
+        unsigned h1=(unsigned)((x>>2)*73856093u ^ (y>>2)*19349663u);              // coarse breakup
+        unsigned h2=(unsigned)(x*83492791u ^ y*29849639u);                        // fine grain
+        a *= 0.72f + 0.20f*(float)(h1&0xFF)/255.0f + 0.08f*(float)(h2&0xFF)/255.0f;
+        if(a>1.0f)a=1.0f;
+        int idx=(y*S+x)*4; px[idx]=255; px[idx+1]=255; px[idx+2]=255; px[idx+3]=(unsigned char)(a*255.0f);
+    }
+    glGenTextures(1,&s_fireTex);
+    glBindTexture(GL_TEXTURE_2D,s_fireTex);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,S,S,0,GL_RGBA,GL_UNSIGNED_BYTE,px);
+}
+// Textured vertex (sets u,v — MMV zeroes them).
+#define MMVT(I,X,Y,Z,U,V,C) do{ s_mmVB[I].u=(U); s_mmVB[I].v=(V); s_mmVB[I].color=(C); s_mmVB[I].x=(X); s_mmVB[I].y=(Y); s_mmVB[I].z=(Z);}while(0)
+
 // ---------------------------------------------------------------------------
 // Flame Wheel — HARDCODED prototype (fired on Select). A VERTICAL wheel of fire
 // (ring plane = forward x up, i.e. a rolling tire aligned with travel) surrounds
@@ -2484,95 +2502,185 @@ static int   s_fw_active = 0, s_fw_life = 0;
 static float s_fw_fx, s_fw_fz, s_fw_yaw;
 #define FW_MAXLIFE 150        // ride ~2.5s
 #define FW_SPEED   0.95f      // forward units/frame while riding
-#define FW_RINGR   11.0f      // wheel radius (player sits within)
+#define FW_RINGR   7.5f       // wheel radius (player sits within)
+// Fire PARTICLE SYSTEM: real emitted+advected particles. Each spawns on the rim, inherits the spin
+// (strong tangential velocity), drifts outward, rises with buoyancy, and cools white->yellow->
+// orange->red as it ages. Rendered as velocity-STRETCHED soft sprites, so the licking tongues come
+// from the particles' motion — not from authored shapes.
+#define FW_PMAX 640
+typedef struct { float x,y,z, vx,vy,vz, life, maxLife, size; } FwParticle;
+static FwParticle s_fwP[FW_PMAX];
+static int s_fwPN = 0;
+static unsigned s_fwRng = 0x12345u;
+static float fw_rand(void){ s_fwRng = s_fwRng*1664525u + 1013904223u; return (float)((s_fwRng>>8)&0xFFFF)/65535.0f; }
+static void fw_emit(float cx,float cy,float cz, float Fx,float Fz, int count){
+    float Ux=0.0f, Uy=1.0f, Uz=0.0f; float Fy=0.0f;
+    for (int k=0;k<count && s_fwPN<FW_PMAX;k++){
+        FwParticle* P=&s_fwP[s_fwPN++];
+        float a=fw_rand()*6.2831853f, ca=cosf(a), sa=sinf(a);
+        float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;                    // outward radial (ring plane)
+        float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;                 // tangent (spin drag)
+        float rad=FW_RINGR*(0.96f + fw_rand()*0.10f);                             // spawn right on the band
+        P->x=cx+ox*rad; P->y=cy+oy*rad; P->z=cz+oz*rad;
+        // ALL sparks now: tiny hot flecks shed off the swirl strands (the strands themselves are
+        // drawn as ribbons, not particles) — gentle tangential drift + outward fling.
+        float tv = 0.25f+fw_rand()*0.35f;
+        float rv = 0.12f+fw_rand()*0.50f;
+        P->vx = tx*tv + ox*rv + (fw_rand()-0.5f)*0.08f + Fx*FW_SPEED*0.25f;
+        P->vy = ty*tv + oy*rv + (fw_rand()-0.5f)*0.08f;
+        P->vz = tz*tv + oz*rv + (fw_rand()-0.5f)*0.08f + Fz*FW_SPEED*0.25f;
+        P->maxLife = P->life = 18.0f+fw_rand()*22.0f;
+        P->size = 0.30f+fw_rand()*0.55f;
+    }
+}
+// One luminous SWIRL STRAND — the light-painting streak the whole effect is built from. A soft
+// ribbon following a WOBBLING arc around the wheel: radius undulates with two sine lobes (never a
+// perfect circle), weaves slightly out of the wheel plane, and brightness CHASES around the arc so
+// bright heads trail into dim tails. Drawn as two half-strips (bright spine -> alpha-0 edges).
+// a0..a1 = arc range (full 2π = closed loop); radDrift adds radius across the arc (peel-away licks);
+// fadeEnds ramps alpha to 0 at both ends for open arcs.
+static void fw_strand(float cx,float cy,float cz, float Fx,float Fz,
+                      float camFx,float camFy,float camFz,
+                      float R, float a0,float a1,int K,
+                      float wob1,float lob1,float ph1, float wob2,float lob2,float ph2,
+                      float outAmp,float phOut, float radDrift,
+                      float tme,float chase,float blobs,float ph4,
+                      float hw, int cr,int cg,int cb, float baseA, int fadeEnds){
+    float Ax=-Fz, Az=Fx;                                                          // wheel axis (weave dir)
+    float PX[45],PY[45],PZ[45],PM[45];
+    if(K>44)K=44; if(K<2)K=2;
+    for(int j=0;j<=K;j++){ float s=(float)j/(float)K; float ang=a0+(a1-a0)*s;
+        float rad=R*(1.0f + wob1*sinf(lob1*ang+ph1+tme*0.9f) + wob2*sinf(lob2*ang+ph2-tme*1.3f)) + radDrift*s;
+        // FIRE FLICKER: fast jagged high-frequency perturbation (product of two chasing sines is
+        // choppy, not silky) — this is what separates burning strands from smooth neon light trails.
+        rad += R*0.016f*sinf(13.0f*ang+ph1*3.1f+tme*6.5f)*sinf(7.0f*ang-tme*10.3f+ph2*1.7f);
+        float oop=outAmp*sinf(2.0f*ang+phOut+tme*0.7f);
+        PX[j]=cx+Fx*cosf(ang)*rad+Ax*oop;
+        PY[j]=cy+sinf(ang)*rad;
+        PZ[j]=cz+Fz*cosf(ang)*rad+Az*oop;
+        float m=0.5f+0.5f*sinf(blobs*ang+ph4-tme*chase); m*=m; m=0.25f+0.75f*m;   // chasing highlights
+        m *= 0.68f + 0.32f*sinf(11.0f*ang+ph2*2.3f-tme*9.1f);                     // fast brightness sizzle
+        if(fadeEnds){ float e=s<0.2f?s/0.2f:(s>0.8f?(1.0f-s)/0.2f:1.0f); m*=e; }
+        PM[j]=m; }
+    for(int half=0; half<2; half++){
+        int n=0; float sgn = half ? -1.0f : 1.0f;
+        for(int j=0;j<=K;j++){
+            int jp=j>0?j-1:0, jn=j<K?j+1:K;
+            float tx=PX[jn]-PX[jp], ty=PY[jn]-PY[jp], tz=PZ[jn]-PZ[jp];
+            float wx=ty*camFz-tz*camFy, wy=tz*camFx-tx*camFz, wz=tx*camFy-ty*camFx;   // width billboards
+            float wl=sqrtf(wx*wx+wy*wy+wz*wz); if(wl<0.0001f)wl=0.0001f; wx/=wl; wy/=wl; wz/=wl;
+            int al=(int)(baseA*PM[j]); if(al>255)al=255; if(al<0)al=0;
+            MMV(n, PX[j],PY[j],PZ[j], MM_COL(cr,cg,cb,al)); n++;
+            MMV(n, PX[j]+wx*hw*sgn, PY[j]+wy*hw*sgn, PZ[j]+wz*hw*sgn, MM_COL(cr,cg,cb,0)); n++; }
+        mm_flush(n, GL_TRIANGLE_STRIP);
+    }
+}
 static void afn_flamewheel_fire(float px, float py, float pz, float yaw) {
-    (void)px;(void)py;(void)pz;
     float yr = yaw * (3.14159265f/180.0f);
     s_fw_fx = sinf(yr); s_fw_fz = cosf(yr);      // forward (level) — the roll/travel direction
     s_fw_yaw = yaw;
     s_fw_life = FW_MAXLIFE; s_fw_active = 1;
+    fw_emit(px, py + FW_RINGR*0.78f, pz, s_fw_fx, s_fw_fz, 50);                  // ignition spark burst
 }
 static void afn_flamewheel_step(void) { if (s_fw_active && !afn_paused) { if (--s_fw_life <= 0) s_fw_active = 0; } }
 static void afn_flamewheel_render(const float* view, float px, float py, float pz) {
-    if (!s_fw_active) return;
-    float Rx=view[0],Ry=view[4],Rz=view[8];                                      // camera right (billboard width)
-    float Uxc=view[1],Uyc=view[5],Uzc=view[9];                                   // camera up (for streak billboards)
-    float fade = (s_fw_life < 18) ? (float)s_fw_life/18.0f : 1.0f;
-    if (FW_MAXLIFE - s_fw_life < 10) fade *= (float)(FW_MAXLIFE - s_fw_life)/10.0f;   // ease in
-    static int frame=0; frame++;
-    // ring basis: plane spanned by world forward F and world up (vertical wheel aligned with travel).
-    float Fx=s_fw_fx, Fy=0.0f, Fz=s_fw_fz;
-    float Ux=0.0f, Uy=1.0f, Uz=0.0f;
-    float cx=px, cy=py + FW_RINGR*0.78f, cz=pz;                                   // centre near torso; player within
-    float roll = (float)frame * 0.16f;                                           // rim spins forward (rolling)
-    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);                        // additive fire
-    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
-    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    if (!s_fw_active && s_fwPN==0) return;                                        // linger until every particle dies
+    float Rx=view[0],Ry=view[4],Rz=view[8];                                      // camera right
+    float Ucx=view[1],Ucy=view[5],Ucz=view[9];                                   // camera up
+    float camFx=Ry*Ucz-Rz*Ucy, camFy=Rz*Ucx-Rx*Ucz, camFz=Rx*Ucy-Ry*Ucx;         // camera forward
+    float fade = (s_fw_life < 18 && s_fw_active) ? (float)s_fw_life/18.0f : (s_fw_active?1.0f:0.0f);
+    float Fx=s_fw_fx, Fz=s_fw_fz;
+    float cx=px, cy=py + FW_RINGR*0.78f, cz=pz;                                   // wheel centre; player within
 
-    // ---- FIRE VORTEX: a dense swirl of overlapping flame tongues winding toward a hot core, filling
-    //      the wheel like an actual ball of fire (no clean geometric ring). ----
-    // Body haze so the disc reads as a solid mass of fire; hot hub at the centre.
-    mm_glow(cx,cy,cz, Fx,Fy,Fz, Ux,Uy,Uz, FW_RINGR*1.15f, FW_RINGR*1.15f, MM_COL(255, 90, 20,(int)(70*fade)),  MM_COL(150, 25, 0,0));
-    mm_glow(cx,cy,cz, Fx,Fy,Fz, Ux,Uy,Uz, FW_RINGR*0.70f, FW_RINGR*0.70f, MM_COL(255,150, 45,(int)(95*fade)),  MM_COL(255, 90,20,0));
-    mm_glow(cx,cy,cz, Fx,Fy,Fz, Ux,Uy,Uz, FW_RINGR*0.38f, FW_RINGR*0.38f, MM_COL(255,235,170,(int)(150*fade)), MM_COL(255,150,50,0));
-
-    // Spiral tongues: concentric bands of tangential+inward licks, each band angle-offset by radius so
-    // the arms wind into a vortex; inner bands run white-hot + spin faster, outer bands red-orange.
-    int BANDS=5;
-    for (int b=0;b<BANDS;b++){
-        float rf=0.30f + (float)b/(float)(BANDS-1)*0.82f;                          // radius fraction 0.30 .. 1.12
-        int NT=7 + b*4;                                                            // denser at the outer bands
-        float spin=roll*(1.35f - rf*0.6f) + rf*4.4f;                              // inner spins faster + spiral offset by radius
-        for (int i=0;i<NT;i++){ unsigned h=(unsigned)((b*97+i)+1)*2654435761u ^ 0x9E3779B9u;
-            float ja=(float)(h&0xFF)/255.0f, jl=(float)((h>>8)&0xFF)/255.0f, jp=(float)((h>>16)&0xFF)/255.0f, jw=(float)((h>>24)&0xFF)/255.0f;
-            float a=((float)i + (ja-0.5f)*0.8f)/(float)NT*6.2831853f + spin;
-            float ca=cosf(a), sa=sinf(a);
-            float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;                 // radial out
-            float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;             // tangent
-            float rad=FW_RINGR*rf*(1.0f + 0.06f*sinf((float)frame*0.2f + jp*6.2831853f));
-            float bx=cx+ox*rad, by=cy+oy*rad, bz=cz+oz*rad;                        // tongue base
-            // lick: strongly tangential (curl) + inward (spiral toward the hub) -> winding arms
-            float dxr=tx*0.9f - ox*0.55f, dyr=ty*0.9f - oy*0.55f, dzr=tz*0.9f - oz*0.55f;
-            float dl=sqrtf(dxr*dxr+dyr*dyr+dzr*dzr); if(dl<0.001f)dl=0.001f; dxr/=dl; dyr/=dl; dzr/=dl;
-            float flick=0.5f + 0.7f*fabsf(sinf((float)frame*0.30f + jp*6.2831853f + (float)i*0.7f));
-            float len=(3.0f + rf*4.5f + jl*2.5f)*flick;                            // outer tongues longer
-            float w=1.3f + rf*1.7f + jw*0.8f;
-            int gO=(int)(200 - rf*120), bO=(int)(110 - rf*105);                    // inner 200,110 -> outer 80,5
-            int gY=(int)(238 - rf*95),  bY=(int)(185 - rf*150);                    // hot-core tint (whiter inside)
-            if(gO<0)gO=0; if(bO<0)bO=0; if(gY<0)gY=0; if(bY<0)bY=0;
-            int aBody=(int)(150*fade*flick), aHot=(int)(150*fade);
-            mm_flame_dir(bx,by,bz, dxr,dyr,dzr, Rx,Ry,Rz, w,       len,      MM_COL(255,gO,bO,aBody), MM_COL(170, 22, 0,0));   // body
-            mm_flame_dir(bx,by,bz, dxr,dyr,dzr, Rx,Ry,Rz, w*0.5f, len*0.6f, MM_COL(255,gY,bY,aHot),  MM_COL(255,140,40,0)); }  // hot core
+    // ---- SIM: advect + age every particle, then emit this frame's batch from the moving rim. ----
+    if (!afn_paused) {
+        for (int i=0;i<s_fwPN;){ FwParticle* P=&s_fwP[i];
+            P->x+=P->vx; P->y+=P->vy; P->z+=P->vz;
+            P->vx*=0.94f; P->vy=P->vy*0.94f+0.010f; P->vz*=0.94f;                 // drag + gentle buoyancy
+            if ((P->life-=1.0f) <= 0.0f) { *P = s_fwP[--s_fwPN]; continue; }      // swap-remove dead
+            i++; }
+        if (s_fw_active && s_fw_life > 18) fw_emit(cx,cy,cz, Fx,Fz, 8);           // steady spark shed
     }
 
-    // BACKGROUND SPEED STREAKS: a few motion smears flung off the outer rim.
-    int NST=10;
-    for (int i=0;i<NST;i++){ unsigned h=(unsigned)(i+5)*2654435761u ^ 0x27D4EB2Fu;
-        float sa0=(float)(h&0xFF)/255.0f, sl=(float)((h>>8)&0xFF)/255.0f, sp=(float)((h>>16)&0xFF)/255.0f;
-        float a=sa0*6.2831853f + roll, ca=cosf(a), sa=sinf(a);
-        float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;
-        float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;
-        float hx=cx+ox*FW_RINGR, hy=cy+oy*FW_RINGR, hz=cz+oz*FW_RINGR;
-        float flick=0.5f + 0.6f*fabsf(sinf((float)frame*0.24f + sp*6.2831853f));
-        float len=(7.0f + sl*9.0f)*flick; int aS=(int)(120*fade*flick);
-        mm_trail(hx,hy,hz, tx,ty,tz, Rx,Ry,Rz, Uxc,Uyc,Uzc, len, 1.3f+sl*1.2f, MM_COL(255,130,35,(int)(aS*0.8f)), MM_COL(190,30,0,0)); }
+    afn_fire_tex_init();
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);                        // additive fire
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_fireTex);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
-    // EMBERS: tiny hot flecks flung off the rim, fading out.
-    int NE=18;
-    for (int i=0;i<NE;i++){ unsigned h=(unsigned)(i+7)*2246822519u ^ 0x165667B1u;
-        float ea=(float)(h&0xFF)/255.0f, er=(float)((h>>8)&0xFF)/255.0f, ep=(float)((h>>16)&0xFF)/255.0f;
-        float cyc=fmodf(ep + (float)frame*0.012f, 1.0f);
-        float a=ea*6.2831853f + roll*0.6f, ca=cosf(a), sa=sinf(a);
-        float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;
-        float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;
-        float d=FW_RINGR + cyc*(3.0f+er*6.0f);
-        float ex=cx+ox*d+tx*cyc*3.0f, ey=cy+oy*d+ty*cyc*3.0f, ez=cz+oz*d+tz*cyc*3.0f;
-        int a2=(int)(160*fade*(1.0f-cyc)); if(a2<1) continue; float er2=(0.4f+er*0.6f);
-        mm_glow(ex,ey,ez, Rx,Ry,Rz, 0,1,0, er2,er2, MM_COL(255,190,90,a2), MM_COL(255,110,30,0)); }
+    // ---- RENDER: each particle is a soft sprite STRETCHED along its velocity (classic fire particle),
+    //      tinted by age: white-yellow birth -> orange -> deep red death. Batched 21 quads per flush. ----
+    int n=0;
+    for (int i=0;i<s_fwPN;i++){ const FwParticle* P=&s_fwP[i];
+        float t=1.0f - P->life/P->maxLife;                                        // age 0..1
+        int g=(int)(215.0f - t*160.0f), b2=(int)(110.0f - t*100.0f);              // gold spark -> red cinder
+        float aIn = t<0.12f ? t/0.12f : 1.0f;                                     // quick flash-in
+        int al=(int)(190.0f*(1.0f-t)*aIn); if(al<2) continue;
+        unsigned col=MM_COL(255,g,b2,al);
+        float sz=P->size;
+        float dx=P->vx, dy=P->vy, dz=P->vz;
+        float sp=sqrtf(dx*dx+dy*dy+dz*dz);
+        float hl;                                                                 // half-length along motion
+        if (sp > 0.05f){ dx/=sp; dy/=sp; dz/=sp; hl=sz*0.6f + sp*1.4f; if(hl>2.2f)hl=2.2f; }
+        else           { dx=Rx; dy=Ry; dz=Rz; hl=sz*0.55f; }
+        float wx=dy*camFz-dz*camFy, wy=dz*camFx-dx*camFz, wz=dx*camFy-dy*camFx;   // width = dir x camFwd
+        float wl=sqrtf(wx*wx+wy*wy+wz*wz); if(wl<0.001f){wx=Ucx;wy=Ucy;wz=Ucz;wl=1.0f;}
+        wx/=wl; wy/=wl; wz/=wl;
+        float hw=sz*0.5f;
+        float ax=P->x-dx*hl, ay=P->y-dy*hl, az=P->z-dz*hl;                        // tail end
+        float bx=P->x+dx*hl, by=P->y+dy*hl, bz=P->z+dz*hl;                        // head end
+        if (n+6 > 126){ mm_flush(n, GL_TRIANGLES); n=0; }
+        MMVT(n, ax-wx*hw, ay-wy*hw, az-wz*hw, 0.0f,0.0f, col); n++;
+        MMVT(n, ax+wx*hw, ay+wy*hw, az+wz*hw, 0.0f,1.0f, col); n++;
+        MMVT(n, bx-wx*hw, by-wy*hw, bz-wz*hw, 1.0f,0.0f, col); n++;
+        MMVT(n, ax+wx*hw, ay+wy*hw, az+wz*hw, 0.0f,1.0f, col); n++;
+        MMVT(n, bx+wx*hw, by+wy*hw, bz+wz*hw, 1.0f,1.0f, col); n++;
+        MMVT(n, bx-wx*hw, by-wy*hw, bz-wz*hw, 1.0f,0.0f, col); n++;
+    }
+    if (n>0) mm_flush(n, GL_TRIANGLES);
 
-    // GROUND SCORCH: a warm glow flat on the floor where the wheel meets it.
-    mm_glow(cx, py+0.5f, cz, 1,0,0, 0,0,1, 7.0f,7.0f, MM_COL(255,140,40,(int)(120*fade)), MM_COL(255,90,20,0));
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisable(GL_TEXTURE_2D);       // back to plain geometry
+
+    if (s_fw_active) {
+        float tme=(float)(FW_MAXLIFE - s_fw_life)*0.06f;                          // strand anim clock
+        // ---- SWIRL BUNDLE: 8 weaving light-streak strands — each an imperfect wobbling loop at its
+        //      own radius/lobes/phase, glow pass + hot thin core pass. Their overlap and chasing
+        //      brightness make the ring; there is NO perfect circle anywhere. ----
+        for (int sI=0;sI<8;sI++){ unsigned h=(unsigned)(sI+1)*2654435761u ^ 0xB5297A4Du;
+            float h1=(float)(h&0xFF)/255.0f, h2=(float)((h>>8)&0xFF)/255.0f, h3=(float)((h>>16)&0xFF)/255.0f, h4=(float)((h>>24)&0xFF)/255.0f;
+            float Rs=FW_RINGR + (h1-0.5f)*1.8f;
+            float wob1=0.030f+h2*0.045f, lob1=2.0f+(float)(h&3u);
+            float wob2=0.018f+h3*0.028f, lob2=5.0f+(float)((h>>4)&3u);
+            float outA=0.5f+h4*1.7f;
+            float chase=1.2f+h2*2.2f, blobs=2.0f+(float)((h>>6)&2u);
+            float rot=tme*(1.8f+h1*0.9f);                                          // each strand ROLLS (whole wheel spins)
+            fw_strand(cx,cy,cz, Fx,Fz, camFx,camFy,camFz, Rs, rot,rot+6.2831853f,44,
+                      wob1,lob1,h1*6.28f, wob2,lob2,h2*6.28f, outA,h3*6.28f, 0.0f,
+                      tme,chase,blobs,h4*6.28f, 2.30f, 255,70,10, 95.0f*fade, 0);    // deep red-orange glow (thick)
+            fw_strand(cx,cy,cz, Fx,Fz, camFx,camFy,camFz, Rs, rot,rot+6.2831853f,44,
+                      wob1,lob1,h1*6.28f, wob2,lob2,h2*6.28f, outA,h3*6.28f, 0.0f,
+                      tme,chase,blobs,h4*6.28f, 0.85f, 255,190,70, 200.0f*fade, 0);  // gold core (crossings flare white)
+        }
+        // ---- FLAME TEETH: many short sharp arcs peeling OUT off the ring, flickering in and out at
+        //      spots that crawl around it — the jagged tongue fringe of the wheel. ----
+        for (int sI=0;sI<14;sI++){ unsigned h=(unsigned)(sI+11)*2246822519u ^ 0x68E31DA4u;
+            float h1=(float)(h&0xFF)/255.0f, h2=(float)((h>>8)&0xFF)/255.0f, h3=(float)((h>>16)&0xFF)/255.0f, h4=(float)((h>>24)&0xFF)/255.0f;
+            float cyc=fmodf(h1 + tme*(0.22f+h3*0.18f), 1.0f);
+            float vis=sinf(cyc*3.14159265f);                                       // flicker in -> out
+            float aS=h2*6.2831853f + tme*(2.2f+h4*2.6f);                            // spots RACE around the rim (pronounced spin)
+            float sweep=0.40f+h3*0.65f;                                            // longer, bolder teeth
+            fw_strand(cx,cy,cz, Fx,Fz, camFx,camFy,camFz, FW_RINGR+0.2f, aS, aS+sweep, 12,
+                      0.03f,5.0f,h4*6.28f, 0.0f,7.0f,0.0f, 0.3f+h4*0.7f,h1*6.28f, 1.8f+h2*3.0f,
+                      tme,0.0f,1.0f,0.0f, 0.95f, 255,160,50, 230.0f*vis*fade, 1);
+            // hot inner streak inside each tooth so they read as solid flame, not wisps
+            fw_strand(cx,cy,cz, Fx,Fz, camFx,camFy,camFz, FW_RINGR+0.2f, aS, aS+sweep, 12,
+                      0.03f,5.0f,h4*6.28f, 0.0f,7.0f,0.0f, 0.3f+h4*0.7f,h1*6.28f, 1.8f+h2*3.0f,
+                      tme,0.0f,1.0f,0.0f, 0.40f, 255,225,120, 235.0f*vis*fade, 1);
+        }
+        mm_glow(cx, py+0.5f, cz, 1,0,0, 0,0,1, 7.5f,7.5f, MM_COL(255,140,40,(int)(95*fade)), MM_COL(255,90,20,0));
+    }
 
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
@@ -3825,6 +3933,8 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
         afn_aura_fire(px, py, pz, yawDeg);         // Aura Sphere (traveling energy orb)
     } else if (L->kind == 15) {
         afn_icywind_fire(px, py, pz, yawDeg);      // Icy Wind (wide ice-mist wall sweeping forward)
+    } else if (L->kind == 16) {
+        afn_flamewheel_fire(px, py, pz, yawDeg);   // Flame Wheel (fire ring the player rides forward)
     } else {
         // Lightning bundle — all params are WORLD units straight from the layer (the editor's
         // 3D sim authors in the same units, so it mirrors this exactly). No px scaling.
@@ -7051,9 +7161,9 @@ int main(void)
         // forward on its own, so keep rendering/stepping the wall whenever one is active.
         afn_icywind_render(view);
         afn_icywind_step();
-        // HARDCODED PROTOTYPE (Select): Flame Wheel — a vertical fire wheel the player rides forward.
-        // Migrate to a preset once it looks right.
-        if (key_hit(KEY_SELECT)) afn_flamewheel_fire(playerX, playerY, playerZ, playerYaw);
+        // Flame Wheel is node-driven now (Play Effect -> kind=16 layer -> afn_flamewheel_fire); the
+        // ride override keys off s_fw_active, so it carries the player either way. Render/step
+        // whenever a wheel or its dying sparks are live.
         afn_flamewheel_render(view, playerX, playerY, playerZ);
         afn_flamewheel_step();
 

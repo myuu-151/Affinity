@@ -31668,7 +31668,7 @@ void FrameTick(float dt)
         for (int i = 0; i < (int)Inst.layers.size(); i++) {
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
-            const char* kindTag = Inst.layers[i].kind == 15 ? "Iw" : Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
+            const char* kindTag = Inst.layers[i].kind == 16 ? "Fw" : Inst.layers[i].kind == 15 ? "Iw" : Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
             char lbl[64]; snprintf(lbl, sizeof(lbl), "%s: %s%s", kindTag,
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
@@ -31682,8 +31682,8 @@ void FrameTick(float dt)
         // ---- Presets: pick from the dropdown + "Add" to drop in a pre-configured layer ----
         ImGui::SameLine(); ImGui::TextDisabled("| Preset:"); ImGui::SameLine();
         static int sFxPreset = 0;
-        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere", "Icy Wind" };
-        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere", "Icy Wind", "Flame Wheel" };
+        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
         ImGui::SetNextItemWidth(Scaled(120));
         ImGui::Combo("##fxpreset", &sFxPreset, fxPresetNames, IM_ARRAYSIZE(fxPresetNames));
         ImGui::SameLine();
@@ -31710,7 +31710,7 @@ void FrameTick(float dt)
         ImGui::SetNextItemWidth(Scaled(120));
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
-        { const char* kindName = L.kind==15?"Icy Wind":L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
+        { const char* kindName = L.kind==16?"Flame Wheel":L.kind==15?"Icy Wind":L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
           ImGui::TextDisabled("Kind: %s", kindName); }   // set by the preset you added (no radio)
         ImGui::Separator();
         if (L.kind == 0) {
@@ -31909,6 +31909,13 @@ void FrameTick(float dt)
                                "firing through it.");
             ImGui::Spacing();
             ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node (fires along the player's facing).");
+        } else if (L.kind == 16) {
+            // Flame Wheel — a vertical ring of weaving fire strands the player rides forward.
+            ImGui::TextWrapped("Flame Wheel: a vertical wheel of fire — weaving light-streak strands "
+                               "with racing flame teeth and shed sparks — that the player rides "
+                               "forward within, carried along the fired direction.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node; the ride carries the player while it lasts.");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -32279,6 +32286,41 @@ void FrameTick(float dt)
                     float vz2; ImVec2 Pb=proj(dx+(1.8f+fb*2.0f),vy,lat,&vz2);
                     if(vz2>0.05f) dl->AddLine(P,Pb, IM_COL32(255,255,255,(int)(200*av*ef)), 1.5f);   // shard streak
                     dl->AddCircleFilled(P, (0.7f+fb*1.2f)*s, IM_COL32(255,255,255,(int)(220*av*ef))); }  // sparkle
+                continue;
+            }
+            if (Q.kind == 16) {
+                // ---- FLAME WHEEL preview: weaving fire-strand loops (vertical ring in the X/Y plane)
+                //      with racing teeth — mirrors the runtime's strand-bundle look through proj().
+                float tme=sFxClk*0.06f; float RW=7.5f; float cyw=RW*0.78f;
+                for (int sI2=0;sI2<5;sI2++){ unsigned h=(unsigned)(sI2+1)*2654435761u^0xB5297A4Du;
+                    float h1=(float)(h&0xFF)/255.0f, h2=(float)((h>>8)&0xFF)/255.0f, h4=(float)((h>>24)&0xFF)/255.0f;
+                    float Rs=RW+(h1-0.5f)*1.6f, rot=tme*(1.8f+h1*0.9f);
+                    float lob=2.0f+(float)(h&3u), wob=0.030f+h2*0.045f;
+                    ImVec2 prevS(0,0); int prevOk=0;
+                    for (int j=0;j<=30;j++){ float ang=rot + (float)j/30.0f*6.2831853f;
+                        float rad=Rs*(1.0f+wob*sinf(lob*ang+h1*6.28f+tme*0.9f));
+                        rad+=Rs*0.016f*sinf(13.0f*ang+h1*19.0f+tme*6.5f)*sinf(7.0f*ang-tme*10.3f);
+                        float vz; ImVec2 S=proj(cosf(ang)*rad, cyw+sinf(ang)*rad, 0.0f, &vz);
+                        int ok=(vz>0.05f);
+                        if(ok&&prevOk){ float m=0.5f+0.5f*sinf((2.0f+(float)((h>>6)&2u))*ang+h4*6.28f-tme*(1.2f+h2*2.2f)); m*=m;
+                            int a=(int)((60+150*m)); float th=(1.2f+m*1.6f)*focal/vz*0.06f; if(th<1.2f)th=1.2f;
+                            dl->AddLine(prevS,S, IM_COL32(255,80,12,(int)(a*0.55f)), th*2.6f);
+                            dl->AddLine(prevS,S, IM_COL32(255,195,80,a), th); }
+                        prevS=S; prevOk=ok; }
+                }
+                for (int sI2=0;sI2<7;sI2++){ unsigned h=(unsigned)(sI2+11)*2246822519u^0x68E31DA4u;   // racing teeth
+                    float h1=(float)(h&0xFF)/255.0f, h2=(float)((h>>8)&0xFF)/255.0f, h3=(float)((h>>16)&0xFF)/255.0f, h4=(float)((h>>24)&0xFF)/255.0f;
+                    float cyc=fmodf(h1+tme*(0.22f+h3*0.18f),1.0f); float vis=sinf(cyc*3.14159265f);
+                    float aS=h2*6.2831853f+tme*(2.2f+h4*2.6f); float sweep=0.40f+h3*0.65f;
+                    ImVec2 prevS(0,0); int prevOk=0;
+                    for (int j=0;j<=8;j++){ float s2=(float)j/8.0f; float ang=aS+sweep*s2;
+                        float rad=RW+0.2f+(2.6f+h2*4.4f)*s2;
+                        float vz; ImVec2 S=proj(cosf(ang)*rad, cyw+sinf(ang)*rad, 0.0f, &vz);
+                        int ok=(vz>0.05f);
+                        if(ok&&prevOk){ float e=s2<0.2f?s2/0.2f:(s2>0.8f?(1.0f-s2)/0.2f:1.0f);
+                            dl->AddLine(prevS,S, IM_COL32(255,160,50,(int)(230*vis*e)), 2.2f); }
+                        prevS=S; prevOk=ok; }
+                }
                 continue;
             }
             if (Q.kind != 1) continue;
