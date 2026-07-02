@@ -31668,7 +31668,7 @@ void FrameTick(float dt)
         for (int i = 0; i < (int)Inst.layers.size(); i++) {
             ImGui::PushID(20000 + i); bool sel = (i == sFxActive);
             if (sel) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.50f, 0.80f, 1.0f));
-            const char* kindTag = Inst.layers[i].kind == 16 ? "Fw" : Inst.layers[i].kind == 15 ? "Iw" : Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
+            const char* kindTag = Inst.layers[i].kind == 17 ? "Fc" : Inst.layers[i].kind == 16 ? "Fw" : Inst.layers[i].kind == 15 ? "Iw" : Inst.layers[i].kind == 14 ? "As" : Inst.layers[i].kind == 13 ? "Ft" : Inst.layers[i].kind == 12 ? "Su" : Inst.layers[i].kind == 11 ? "Ps" : Inst.layers[i].kind == 10 ? "Py" : Inst.layers[i].kind == 9 ? "Sb" : Inst.layers[i].kind == 8 ? "Ib" : Inst.layers[i].kind == 7 ? "Bb" : Inst.layers[i].kind == 6 ? "Fs" : Inst.layers[i].kind == 5 ? "Ew" : Inst.layers[i].kind == 4 ? "WC" : Inst.layers[i].kind == 3 ? "MM" : Inst.layers[i].kind == 2 ? "Th" : Inst.layers[i].kind == 1 ? "Jo" : "Pt";   // aura / flamethrower / surf / psychic / psybeam / sludge / icebeam / bubble / firespin / electroweb / wild charge / meteor / thunder / jolt / particle
             char lbl[64]; snprintf(lbl, sizeof(lbl), "%s: %s%s", kindTag,
                 Inst.layers[i].name, Inst.layers[i].visible ? "" : " (off)");
             if (ImGui::Button(lbl)) { sFxActive = i; sFxSel = -1; }
@@ -31682,8 +31682,8 @@ void FrameTick(float dt)
         // ---- Presets: pick from the dropdown + "Add" to drop in a pre-configured layer ----
         ImGui::SameLine(); ImGui::TextDisabled("| Preset:"); ImGui::SameLine();
         static int sFxPreset = 0;
-        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere", "Icy Wind", "Flame Wheel" };
-        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+        static const char* fxPresetNames[] = { "Meteor Mash", "Jolt", "Thunder", "Particles", "Wild Charge", "Electroweb", "Fire Spin", "Bubble Beam", "Ice Beam", "Sludge Bomb", "Psybeam", "Psychic", "Surf", "Flamethrower", "Aura Sphere", "Icy Wind", "Flame Wheel", "Flash Cannon" };
+        static const int   fxPresetKinds[] = { 3, 1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 };
         ImGui::SetNextItemWidth(Scaled(120));
         ImGui::Combo("##fxpreset", &sFxPreset, fxPresetNames, IM_ARRAYSIZE(fxPresetNames));
         ImGui::SameLine();
@@ -31710,7 +31710,7 @@ void FrameTick(float dt)
         ImGui::SetNextItemWidth(Scaled(120));
         if (ImGui::InputText("Name", L.name, sizeof(L.name))) sProjectDirty = true;
         if (ImGui::Checkbox("Visible", &L.visible)) sProjectDirty = true;
-        { const char* kindName = L.kind==16?"Flame Wheel":L.kind==15?"Icy Wind":L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
+        { const char* kindName = L.kind==17?"Flash Cannon":L.kind==16?"Flame Wheel":L.kind==15?"Icy Wind":L.kind==14?"Aura Sphere":L.kind==13?"Flamethrower":L.kind==12?"Surf":L.kind==11?"Psychic":L.kind==10?"Psybeam":L.kind==9?"Sludge Bomb":L.kind==8?"Ice Beam":L.kind==7?"Bubble Beam":L.kind==6?"Fire Spin":L.kind==5?"Electroweb":L.kind==4?"Wild Charge":L.kind==3?"Meteor Mash":L.kind==2?"Thunder":L.kind==1?"Jolt":"Particles";
           ImGui::TextDisabled("Kind: %s", kindName); }   // set by the preset you added (no radio)
         ImGui::Separator();
         if (L.kind == 0) {
@@ -31916,6 +31916,13 @@ void FrameTick(float dt)
                                "forward within, carried along the fired direction.");
             ImGui::Spacing();
             ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node; the ride carries the player while it lasts.");
+        } else if (L.kind == 17) {
+            // Flash Cannon — a blinding silver-white beam blast down an expanding cone.
+            ImGui::TextWrapped("Flash Cannon: a blinding silver-white beam blast — a solid white core "
+                               "with steel-blue streaks racing down an expanding cone, a pale-teal orb "
+                               "riding the head, and a muzzle flash with sweeping wisps.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Fixed prototype (from the runtime). Trigger it with the\nPlay Effect node (fires along the player's facing).");
         }
         ImGui::EndChild();
         ImGui::SameLine();
@@ -32321,6 +32328,40 @@ void FrameTick(float dt)
                             dl->AddLine(prevS,S, IM_COL32(255,160,50,(int)(230*vis*e)), 2.2f); }
                         prevS=S; prevOk=ok; }
                 }
+                continue;
+            }
+            if (Q.kind == 17) {
+                // ---- FLASH CANNON preview: white core beam + steel-blue streaks racing down an
+                //      expanding cone + teal head orb + muzzle flash (travels +X). ----
+                float php=fmodf(sFxClk,80.0f); float ox2=-20.0f;
+                float ef=(80.0f-php)<16.0f?(80.0f-php)/16.0f:1.0f; if(php<4.0f)ef*=php/4.0f;
+                float ext=php<9.0f?php/9.0f:1.0f; ext=1.0f-(1.0f-ext)*(1.0f-ext);
+                float range=42.0f, front=ext*range;
+                { float vz1,vz2; ImVec2 A=proj(ox2,6.0f,0.0f,&vz1), B=proj(ox2+front,6.0f,0.0f,&vz2);   // core beam
+                  if(vz1>0.05f&&vz2>0.05f){ float th=3.2f*focal/vz2*0.06f; if(th<2.0f)th=2.0f;
+                    dl->AddLine(A,B, IM_COL32(150,200,255,(int)(90*ef)), th*3.2f);
+                    dl->AddLine(A,B, IM_COL32(215,238,255,(int)(150*ef)), th*1.9f);
+                    dl->AddLine(A,B, IM_COL32(255,255,255,(int)(230*ef)), th); } }
+                for(int k=0;k<22;k++){ unsigned h=(unsigned)(k+1)*2654435761u^0x9E3779B9u;   // streaks
+                    float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f, fd=(float)((h>>24)&0xFF)/255.0f;
+                    float cyc=fmodf(fc+php*0.055f,1.0f); float dist=cyc*(front+4.0f); if(dist>range+5.0f)continue;
+                    float coneR=(0.8f+4.6f*(dist/range))*(0.15f+fb*0.85f);
+                    float ang=fa*6.2831853f;
+                    float sy=6.0f+sinf(ang)*coneR, sz2=cosf(ang)*coneR;
+                    float av=sinf(cyc*3.14159265f); int a=(int)(200*ef*av); if(a<2)continue;
+                    float vz1,vz2; ImVec2 A=proj(ox2+dist,sy,sz2,&vz1), B=proj(ox2+dist-(5.0f+fd*7.0f),sy,sz2,&vz2);
+                    if(vz1>0.05f&&vz2>0.05f){
+                        if((h&3u)==0) dl->AddLine(A,B, IM_COL32(255,255,255,a), 1.6f);
+                        else          dl->AddLine(A,B, IM_COL32(195,228,255,a), 1.6f); } }
+                { float vz; ImVec2 P=proj(ox2+front,6.0f,0.0f,&vz);   // teal head orb
+                  if(vz>0.05f){ float s=focal/vz; float pulse=1.0f+0.08f*sinf(php*0.5f);
+                    dl->AddCircleFilled(P, 3.4f*pulse*s, IM_COL32(140,235,235,(int)(110*ef)));
+                    dl->AddCircleFilled(P, 2.0f*pulse*s, IM_COL32(200,250,250,(int)(170*ef)));
+                    dl->AddCircleFilled(P, 1.1f*pulse*s, IM_COL32(240,255,255,(int)(230*ef))); } }
+                { float vz; ImVec2 P=proj(ox2,6.0f,0.0f,&vz);   // muzzle flash
+                  if(vz>0.05f){ float s=focal/vz; float mf=1.0f-php/80.0f; mf=0.35f+0.65f*mf*mf;
+                    dl->AddCircleFilled(P, 5.5f*s, IM_COL32(190,225,255,(int)(90*mf*ef)));
+                    dl->AddCircleFilled(P, 3.2f*s, IM_COL32(255,255,255,(int)(160*mf*ef))); } }
                 continue;
             }
             if (Q.kind != 1) continue;

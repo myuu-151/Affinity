@@ -2687,6 +2687,132 @@ static void afn_flamewheel_render(const float* view, float px, float py, float p
 }
 
 // ---------------------------------------------------------------------------
+// PHYSICAL CLASH — HARDCODED prototype. When the player's Quick Attack and the
+// enemy's dash-in meet head-on, both lock into a PRESSURE STRUGGLE: a button
+// prompt (Cross/Circle/Square/Triangle) floats over the fighters — hit the
+// matching button to shove the meter toward the enemy; the AI shoves back on
+// its own cadence. Prompts start SLOW near the middle and come faster and
+// faster as the meter is pushed toward either side. Overflow a side to win:
+// the loser eats damage + knockback. Migrate to nodes once the feel is right.
+// ---------------------------------------------------------------------------
+static int   s_pc_active=0, s_pc_cd=0, s_pc_t=0;
+static float s_pc_pressure=0.5f;                 // 0 = player overwhelmed (loss) .. 1 = enemy overwhelmed (win)
+static int   s_pc_cmd=0, s_pc_cmdT=0, s_pc_aiT=0, s_pc_knock=0, s_pc_won=0, s_pc_flash=0;
+static float s_pc_mx,s_pc_my,s_pc_mz;            // struggle midpoint (bar/prompt anchor)
+static float s_pc_pxl,s_pc_pzl, s_pc_exl,s_pc_ezl;   // locked player/enemy positions
+static float s_pc_dirx,s_pc_dirz;                // player->enemy dir (facing + knockback axis)
+static int   s_pc_pG=0, s_pc_eG=0;               // dash GRACE — frames since each side's dash was live
+                                                 // (forgiving trigger: a bump right as a dash ends still clashes)
+static unsigned s_pc_rng=0x51u;
+static float pc_rand(void){ s_pc_rng=s_pc_rng*1664525u+1013904223u; return (float)((s_pc_rng>>8)&0xFFFF)/65535.0f; }
+#define PC_MEET_R    24.0f    // dash-vs-dash contact radius that triggers the clash (roomy)
+#define PC_PUSH      0.060f   // player shove per correct prompt
+#define PC_MISS      0.025f   // bleed-back for hitting the WRONG face button
+#define PC_AI_PUSH   0.048f   // AI shove per cadence tick
+#define PC_DMG_E     12       // damage to the enemy on a win
+#define PC_DMG_P     10       // damage to the player on a loss
+#define PC_CD        150      // frames before another clash can trigger
+// Cadence: slow near the centre, quickening toward the edges — BOTH the player's prompt
+// window and the AI's shove interval tighten as the meter leaves the middle. The floor is
+// kept humane (was 55->18 / 50->20 — too fast to read near the end).
+// Past the 80% mark of either side (d>0.6), an EXTRA kick makes the final stretch noticeably quicker.
+static int pc_window(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float w=55.0f - d*30.0f; if(d>0.6f) w-=(d-0.6f)*6.0f; return (int)w; }
+static int pc_ai_wait(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float w=50.0f - d*27.0f; if(d>0.6f) w-=(d-0.6f)*5.0f; return (int)(w*(0.8f+pc_rand()*0.5f)); }
+static int pc_enemy_npc(void){ for(int i=0;i<AFN_NPC_COUNT;i++) if((int)afn_npc_inst[i][7]==AFN_ENEMY_EIDX) return i; return -1; }
+// (The struggle UI is drawn as a fullscreen 2D cut-in — physclash_render_2d, defined with the
+//  other HUD-space renderers next to clash_render_2d — matching the beam clash's presentation.)
+
+// ---------------------------------------------------------------------------
+// Flash Cannon — HARDCODED prototype (fired on Select). A blinding silver-white
+// BEAM BLAST: a dense bundle of near-white streaks racing down an expanding
+// cone, a solid white core beam, steel-blue fringe, a pale-teal orb riding the
+// beam head, and a big muzzle flash with curved wisps sweeping around it.
+// Additive. Migrate to a preset later.
+// ---------------------------------------------------------------------------
+static int   s_fc_active=0, s_fc_life=0;
+static float s_fc_ox,s_fc_oy,s_fc_oz, s_fc_fx,s_fc_fz;
+#define FC_MAXLIFE 80
+#define FC_RANGE   62.0f
+static void afn_flashcannon_fire(float px,float py,float pz,float yaw){
+    float yr=yaw*(3.14159265f/180.0f);
+    s_fc_fx=sinf(yr); s_fc_fz=cosf(yr);
+    s_fc_ox=px+s_fc_fx*4.0f; s_fc_oy=py+8.0f; s_fc_oz=pz+s_fc_fz*4.0f;           // chest-height muzzle
+    s_fc_life=FC_MAXLIFE; s_fc_active=1;
+}
+static void afn_flashcannon_step(void){ if(s_fc_active && !afn_paused){ if(--s_fc_life<=0) s_fc_active=0; } }
+static void afn_flashcannon_render(const float* view){
+    if(!s_fc_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];
+    float camFx=Ry*Uz-Rz*Uy, camFy=Rz*Ux-Rx*Uz, camFz=Rx*Uy-Ry*Ux;               // camera forward (for wisps)
+    float t=(float)(FC_MAXLIFE - s_fc_life);
+    float fadeIn = t<4.0f ? t/4.0f : 1.0f;
+    float fadeOut = s_fc_life<16 ? (float)s_fc_life/16.0f : 1.0f;
+    float fade = fadeIn*fadeOut;
+    float Fx=s_fc_fx, Fy=0.0f, Fz=s_fc_fz;
+    float Axb=Fz, Azb=-Fx;                                                        // beam cross basis A (horizontal)
+    float ox=s_fc_ox, oy=s_fc_oy, oz=s_fc_oz;
+    float ext = t<9.0f ? t/9.0f : 1.0f; ext=1.0f-(1.0f-ext)*(1.0f-ext);          // beam extends fast (ease-out)
+    float front = ext*FC_RANGE;
+    float hx=ox+Fx*front, hy=oy, hz=oz+Fz*front;                                  // beam head
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);                        // additive light blast
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    // ---- CORE BEAM: overlapping thick soft trails from muzzle to head — blinding white centre,
+    //      steel-blue sheath; tapers thin back at the muzzle so it flares open toward the head. ----
+    if (front > 1.0f){
+        int aC=(int)(235*fade);
+        mm_trail(hx,hy,hz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, front, 6.0f, MM_COL(150,200,255,(int)(aC*0.40f)), MM_COL(120,175,255,0));   // outer sheath
+        mm_trail(hx,hy,hz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, front, 3.8f, MM_COL(215,238,255,(int)(aC*0.70f)), MM_COL(170,215,255,0));   // mid
+        mm_trail(hx,hy,hz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, front, 2.0f, MM_COL(255,255,255,aC),              MM_COL(230,245,255,0)); } // white core
+
+    // ---- STREAK BUNDLE: fast near-white streaks racing down an expanding cone around the core. ----
+    int NS=36;
+    for (int i=0;i<NS;i++){ unsigned h=(unsigned)(i+1)*2654435761u ^ 0x9E3779B9u;
+        float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc2=(float)((h>>16)&0xFF)/255.0f, fd=(float)((h>>24)&0xFF)/255.0f;
+        float cyc=fmodf(fc2 + t*0.055f, 1.0f);                                    // race forward, staggered
+        float dist=cyc*(front+5.0f); if(dist>FC_RANGE+6.0f) continue;
+        float coneR=0.8f + 5.4f*(dist/FC_RANGE);                                  // cone widens with distance
+        float ang=fa*6.2831853f + fb*2.1f;
+        float rdx=Axb*cosf(ang), rdy=sinf(ang), rdz=Azb*cosf(ang);                // around the beam axis
+        float R=coneR*(0.15f + fb*0.85f);
+        float sx=ox+Fx*dist+rdx*R, sy=oy+rdy*R, sz=oz+Fz*dist+rdz*R;
+        float av=sinf(cyc*3.14159265f);
+        int a=(int)(205*fade*av); if(a<2) continue;
+        float len=7.0f+fd*11.0f, w=0.30f+fd*0.75f;
+        if ((h&3u)==0)
+            mm_trail(sx,sy,sz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, len, w, MM_COL(255,255,255,a),      MM_COL(235,248,255,0));   // white streak
+        else
+            mm_trail(sx,sy,sz, Fx,Fy,Fz, Rx,Ry,Rz, Ux,Uy,Uz, len, w, MM_COL(195,228,255,a),      MM_COL(150,200,255,0)); } // steel-blue streak
+
+    // ---- HEAD ORB: pale-teal sphere riding the front of the blast. ----
+    if (front > 2.0f){ float pulse=1.0f+0.08f*sinf(t*0.5f); int aO=(int)(230*fade);
+        mm_glow(hx,hy,hz, Rx,Ry,Rz, Ux,Uy,Uz, 5.2f*pulse,5.2f*pulse, MM_COL(140,235,235,(int)(aO*0.5f)), MM_COL(110,210,220,0));
+        mm_glow(hx,hy,hz, Rx,Ry,Rz, Ux,Uy,Uz, 3.0f*pulse,3.0f*pulse, MM_COL(200,250,250,(int)(aO*0.8f)), MM_COL(160,235,235,0));
+        mm_fill_oval(hx,hy,hz, Rx,Ry,Rz, Ux,Uy,Uz, 1.6f*pulse,1.6f*pulse, MM_COL(240,255,255,aO)); }
+
+    // ---- MUZZLE FLASH: hot white burst at the origin, strongest early, plus curved wisps
+    //      (fw_strand arcs in the beam's vertical plane) sweeping around the muzzle. ----
+    { float mf=1.0f - t/(float)FC_MAXLIFE; mf=0.35f+0.65f*mf*mf;
+      float rad=6.0f+3.0f*sinf(t*0.4f)*0.3f;
+      mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, rad*1.7f,rad*1.7f, MM_COL(190,225,255,(int)(120*mf*fade)), MM_COL(150,200,255,0));
+      mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, rad,rad,           MM_COL(255,255,255,(int)(200*mf*fade)), MM_COL(230,245,255,0)); }
+    for (int sI=0;sI<4;sI++){ unsigned h=(unsigned)(sI+3)*2246822519u ^ 0x68E31DA4u;
+        float h1=(float)(h&0xFF)/255.0f, h2=(float)((h>>8)&0xFF)/255.0f, h3=(float)((h>>16)&0xFF)/255.0f;
+        float tme=t*0.06f;
+        float cyc=fmodf(h1 + tme*0.30f, 1.0f); float vis=sinf(cyc*3.14159265f);
+        float aS=h2*6.2831853f + tme*1.6f;
+        fw_strand(ox,oy,oz, Fx,Fz, camFx,camFy,camFz, 2.6f+h3*3.4f, aS, aS+1.6f+h1*1.2f, 14,
+                  0.04f,3.0f,h2*6.28f, 0.0f,7.0f,0.0f, 0.5f+h3*0.9f,h1*6.28f, 1.2f+h2*2.0f,
+                  tme,0.0f,1.0f,0.0f, 0.45f, 255,255,255, 160.0f*vis*fade, 1);
+    }
+
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
 // Bubble Beam — HARDCODED prototype. A forward stream of TRANSLUCENT bubbles: a
 // looping fleet of camera-facing bubbles (soft blue body + bright rim + a white
 // highlight) that drift forward, spread into a cone, wobble, and pop at the end.
@@ -3935,6 +4061,8 @@ static void afn_fx_play_layer(const AfnFxLayer* L, float px, float py, float pz,
         afn_icywind_fire(px, py, pz, yawDeg);      // Icy Wind (wide ice-mist wall sweeping forward)
     } else if (L->kind == 16) {
         afn_flamewheel_fire(px, py, pz, yawDeg);   // Flame Wheel (fire ring the player rides forward)
+    } else if (L->kind == 17) {
+        afn_flashcannon_fire(px, py, pz, yawDeg);  // Flash Cannon (silver-white beam blast)
     } else {
         // Lightning bundle — all params are WORLD units straight from the layer (the editor's
         // 3D sim authors in the same units, so it mirrors this exactly). No px scaling.
@@ -4085,6 +4213,7 @@ void afn_ai_sense(void) {
 #if defined(AFN_HAS_HUD) && defined(AFN_HAS_SPRITE_IDX)
     if (afn_hud_visible[AFN_CLASH_ELEM]) return;   // beam clash owns the enemy — freeze the AI
 #endif
+    if (s_pc_active) return;                       // PHYSICAL clash owns the enemy — no decisions/attacks mid-QTE
     if (s_aiAtkCD > 0) s_aiAtkCD--;
     if (s_aiDodgeCD > 0) s_aiDodgeCD--;
     if (afn_ai_state != AI_CHARGE) { s_efbCharging = 0; s_eChgDodgeFrames = 0; }   // never leave a charge orb hanging; drop any in-charge dodge so it can't resume on the next charge
@@ -4308,7 +4437,7 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
 
     // --- Quick Attack dash-in ----------------------------------------------
     if (s_eqaCD > 0) s_eqaCD--;
-    if (s_eqaPhase == 0 && s_eqaCD == 0 && s_npcGround[i]
+    if (s_eqaPhase == 0 && s_eqaCD == 0 && s_npcGround[i] && !s_pc_active
         && (afn_ai_state == AI_STRAFE || afn_ai_state == AI_CHASE)   // only from neutral movement
         && s_eDodgeFrames == 0 && s_eBlockFrames == 0) {
         float dx = px - s_npcX[i], dz = pz - s_npcZ[i], d2 = dx*dx + dz*dz;
@@ -4330,7 +4459,9 @@ static void afn_ai_melee_reflex(int i, int eidx, float px, float pz) {
             float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
             // Grounded only — the player can JUMP over the enemy's Quick Attack, the
             // same way the enemy jump-evades the player's (the dash whiffs underneath).
-            if (player_on_ground && dx*dx + dz*dz <= (float)afn_eqa_stop*afn_eqa_stop) {
+            // MUTUAL DASH: if the player is dashing too (or just was — grace), don't deal
+            // damage or end the dash; let the physical clash trigger instead.
+            if (player_on_ground && s_pc_pG == 0 && dx*dx + dz*dz <= (float)afn_eqa_stop*afn_eqa_stop) {
                 int dmg = afn_player_blocking ? (afn_eqa_dmg * afn_block_pct) / 100 : afn_eqa_dmg;
                 afn_health -= dmg; if (afn_health < 0) afn_health = 0;
                 // CONNECT: end the dash on the hit — no skid (skid is the overshoot
@@ -4884,6 +5015,109 @@ static void clash_render_2d(void) {
 #endif
 }
 
+// Thick 2D line segment in HUD coords (arbitrary angle — hud_solid_quad is axis-aligned only).
+static void hud_seg(float ax,float ay, float bx,float by, float hw, unsigned col){
+    float dx=bx-ax, dy=by-ay; float l=sqrtf(dx*dx+dy*dy); if(l<0.001f)l=0.001f;
+    float wx=-dy/l*hw, wy=dx/l*hw;
+    AfnVertex q[4]={ {0,0,col,ax+wx,ay+wy,0},{0,0,col,ax-wx,ay-wy,0},{0,0,col,bx-wx,by-wy,0},{0,0,col,bx+wx,by+wy,0} };
+    AfnVertex* v=q;
+    glDisable(GL_TEXTURE_2D);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+    glColorPointer(4,GL_UNSIGNED_BYTE,sizeof(AfnVertex),&v->color);
+    glVertexPointer(3,GL_FLOAT,sizeof(AfnVertex),&v->x);
+    glDrawArrays(GL_TRIANGLE_FAN,0,4);
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glEnable(GL_TEXTURE_2D);
+}
+static void hud_ring2d(float cx,float cy,float r,float hw,unsigned col){
+    float px2=cx+r, py2=cy;
+    for(int j=1;j<=16;j++){ float a=(float)j/16.0f*6.2831853f;
+        float nx=cx+cosf(a)*r, ny=cy+sinf(a)*r;
+        hud_seg(px2,py2,nx,ny,hw,col); px2=nx; py2=ny; }
+}
+// PHYSICAL CLASH 2D cut-in (HARDCODED prototype): the beam clash's presentation language —
+// fullscreen speed-line backdrop — but tinted RED, with impact flashes popping here and there
+// in the background, and the pressure bar + button prompt drawn on top.
+static void physclash_render_2d(void){
+    const float W=960.0f, H=544.0f;
+    float t=(float)s_pc_t;
+    hud_solid_quad(0,0,W,H, MM_COL(30,4,8,240));                                   // deep-red base wash
+    // BLUR STREAKS: bucketed motion-blur lines racing right->left across the backdrop — most thin
+    // and faint, some medium, a few thick/long/bright; each streak is layered (wide dim halo +
+    // brighter core + hot leading tip) so it reads as a blur, not a hard bar.
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    for (int i2=0;i2<26;i2++){ unsigned h=(unsigned)(i2+1)*2654435761u ^ 0x85EBCA6Bu;
+        float fy=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fp=(float)((h>>16)&0xFF)/255.0f;
+        float len, th, sp; int aB;
+        if      (fb < 0.60f){ len=140.0f+fb*220.0f; th=2.0f; sp=170.0f; aB=70;  }   // ~60% thin faint
+        else if (fb < 0.88f){ len=260.0f+fb*240.0f; th=3.6f; sp=235.0f; aB=110; }   // ~28% medium
+        else                { len=430.0f+fb*260.0f; th=6.2f; sp=310.0f; aB=165; }   // ~12% thick bright
+        float y=fy*(H-40.0f)+20.0f;
+        float x=W - fmodf(t*sp + fp*(W+len), W+len);                               // head sweeps right->left, wraps
+        hud_solid_quad(x, y-th*1.7f, x+len, y+th*1.7f, MM_COL(255, 70, 40, aB/3));   // wide dim halo
+        hud_solid_quad(x, y-th*0.6f, x+len, y+th*0.6f, MM_COL(255,140, 90, aB));     // core
+        hud_solid_quad(x, y-th*0.5f, x+len*0.16f, y+th*0.5f, MM_COL(255,225,185, aB+45)); }   // hot leading tip
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // IMPACT FLASHES: white-hot starbursts popping at random spots in the background (additive).
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    for(int i2=0;i2<4;i2++){
+        int Pi=34+i2*11;
+        int ph=(s_pc_t+i2*17)%Pi;
+        if(ph<16){ float f=1.0f-(float)ph/16.0f;
+            unsigned hb=(unsigned)((s_pc_t+i2*17)/Pi+1)*2654435761u ^ (unsigned)((i2+1)*0x9E3779B9u);
+            float ix=(float)(hb&0x3FF)/1023.0f*(W-160.0f)+80.0f, iy=(float)((hb>>10)&0x3FF)/1023.0f*(H-200.0f)+130.0f;
+            float s2=26.0f+(float)((hb>>20)&0x3F);
+            float g=s2*(1.6f-f*0.6f);                                              // expands as it fades
+            int aC=(int)(230*f), aH=(int)(110*f);
+            hud_solid_quad(ix-g,iy-g*0.26f,ix+g,iy+g*0.26f, MM_COL(255,110,55,aH));   // halo bars
+            hud_solid_quad(ix-g*0.26f,iy-g,ix+g*0.26f,iy+g, MM_COL(255,110,55,aH));
+            hud_seg(ix-g,iy, ix+g,iy, 2.2f, MM_COL(255,235,215,aC));                  // starburst arms
+            hud_seg(ix,iy-g, ix,iy+g, 2.2f, MM_COL(255,235,215,aC));
+            hud_seg(ix-g*0.55f,iy-g*0.55f, ix+g*0.55f,iy+g*0.55f, 1.6f, MM_COL(255,190,150,aC));
+            hud_seg(ix-g*0.55f,iy+g*0.55f, ix+g*0.55f,iy-g*0.55f, 1.6f, MM_COL(255,190,150,aC));
+            hud_solid_quad(ix-4,iy-4,ix+4,iy+4, MM_COL(255,255,255,aC)); }
+    }
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // PRESSURE BAR: tug-of-war from the centre — gold pushing the enemy (right), red losing (left).
+    { float bx0=170.0f,bx1=790.0f, cy=96.0f, hh=12.0f; float mid=(bx0+bx1)*0.5f;
+      hud_solid_quad(bx0-5,cy-hh-5,bx1+5,cy+hh+5, MM_COL(235,235,245,235));        // frame
+      hud_solid_quad(bx0-2,cy-hh-2,bx1+2,cy+hh+2, MM_COL(22,16,26,248));           // back
+      float dev=(s_pc_pressure-0.5f)*2.0f; float fw2=dev*(bx1-bx0)*0.5f;
+      unsigned fc2 = dev>=0.0f ? MM_COL(255,205,70,255) : MM_COL(255,70,45,255);
+      if (fw2>=0.0f) hud_solid_quad(mid,cy-hh,mid+fw2,cy+hh, fc2);
+      else           hud_solid_quad(mid+fw2,cy-hh,mid,cy+hh, fc2);
+      hud_solid_quad(mid-2,cy-hh-5,mid+2,cy+hh+5, MM_COL(255,255,255,255));        // centre tick
+      hud_solid_quad(bx0-18,cy-hh,bx0-8,cy+hh, MM_COL(255,80,55,255));             // your cap (red)
+      hud_solid_quad(bx1+8,cy-hh,bx1+18,cy+hh, MM_COL(255,210,80,255)); }          // enemy cap (gold)
+    // BUTTON PROMPT: PSV-coloured shape mid-screen; grows + dims as its window expires; white
+    // ring flash on a correct press.
+    { float icx=480.0f, icy=232.0f;
+      float wdw=(float)pc_window(); if(wdw<1.0f)wdw=1.0f;
+      float urg=1.0f-(float)s_pc_cmdT/wdw; if(urg<0.0f)urg=0.0f; if(urg>1.0f)urg=1.0f;
+      float sc=42.0f*(1.0f+0.06f*sinf(t*0.55f)+0.28f*urg);
+      int ia=245-(int)(130*urg);
+      if (s_pc_cmd==0){ unsigned c=MM_COL(95,150,255,ia);                          // CROSS (blue X)
+          hud_seg(icx-sc*0.7071f,icy-sc*0.7071f, icx+sc*0.7071f,icy+sc*0.7071f, 8.0f, c);
+          hud_seg(icx-sc*0.7071f,icy+sc*0.7071f, icx+sc*0.7071f,icy-sc*0.7071f, 8.0f, c); }
+      else if (s_pc_cmd==1){                                                       // CIRCLE (red O)
+          hud_ring2d(icx,icy, sc*0.9f, 7.5f, MM_COL(255,90,70,ia)); }
+      else if (s_pc_cmd==2){ unsigned c=MM_COL(255,120,205,ia); float s2=sc*0.78f; // SQUARE (pink)
+          hud_seg(icx-s2,icy-s2, icx+s2,icy-s2, 7.5f, c);
+          hud_seg(icx-s2,icy+s2, icx+s2,icy+s2, 7.5f, c);
+          hud_seg(icx-s2,icy-s2, icx-s2,icy+s2, 7.5f, c);
+          hud_seg(icx+s2,icy-s2, icx+s2,icy+s2, 7.5f, c); }
+      else { unsigned c=MM_COL(120,235,145,ia);                                    // TRIANGLE (green)
+          float vTy=icy-sc, vBy=icy+sc*0.55f;
+          hud_seg(icx,vTy, icx-sc*0.9f,vBy, 7.5f, c);
+          hud_seg(icx-sc*0.9f,vBy, icx+sc*0.9f,vBy, 7.5f, c);
+          hud_seg(icx+sc*0.9f,vBy, icx,vTy, 7.5f, c); }
+      if (s_pc_flash>0){ float ff=(float)s_pc_flash/8.0f;
+          glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+          hud_ring2d(icx,icy, sc*(1.35f+(1.0f-ff)*0.9f), 5.0f, MM_COL(255,255,255,(int)(210*ff)));
+          glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
+    }
+}
+
 static void hud_render(void) {
     // FadeInHudElement node: advance EVERY active per-element alpha crossfade-in.
     for (int _fe = 0; _fe < AFN_HUD_VIS_N; _fe++) {
@@ -4904,6 +5138,10 @@ static void hud_render(void) {
     glEnable(GL_TEXTURE_2D);
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+
+    // PHYSICAL CLASH (HARDCODED prototype): fullscreen RED cut-in (speed-line backdrop +
+    // background impact flashes + pressure bar/prompt) UNDER the normal HUD elements.
+    if (s_pc_active) physclash_render_2d();
 
 #ifdef AFN_HAS_HUD_ANIM
     // Keyframe anim layers — node-driven (NDS hud.c parity): PlayHudAnim
@@ -6322,7 +6560,9 @@ int main(void)
                         float dx = s_npcX[n] - playerX, dz = s_npcZ[n] - playerZ;
                         // Contact is 2D (X/Z); an airborne enemy (jump-evade) has hopped
                         // over the dash — the lunge whiffs under it. Grounded only.
-                        if (s_npcGround[n] && dx*dx + dz*dz <= (float)afn_qa_range*afn_qa_range) {
+                        // MUTUAL DASH: if the enemy is dashing too (or just was — grace),
+                        // don't deal damage / skid; let the physical clash trigger instead.
+                        if (s_npcGround[n] && s_pc_eG == 0 && dx*dx + dz*dz <= (float)afn_qa_range*afn_qa_range) {
                             int dmg = afn_ai_blocking ? (afn_qa_dmg * afn_block_pct) / 100 : afn_qa_dmg;   // enemy Block reduces it
                             if (afn_qa_tgt < NUM_SPRITES) { afn_hp[afn_qa_tgt] -= dmg; if (afn_hp[afn_qa_tgt] < 0) afn_hp[afn_qa_tgt] = 0; }
                             s_qaDealt = 1; afn_qa_hit = 1;
@@ -6453,6 +6693,83 @@ int main(void)
             playerX += s_fw_fx * FW_SPEED; playerZ += s_fw_fz * FW_SPEED;
             playerYaw = s_fw_yaw;
         }
+#ifdef AFN_HAS_PLAYER_RIG
+        // PHYSICAL CLASH (HARDCODED prototype): sense the player's Quick Attack meeting the enemy's
+        // dash-in head-on; lock both in place and run the pressure struggle (prompts + AI cadence).
+        if (s_pc_cd > 0) s_pc_cd--;
+        if (afn_qa_phase == 1) s_pc_pG = 12; else if (s_pc_pG > 0) s_pc_pG--;   // refresh/bleed the grace windows
+        if (s_eqaPhase == 1)   s_pc_eG = 12; else if (s_pc_eG > 0) s_pc_eG--;
+        if (!s_pc_active && s_pc_cd == 0 && s_pc_pG > 0 && s_pc_eG > 0 && afn_hp[AFN_ENEMY_EIDX] > 0) {
+            int eN = pc_enemy_npc();
+            if (eN >= 0) {
+                float dx = s_npcX[eN]-playerX, dz = s_npcZ[eN]-playerZ;
+                if (dx*dx + dz*dz <= PC_MEET_R*PC_MEET_R) {
+                    float d = sqrtf(dx*dx + dz*dz); if (d < 1e-3f) d = 1.0f;
+                    s_pc_dirx = dx/d; s_pc_dirz = dz/d;
+                    afn_qa_phase = 0; afn_qa_active = 0; afn_qa_trigger = 0; afn_qa_frames = 0;   // cancel both dashes
+                    afn_wild_charge = 0;
+                    s_eqaPhase = 0; s_eqaCD = afn_eqa_cd; s_eqaDealt = 1;
+                    s_pc_pxl = playerX; s_pc_pzl = playerZ; s_pc_exl = s_npcX[eN]; s_pc_ezl = s_npcZ[eN];
+                    s_pc_mx = (playerX+s_npcX[eN])*0.5f; s_pc_my = playerY + 16.0f; s_pc_mz = (playerZ+s_npcZ[eN])*0.5f;
+                    s_pc_pressure = 0.5f; s_pc_t = 0; s_pc_knock = 0; s_pc_flash = 0;
+                    s_pc_cmd = (int)(pc_rand()*3.999f); s_pc_cmdT = pc_window(); s_pc_aiT = pc_ai_wait();
+                    s_pc_active = 1;
+                    afn_clash_suppress_beams();   // kill any in-flight projectiles (both sides)
+#ifdef AFN_SND_CLASH
+                    afn_play_sfx_inst_gain(AFN_SND_CLASH, 256);
+#endif
+                }
+            }
+        }
+        if (s_pc_active) {
+            int eN = pc_enemy_npc();
+            // pin both fighters nose-to-nose + freeze the player's movement/abilities (nav keys still
+            // read); keep both sides' projectiles dead so nothing chips anyone mid-QTE.
+            afn_player_frozen = 1; afn_lock_functions = 1;
+            afn_clash_suppress_beams();
+            playerX = s_pc_pxl; playerZ = s_pc_pzl; playerVY = 0.0f;
+            playerYaw = atan2f(s_pc_dirx, s_pc_dirz) * (180.0f/3.14159265f);
+            if (eN >= 0) { s_npcX[eN]=s_pc_exl; s_npcZ[eN]=s_pc_ezl;
+                s_npcYaw[eN] = atan2f(-s_pc_dirx, -s_pc_dirz) * (180.0f/3.14159265f);
+                s_npcClip[eN] = afn_aic_lunge; }
+            if (!afn_paused) {
+                s_pc_t++;
+                if (s_pc_flash > 0) s_pc_flash--;
+                // player prompt: correct button shoves toward the enemy; wrong one bleeds back
+                static const unsigned pcKeys[4] = { KEY_A, KEY_B, KEY_X, KEY_Y };   // Cross/Circle/Square/Triangle
+                if (key_hit(pcKeys[s_pc_cmd])) {
+                    s_pc_pressure += PC_PUSH; s_pc_flash = 8;
+                    s_pc_cmd = (int)(pc_rand()*3.999f); s_pc_cmdT = pc_window();
+                } else {
+                    for (int k2=0;k2<4;k2++) if (k2!=s_pc_cmd && key_hit(pcKeys[k2])) { s_pc_pressure -= PC_MISS; break; }
+                }
+                if (--s_pc_cmdT <= 0) { s_pc_cmd = (int)(pc_rand()*3.999f); s_pc_cmdT = pc_window(); }   // window missed -> new prompt
+                // AI shove cadence (also tightens as the meter leaves the middle)
+                if (--s_pc_aiT <= 0) { s_pc_pressure -= PC_AI_PUSH*(0.8f+pc_rand()*0.4f); s_pc_aiT = pc_ai_wait(); }
+                // resolve: NO timeout — the struggle runs until one side's meter overflows
+                int done=0, won=0;
+                if      (s_pc_pressure >= 1.0f) { done=1; won=1; }
+                else if (s_pc_pressure <= 0.0f) { done=1; won=0; }
+                if (done) {
+                    s_pc_active = 0; s_pc_cd = PC_CD; s_pc_won = won; s_pc_knock = 14;
+                    afn_player_frozen = 0;
+                    if (won) { afn_hp[AFN_ENEMY_EIDX] -= PC_DMG_E; if (afn_hp[AFN_ENEMY_EIDX] < 0) afn_hp[AFN_ENEMY_EIDX] = 0;
+                               if (eN >= 0) { s_npcVY[eN] = 1.1f; s_npcGround[eN] = 0; } }
+                    else     { afn_health -= PC_DMG_P; if (afn_health < 0) afn_health = 0; playerVY = 1.1f; }
+#ifdef AFN_SND_WIN_CLASH
+                    afn_play_sfx_inst_gain(AFN_SND_WIN_CLASH, 256);
+#endif
+                }
+            }
+        }
+        if (s_pc_knock > 0) {                                                    // loser is shoved back
+            s_pc_knock--;
+            float sp = 1.7f * ((float)s_pc_knock/14.0f);
+            if (s_pc_won) { int eN = pc_enemy_npc();
+                if (eN >= 0) { s_npcX[eN] += s_pc_dirx*sp; s_npcZ[eN] += s_pc_dirz*sp; collide_walls(&s_npcX[eN], &s_npcZ[eN], s_npcY[eN]); } }
+            else { playerX -= s_pc_dirx*sp; playerZ -= s_pc_dirz*sp; }
+        }
+#endif
         if (afn_land_timer > 0) afn_land_timer--;   // bleed the land-anim window (Is Landing gate)
 
 #ifdef AFN_HAS_PLAYER_RIG
@@ -7166,6 +7483,9 @@ int main(void)
         // whenever a wheel or its dying sparks are live.
         afn_flamewheel_render(view, playerX, playerY, playerZ);
         afn_flamewheel_step();
+        // Flash Cannon is node-driven now (Play Effect -> kind=17 layer -> afn_flashcannon_fire).
+        afn_flashcannon_render(view);
+        afn_flashcannon_step();
 
         }   // end 3D world (skipped in 2D menu mode)
 
