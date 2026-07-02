@@ -2608,6 +2608,105 @@ static void afn_icebeam_render(const float* view) {
 }
 
 // ---------------------------------------------------------------------------
+// Blizzard — HARDCODED prototype (fired on Select). A hazy ICE MIST cloud blows
+// forward from the player; light-blue crystal diamonds (reused from Ice Beam)
+// SHOOT through the mist on fast staggered cycles — same "streak within the
+// corridor" trick as the Meteor Mash ovals. Two blend passes: soft translucent
+// fog (alpha) + bright additive ice glints. Migrate to a preset later.
+// ---------------------------------------------------------------------------
+static int   s_bz_active = 0, s_bz_life = 0;
+static float s_bz_ox,s_bz_oy,s_bz_oz, s_bz_fx,s_bz_fy,s_bz_fz, s_bz_ax,s_bz_ay,s_bz_az, s_bz_bx,s_bz_by,s_bz_bz;
+#define BZ_MAXLIFE 110        // short life -> fast sweep
+#define BZ_RANGE   150.0f     // travels far across the map (projectile-like)
+#define BZ_BAND    34.0f      // depth of the traveling wall (the sheet's thickness)
+static void afn_blizzard_fire(float px, float py, float pz, float yaw) {
+    float yr = yaw * (3.14159265f/180.0f);
+    s_bz_fx=sinf(yr); s_bz_fy=0.0f; s_bz_fz=cosf(yr);      // forward (level)
+    s_bz_ax=cosf(yr); s_bz_ay=0.0f; s_bz_az=-sinf(yr);     // right
+    s_bz_bx=0.0f;     s_bz_by=1.0f; s_bz_bz=0.0f;          // up
+    s_bz_ox=px+s_bz_fx*4.0f; s_bz_oy=py+8.0f; s_bz_oz=pz+s_bz_fz*4.0f;   // chest-height muzzle
+    s_bz_life=BZ_MAXLIFE; s_bz_active=1;
+}
+static void afn_blizzard_step(void) { if (s_bz_active && !afn_paused) { if (--s_bz_life <= 0) s_bz_active = 0; } }
+static void afn_blizzard_render(const float* view) {
+    if (!s_bz_active) return;
+    float t = (float)(BZ_MAXLIFE - s_bz_life);                                   // frames elapsed
+    float fadeIn  = t < 8.0f ? t/8.0f : 1.0f;
+    float fadeOut = s_bz_life < 20 ? (float)s_bz_life/20.0f : 1.0f;
+    float fade = fadeIn * fadeOut;
+    float Rx=view[0],Ry=view[4],Rz=view[8], Ux=view[1],Uy=view[5],Uz=view[9];   // camera right / up
+    float Fx=s_bz_fx,Fy=s_bz_fy,Fz=s_bz_fz;
+    float Ax=s_bz_ax,Ay=s_bz_ay,Az=s_bz_az, Bx=s_bz_bx,By=s_bz_by,Bz=s_bz_bz;
+    float ox=s_bz_ox, oy=s_bz_oy, oz=s_bz_oz;
+    // screen "along travel" / "across" basis, so diamonds elongate down the shot (like the meteor ovals).
+    float fr=Fx*Rx+Fy*Ry+Fz*Rz, fu=Fx*Ux+Fy*Uy+Fz*Uz, fm=sqrtf(fr*fr+fu*fu);
+    if (fm<0.05f){ fr=1.0f; fu=0.0f; fm=1.0f; } fr/=fm; fu/=fm;
+    float MJx=Rx*fr+Ux*fu, MJy=Ry*fr+Uy*fu, MJz=Rz*fr+Uz*fu;                     // along travel
+    float MNx=Rx*(-fu)+Ux*fr, MNy=Ry*(-fu)+Uy*fr, MNz=Rz*(-fu)+Uz*fr;           // across
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    // A broad TALL sheet of blizzard that TRAVELS forward fast like a projectile: a fixed-depth
+    // wall (`BZ_BAND` thick) whose leading edge rides `frontDist`, sweeping across the map. Fog and
+    // the ice glints are both placed within this band, so the whole sheet moves as one.
+    float prog = t/(float)BZ_MAXLIFE;
+    float frontDist = prog * BZ_RANGE;                                           // constant-speed sweep (projectile)
+    float halfW=30.0f, wallH=26.0f;                                              // WIDE + tall -> a broad standing sheet
+
+    // ---- WALL: fog band riding the moving front, thickest mid-band, soft at edges. ----
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);       // translucent mist
+    int NH=170;
+    for (int i=0;i<NH;i++){ unsigned h=(unsigned)(i+1)*2246822519u ^ 0x85EBCA6Bu;
+        float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f, fd=(float)((h>>24)&0xFF)/255.0f;
+        float back=fc*BZ_BAND;                                                    // distance trailing the leading edge
+        float dist=frontDist - back;                                             // the whole band rides forward together
+        if (dist < 0.0f) continue;                                               // hasn't emerged from the muzzle yet
+        float lateral=(fa*2.0f-1.0f)*halfW;                                       // wide across the wall
+        float vy=fd*wallH;                                                        // rises from the ground -> a curtain
+        float curl=sinf(t*0.03f + fb*6.2831853f)*1.9f + sinf(dist*0.20f + t*0.05f)*1.3f;   // rolling billow
+        float cx=ox+Fx*dist+Ax*lateral, cy=oy-3.0f+vy+curl, cz=oz+Fz*dist+Az*lateral;
+        float lead=back/BZ_BAND;                                                  // 0 at leading edge, 1 at trailing edge
+        float env=1.0f - fabsf(lead-0.4f)*1.5f; if(env<0.0f)env=0.0f;             // fullest just behind the edge
+        int a=(int)(52*fade*env); if(a<0)a=0;
+        float pr=10.0f+fb*7.0f;
+        mm_glow(cx,cy,cz, Rx,Ry,Rz, Ux,Uy,Uz, pr,pr, MM_COL(205,228,255,a), MM_COL(180,210,255,0)); }
+
+    // ---- MUZZLE GUST: a bright cold burst at the mouth for the first ~third. ----
+    if (t < BZ_MAXLIFE*0.32f){ float f=1.0f - t/(BZ_MAXLIFE*0.32f); float rad=5.0f+(1.0f-f)*10.0f;
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, rad,rad,           MM_COL(190,225,255,(int)(150*f)), MM_COL(160,205,255,0));
+        mm_glow(ox,oy,oz, Rx,Ry,Rz, Ux,Uy,Uz, rad*0.5f,rad*0.5f, MM_COL(240,250,255,(int)(210*f)), MM_COL(240,250,255,0)); }
+
+    // ---- ICE DIAMONDS: light-blue crystals rushing FORWARD through the traveling wall (meteor-oval
+    //      trick). Each cycles from the band's tail up to its leading edge, so they ride the sweep. ----
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);                                           // additive glints
+    int ND=54;
+    for (int i=0;i<ND;i++){ unsigned h=(unsigned)(i+1)*2654435761u ^ 0x27D4EB2Fu;
+        float fa=(float)(h&0xFF)/255.0f, fb=(float)((h>>8)&0xFF)/255.0f, fc=(float)((h>>16)&0xFF)/255.0f, fd=(float)((h>>24)&0xFF)/255.0f;
+        float cyc=fmodf(fa + t*0.05f + fc, 1.0f);                                // 0 = band tail -> 1 = leading edge, fast
+        float dist=(frontDist - BZ_BAND) + cyc*(BZ_BAND + 6.0f);                 // shoots forward through/just past the front
+        if (dist < 0.0f) continue;                                               // still behind the muzzle at launch
+        float lateral=(fb*2.0f-1.0f)*halfW*0.9f;                                  // spread across the sheet width
+        float vy=fd*wallH;                                                        // spread up the curtain
+        float cx=ox+Fx*dist+Ax*lateral, cy=oy-3.0f+vy, cz=oz+Fz*dist+Az*lateral;
+        float av=sinf(cyc*3.14159265f);                                          // appear -> peak -> VANISH across the band
+        int a=(int)(210*fade*av); if(a<1) continue;
+        float sc=0.55f + fb*0.6f;                                                // varied crystal size
+        float dw=sc*0.55f, dh=sc*(1.15f + fa*0.6f);                              // elongated along travel
+        // body: light-blue gradient diamond, height axis = along-travel (MJ), width = across (MN)
+        mm_diamond_grad(cx,cy,cz, MNx,MNy,MNz, MJx,MJy,MJz, dw, dh,
+                        MM_COL(230,244,255,a), MM_COL(110,180,250,a));
+        // faceted refracting core (light-blue/white), a touch smaller
+        int cc=(int)(a*0.9f);
+        mm_diamond_facet(cx,cy,cz, MNx,MNy,MNz, MJx,MJy,MJz, dw*0.55f, dh*0.62f,
+            MM_COL(250,253,255,cc), MM_COL(170,210,255,cc), MM_COL(125,182,250,cc), MM_COL(210,235,255,cc)); }
+
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
 // Sludge Bomb — HARDCODED prototype. Lobs a gooey purple sludge blob in an ARC
 // toward a forward point (or the locked target); on impact it splats into a
 // bubbling PUDDLE on the floor that lingers ~4 seconds, then fades. Poison-purple,
@@ -6789,6 +6888,11 @@ int main(void)
         afn_aura_render(view);
         afn_aura_step();
         afn_focusblast_aura_render(view);   // Focus Blast orb rendered as an aura sphere (charge + flight)
+        // HARDCODED PROTOTYPE (Select): Blizzard — ice-mist corridor with light-blue diamonds
+        // shooting through it. Migrate to a preset once it looks right.
+        if (key_hit(KEY_SELECT)) afn_blizzard_fire(playerX, playerY, playerZ, playerYaw);
+        afn_blizzard_render(view);
+        afn_blizzard_step();
 
         }   // end 3D world (skipped in 2D menu mode)
 
