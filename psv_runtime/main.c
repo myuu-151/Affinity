@@ -2431,6 +2431,17 @@ static void mm_flame(float cx,float cz,float fy, float Rx,float Ry,float Rz, flo
     MMV(n, cx,      fy+h,     cz,      colTip ); n++;
     mm_flush(n, GL_TRIANGLES);
 }
+// Directional flame tuft: a triangle whose base billboards to the camera (± width along cam-right R)
+// and whose tip licks along an ARBITRARY world dir (dx,dy,dz unit) — for flames pointing outward
+// around a ring rather than straight up. Hot colBase at the base -> colTip fading at the tip.
+static void mm_flame_dir(float cx,float cy,float cz, float dx,float dy,float dz,
+                         float Rx,float Ry,float Rz, float w,float h, unsigned colBase, unsigned colTip) {
+    int n=0;
+    MMV(n, cx-Rx*w, cy-Ry*w, cz-Rz*w, colBase); n++;
+    MMV(n, cx+Rx*w, cy+Ry*w, cz+Rz*w, colBase); n++;
+    MMV(n, cx+dx*h, cy+dy*h, cz+dz*h, colTip ); n++;
+    mm_flush(n, GL_TRIANGLES);
+}
 static void afn_firespin_render(const float* view, float px, float py, float pz) {
     if (!s_fs_active) return;
     float Rx=view[0],Ry=view[4],Rz=view[8];
@@ -2458,6 +2469,111 @@ static void afn_firespin_render(const float* view, float px, float py, float pz)
         mm_flame(fx,fz,fy, Rx,Ry,Rz, fw*0.60f, fh*0.80f, MM_COL(255,200,90,(int)(150*A)), MM_COL(255,90,20,0));   // yellow body
         mm_flame(fx,fz,fy, Rx,Ry,Rz, fw*0.32f, fh*0.42f, MM_COL(255,240,190,(int)(160*A)), MM_COL(255,180,80,0)); // white-hot base
     }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+
+// ---------------------------------------------------------------------------
+// Flame Wheel — HARDCODED prototype (fired on Select). A VERTICAL wheel of fire
+// (ring plane = forward x up, i.e. a rolling tire aligned with travel) surrounds
+// the player, who rides WITHIN it as it rolls forward. Glowing hoop bands + fire
+// tufts licking outward around the rim, spinning to read as a rolling wheel.
+// Additive. The ride override (movement block) carries the player. Migrate later.
+// ---------------------------------------------------------------------------
+static int   s_fw_active = 0, s_fw_life = 0;
+static float s_fw_fx, s_fw_fz, s_fw_yaw;
+#define FW_MAXLIFE 150        // ride ~2.5s
+#define FW_SPEED   0.95f      // forward units/frame while riding
+#define FW_RINGR   11.0f      // wheel radius (player sits within)
+static void afn_flamewheel_fire(float px, float py, float pz, float yaw) {
+    (void)px;(void)py;(void)pz;
+    float yr = yaw * (3.14159265f/180.0f);
+    s_fw_fx = sinf(yr); s_fw_fz = cosf(yr);      // forward (level) — the roll/travel direction
+    s_fw_yaw = yaw;
+    s_fw_life = FW_MAXLIFE; s_fw_active = 1;
+}
+static void afn_flamewheel_step(void) { if (s_fw_active && !afn_paused) { if (--s_fw_life <= 0) s_fw_active = 0; } }
+static void afn_flamewheel_render(const float* view, float px, float py, float pz) {
+    if (!s_fw_active) return;
+    float Rx=view[0],Ry=view[4],Rz=view[8];                                      // camera right (billboard width)
+    float Uxc=view[1],Uyc=view[5],Uzc=view[9];                                   // camera up (for streak billboards)
+    float fade = (s_fw_life < 18) ? (float)s_fw_life/18.0f : 1.0f;
+    if (FW_MAXLIFE - s_fw_life < 10) fade *= (float)(FW_MAXLIFE - s_fw_life)/10.0f;   // ease in
+    static int frame=0; frame++;
+    // ring basis: plane spanned by world forward F and world up (vertical wheel aligned with travel).
+    float Fx=s_fw_fx, Fy=0.0f, Fz=s_fw_fz;
+    float Ux=0.0f, Uy=1.0f, Uz=0.0f;
+    float cx=px, cy=py + FW_RINGR*0.78f, cz=pz;                                   // centre near torso; player within
+    float roll = (float)frame * 0.16f;                                           // rim spins forward (rolling)
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);                        // additive fire
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    // ---- FIRE VORTEX: a dense swirl of overlapping flame tongues winding toward a hot core, filling
+    //      the wheel like an actual ball of fire (no clean geometric ring). ----
+    // Body haze so the disc reads as a solid mass of fire; hot hub at the centre.
+    mm_glow(cx,cy,cz, Fx,Fy,Fz, Ux,Uy,Uz, FW_RINGR*1.15f, FW_RINGR*1.15f, MM_COL(255, 90, 20,(int)(70*fade)),  MM_COL(150, 25, 0,0));
+    mm_glow(cx,cy,cz, Fx,Fy,Fz, Ux,Uy,Uz, FW_RINGR*0.70f, FW_RINGR*0.70f, MM_COL(255,150, 45,(int)(95*fade)),  MM_COL(255, 90,20,0));
+    mm_glow(cx,cy,cz, Fx,Fy,Fz, Ux,Uy,Uz, FW_RINGR*0.38f, FW_RINGR*0.38f, MM_COL(255,235,170,(int)(150*fade)), MM_COL(255,150,50,0));
+
+    // Spiral tongues: concentric bands of tangential+inward licks, each band angle-offset by radius so
+    // the arms wind into a vortex; inner bands run white-hot + spin faster, outer bands red-orange.
+    int BANDS=5;
+    for (int b=0;b<BANDS;b++){
+        float rf=0.30f + (float)b/(float)(BANDS-1)*0.82f;                          // radius fraction 0.30 .. 1.12
+        int NT=7 + b*4;                                                            // denser at the outer bands
+        float spin=roll*(1.35f - rf*0.6f) + rf*4.4f;                              // inner spins faster + spiral offset by radius
+        for (int i=0;i<NT;i++){ unsigned h=(unsigned)((b*97+i)+1)*2654435761u ^ 0x9E3779B9u;
+            float ja=(float)(h&0xFF)/255.0f, jl=(float)((h>>8)&0xFF)/255.0f, jp=(float)((h>>16)&0xFF)/255.0f, jw=(float)((h>>24)&0xFF)/255.0f;
+            float a=((float)i + (ja-0.5f)*0.8f)/(float)NT*6.2831853f + spin;
+            float ca=cosf(a), sa=sinf(a);
+            float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;                 // radial out
+            float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;             // tangent
+            float rad=FW_RINGR*rf*(1.0f + 0.06f*sinf((float)frame*0.2f + jp*6.2831853f));
+            float bx=cx+ox*rad, by=cy+oy*rad, bz=cz+oz*rad;                        // tongue base
+            // lick: strongly tangential (curl) + inward (spiral toward the hub) -> winding arms
+            float dxr=tx*0.9f - ox*0.55f, dyr=ty*0.9f - oy*0.55f, dzr=tz*0.9f - oz*0.55f;
+            float dl=sqrtf(dxr*dxr+dyr*dyr+dzr*dzr); if(dl<0.001f)dl=0.001f; dxr/=dl; dyr/=dl; dzr/=dl;
+            float flick=0.5f + 0.7f*fabsf(sinf((float)frame*0.30f + jp*6.2831853f + (float)i*0.7f));
+            float len=(3.0f + rf*4.5f + jl*2.5f)*flick;                            // outer tongues longer
+            float w=1.3f + rf*1.7f + jw*0.8f;
+            int gO=(int)(200 - rf*120), bO=(int)(110 - rf*105);                    // inner 200,110 -> outer 80,5
+            int gY=(int)(238 - rf*95),  bY=(int)(185 - rf*150);                    // hot-core tint (whiter inside)
+            if(gO<0)gO=0; if(bO<0)bO=0; if(gY<0)gY=0; if(bY<0)bY=0;
+            int aBody=(int)(150*fade*flick), aHot=(int)(150*fade);
+            mm_flame_dir(bx,by,bz, dxr,dyr,dzr, Rx,Ry,Rz, w,       len,      MM_COL(255,gO,bO,aBody), MM_COL(170, 22, 0,0));   // body
+            mm_flame_dir(bx,by,bz, dxr,dyr,dzr, Rx,Ry,Rz, w*0.5f, len*0.6f, MM_COL(255,gY,bY,aHot),  MM_COL(255,140,40,0)); }  // hot core
+    }
+
+    // BACKGROUND SPEED STREAKS: a few motion smears flung off the outer rim.
+    int NST=10;
+    for (int i=0;i<NST;i++){ unsigned h=(unsigned)(i+5)*2654435761u ^ 0x27D4EB2Fu;
+        float sa0=(float)(h&0xFF)/255.0f, sl=(float)((h>>8)&0xFF)/255.0f, sp=(float)((h>>16)&0xFF)/255.0f;
+        float a=sa0*6.2831853f + roll, ca=cosf(a), sa=sinf(a);
+        float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;
+        float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;
+        float hx=cx+ox*FW_RINGR, hy=cy+oy*FW_RINGR, hz=cz+oz*FW_RINGR;
+        float flick=0.5f + 0.6f*fabsf(sinf((float)frame*0.24f + sp*6.2831853f));
+        float len=(7.0f + sl*9.0f)*flick; int aS=(int)(120*fade*flick);
+        mm_trail(hx,hy,hz, tx,ty,tz, Rx,Ry,Rz, Uxc,Uyc,Uzc, len, 1.3f+sl*1.2f, MM_COL(255,130,35,(int)(aS*0.8f)), MM_COL(190,30,0,0)); }
+
+    // EMBERS: tiny hot flecks flung off the rim, fading out.
+    int NE=18;
+    for (int i=0;i<NE;i++){ unsigned h=(unsigned)(i+7)*2246822519u ^ 0x165667B1u;
+        float ea=(float)(h&0xFF)/255.0f, er=(float)((h>>8)&0xFF)/255.0f, ep=(float)((h>>16)&0xFF)/255.0f;
+        float cyc=fmodf(ep + (float)frame*0.012f, 1.0f);
+        float a=ea*6.2831853f + roll*0.6f, ca=cosf(a), sa=sinf(a);
+        float ox=Fx*ca+Ux*sa, oy=Fy*ca+Uy*sa, oz=Fz*ca+Uz*sa;
+        float tx=-Fx*sa+Ux*ca, ty=-Fy*sa+Uy*ca, tz=-Fz*sa+Uz*ca;
+        float d=FW_RINGR + cyc*(3.0f+er*6.0f);
+        float ex=cx+ox*d+tx*cyc*3.0f, ey=cy+oy*d+ty*cyc*3.0f, ez=cz+oz*d+tz*cyc*3.0f;
+        int a2=(int)(160*fade*(1.0f-cyc)); if(a2<1) continue; float er2=(0.4f+er*0.6f);
+        mm_glow(ex,ey,ez, Rx,Ry,Rz, 0,1,0, er2,er2, MM_COL(255,190,90,a2), MM_COL(255,110,30,0)); }
+
+    // GROUND SCORCH: a warm glow flat on the floor where the wheel meets it.
+    mm_glow(cx, py+0.5f, cz, 1,0,0, 0,0,1, 7.0f,7.0f, MM_COL(255,140,40,(int)(120*fade)), MM_COL(255,90,20,0));
+
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
@@ -5686,6 +5802,7 @@ int main(void)
         }
         if (afn_player_stuck > 0) { afn_input_fwd = 0; afn_input_right = 0; afn_player_stuck--; }
         if (s_su_active) { afn_input_fwd = 0; afn_input_right = 0; }   // Surf: the wave carries the player (no walk)
+        if (s_fw_active) { afn_input_fwd = 0; afn_input_right = 0; }   // Flame Wheel: the wheel carries the player (no walk)
         if (afn_stick_8way && (afn_input_fwd || afn_input_right)) {
             float m = sqrtf((float)afn_input_fwd*afn_input_fwd + (float)afn_input_right*afn_input_right);
             float a = atan2f((float)afn_input_right, (float)afn_input_fwd);
@@ -6219,6 +6336,12 @@ int main(void)
             float riseIn=(st<0.15f)?st/0.15f:1.0f, fallOut=(st>0.85f)?(1.0f-st)/0.15f:1.0f;
             playerY = s_su_oy + 5.0f*riseIn*fallOut;                                 // ride on the wave, settle at the end
             playerVY = 0.0f; grounded = 1; playerYaw = s_su_yaw;                     // face the sweep, no gravity
+        }
+        // FLAME WHEEL RIDE: the wheel rolls forward and carries the player within it, straight along
+        // the fired direction (no steering) — translate forward each frame, face the roll.
+        if (s_fw_active) {
+            playerX += s_fw_fx * FW_SPEED; playerZ += s_fw_fz * FW_SPEED;
+            playerYaw = s_fw_yaw;
         }
         if (afn_land_timer > 0) afn_land_timer--;   // bleed the land-anim window (Is Landing gate)
 
@@ -6928,6 +7051,11 @@ int main(void)
         // forward on its own, so keep rendering/stepping the wall whenever one is active.
         afn_icywind_render(view);
         afn_icywind_step();
+        // HARDCODED PROTOTYPE (Select): Flame Wheel — a vertical fire wheel the player rides forward.
+        // Migrate to a preset once it looks right.
+        if (key_hit(KEY_SELECT)) afn_flamewheel_fire(playerX, playerY, playerZ, playerYaw);
+        afn_flamewheel_render(view, playerX, playerY, playerZ);
+        afn_flamewheel_step();
 
         }   // end 3D world (skipped in 2D menu mode)
 
