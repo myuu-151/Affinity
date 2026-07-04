@@ -224,6 +224,22 @@ struct MeshAsset
     bool visible = true; // false = invisible collision-only mesh (saves CPU on GBA)
     bool hasVertexColor = false; // true = OBJ 2.0 per-vertex colors loaded (v x y z r g b)
 
+    // OBJ 2.0 light rig (github.com/myuu-151/OBJ-2.0): "#light"/"#sun"/"#ambient"
+    // lines parsed from the source OBJ (Blender's lighting setup travels with the
+    // model). Retained as data: the editor previews them with GL lighting and the
+    // PSV exporter emits them as afn_lights[] for runtime vitaGL GL_LIGHTING.
+    struct MeshLight
+    {
+        int   type = 0;                  // 0 = point (x/y/z = position), 1 = sun (x/y/z = travel direction)
+        float x = 0, y = 0, z = 0;
+        float r = 1, g = 1, b = 1;       // light color 0..1
+        float energy = 1000.0f;          // point: watts; sun: W/m^2 (Blender values)
+        float radius = 0.0f;             // point only: custom-distance cutoff (0 = none)
+    };
+    std::vector<MeshLight> lights;       // empty = mesh contributes no lights
+    float lightAmbient[3] = { 0.05f, 0.05f, 0.05f }; // "#ambient" world term
+    float lightBake = 1.0f;              // intensity multiplier (editor tunable, persisted)
+
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated
     std::vector<uint32_t> quadIndices;

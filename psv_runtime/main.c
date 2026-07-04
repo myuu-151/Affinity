@@ -906,6 +906,34 @@ static void upload_textures(void)
     }
 }
 
+#ifdef AFN_HAS_LIGHTS
+// OBJ 2.0 scene lights (the Blender light rig imported through the editor).
+// Load the static world-space lights into GL once per frame with the BARE view
+// matrix on the modelview — GL stores light positions in eye space at glLightfv
+// time, so the per-instance transforms applied afterwards don't move them.
+// Diffuse/attenuation are pre-folded by the exporter (see psv_export_common).
+// The lights are enabled here but only take effect while draw_mesh() turns on
+// GL_LIGHTING for a lit mesh; rigs/billboards/sky all draw with lighting off.
+static void lights_setup(const float* view)
+{
+    static const float zero4[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    glMatrixMode(GL_MODELVIEW);
+    glLoadMatrixf(view);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, afn_light_ambient);
+    for (int i = 0; i < afn_light_count && i < 8; i++) {
+        glLightfv(GL_LIGHT0 + i, GL_POSITION, afn_lights[i].pos);
+        glLightfv(GL_LIGHT0 + i, GL_DIFFUSE,  afn_lights[i].col);
+        glLightfv(GL_LIGHT0 + i, GL_AMBIENT,  zero4);
+        glLightfv(GL_LIGHT0 + i, GL_SPECULAR, zero4);
+        // vitaGL exposes only the *v forms — feed the scalars as 1-elem arrays.
+        glLightfv(GL_LIGHT0 + i, GL_CONSTANT_ATTENUATION,  &afn_lights[i].kc);
+        glLightfv(GL_LIGHT0 + i, GL_LINEAR_ATTENUATION,    &afn_lights[i].kl);
+        glLightfv(GL_LIGHT0 + i, GL_QUADRATIC_ATTENUATION, &afn_lights[i].kq);
+        glEnable(GL_LIGHT0 + i);
+    }
+}
+#endif
+
 static void draw_mesh(int mi)
 {
     const AfnMesh* m = &afn_meshes[mi];
@@ -920,6 +948,25 @@ static void draw_mesh(int mi)
 
     if (m->texHasAlpha || m->blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     else glDisable(GL_BLEND);
+
+#ifdef AFN_HAS_LIGHTS
+    // Scene lights: real vitaGL GL_LIGHTING. lights_setup() already loaded the
+    // eye-space light positions this frame; here we just switch lighting on and
+    // feed this mesh's normals. COLOR_MATERIAL keeps the per-vertex color array
+    // as the albedo, so textures still modulate like the unlit path. NOTE: FFP
+    // lighting is known-clean on Vita3K but per-vertex lit values have shown
+    // stepping on real SGX before (see rig_draw) — if that shows on hardware,
+    // the fallback is baking these lights into vertex colors at export.
+    int sceneLit = m->lit && m->normals != 0;
+    if (sceneLit) {
+        glEnable(GL_LIGHTING);
+        glEnable(GL_COLOR_MATERIAL);
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+        glEnable(GL_NORMALIZE);              // instance glScalef would shrink normals
+        glEnableClientState(GL_NORMAL_ARRAY);
+        glNormalPointer(GL_FLOAT, 0, m->normals);
+    }
+#endif
 
     const AfnVertex* v = m->verts;
     glEnableClientState(GL_VERTEX_ARRAY);
@@ -950,6 +997,14 @@ static void draw_mesh(int mi)
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
+#ifdef AFN_HAS_LIGHTS
+    if (sceneLit) {
+        glDisableClientState(GL_NORMAL_ARRAY);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_COLOR_MATERIAL);
+        glDisable(GL_NORMALIZE);
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -7326,6 +7381,9 @@ int main(void)
         // resolve the same way. The per-instance step is far below visible
         // displacement but far above interpolation noise.
         glEnable(GL_POLYGON_OFFSET_FILL);
+#ifdef AFN_HAS_LIGHTS
+        lights_setup(view);   // eye-space scene lights for this frame's view
+#endif
         for (int si = 0; si < afn_sprite_count; si++) {
             int mi = afn_sprites[si].meshIdx;
             if (mi < 0 || mi >= afn_mesh_count) continue;

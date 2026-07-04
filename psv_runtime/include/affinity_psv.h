@@ -67,7 +67,20 @@ typedef struct {
     const unsigned int*   const* slotTex;      // [mats] RGBA8888 per slot (0 = flat)
     const int*                   slotTexW;      // [mats]
     const int*                   slotTexH;      // [mats]
+    // OBJ 2.0 scene lighting (vitaGL GL_LIGHTING): per-vertex normals
+    // [vertCount*3], or 0 when the scene has no light rig / this mesh is unlit —
+    // the mesh then draws unlit-vertex-colored exactly as before.
+    const float*                 normals;
 } AfnMesh;
+
+// A static scene light (OBJ 2.0 "#light"/"#sun" lines, exporter-placed in world
+// space). col carries the Blender energy + unit conversion pre-folded, so the
+// runtime feeds these fields straight into glLightfv/glLightf.
+typedef struct {
+    float pos[4];      // world xyz + w (1 = point, 0 = directional "toward the light")
+    float col[4];      // diffuse RGB (pre-scaled) + 1
+    float kc, kl, kq;  // GL constant / linear / quadratic attenuation
+} AfnLight;
 
 // A placed instance of a mesh in the world.
 typedef struct {
@@ -82,6 +95,11 @@ extern const int            afn_mesh_count;
 extern const AfnMesh        afn_meshes[];
 extern const int            afn_sprite_count;
 extern const AfnSpriteInst  afn_sprites[];
+// Scene lights — defined only when the export carries an OBJ 2.0 light rig
+// (guard uses with #ifdef AFN_HAS_LIGHTS from psv_mapdata.h).
+extern const int            afn_light_count;
+extern const AfnLight       afn_lights[];
+extern const float          afn_light_ambient[4];
 
 extern const float afn_cam_start_x, afn_cam_start_z, afn_cam_start_h;
 extern const float afn_cam_start_angle;   // radians

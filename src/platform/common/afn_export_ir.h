@@ -209,6 +209,13 @@ struct AfnMeshExport
     std::vector<float> normals;   // nx, ny, nz per vertex (flat)
     std::vector<uint8_t> vertexColors; // r, g, b (0..255) per vertex (flat); empty = none
     int hasVertexColor = 0;       // 1 = OBJ 2.0 per-vertex colors present
+    // OBJ 2.0 light rig ("#light"/"#sun"/"#ambient" lines) — PSV only. The
+    // exporter transforms each light by every placed instance of this mesh and
+    // emits afn_lights[] for runtime vitaGL GL_LIGHTING. energy already includes
+    // the editor's Light Intensity multiplier.
+    struct LightExp { int type = 0; float x=0,y=0,z=0, r=1,g=1,b=1, energy=1000, radius=0; }; // type 0=point 1=sun
+    std::vector<LightExp> lights;
+    float lightAmbient[3] = { 0.05f, 0.05f, 0.05f };
     std::vector<int>   objPosIdx; // original OBJ 'v' index per vertex (for welding)
     std::vector<uint32_t> indices;      // triangle indices (3 per face)
     std::vector<uint32_t> quadIndices;  // quad indices (4 per face)

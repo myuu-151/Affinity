@@ -6509,6 +6509,15 @@ static std::string MeshAssetToOBJ(const MeshAsset& m)
 {
     std::string s = "# Affinity edited mesh\n";
     char buf[160];
+    // Carry the OBJ 2.0 light rig so edited geometry keeps its Blender lights.
+    if (!m.lights.empty()) {
+        snprintf(buf, sizeof(buf), "#ambient %.4f %.4f %.4f\n", m.lightAmbient[0], m.lightAmbient[1], m.lightAmbient[2]); s += buf;
+        for (const MeshAsset::MeshLight& L : m.lights) {
+            if (L.type == 1) snprintf(buf, sizeof(buf), "#sun %.4f %.4f %.4f %.4f %.4f %.4f %.3f\n", L.x, L.y, L.z, L.r, L.g, L.b, L.energy);
+            else             snprintf(buf, sizeof(buf), "#light %.4f %.4f %.4f %.4f %.4f %.4f %.2f %.2f\n", L.x, L.y, L.z, L.r, L.g, L.b, L.energy, L.radius);
+            s += buf;
+        }
+    }
     // Carry per-vertex colors (OBJ 2.0 "v x y z r g b") only if the mesh has any,
     // so colorless meshes persist byte-identically to before.
     bool hasVcol = false;
@@ -7060,9 +7069,28 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         if (!mtmp.empty()) std::remove(mtmp.c_str());
     };
 
+    // OBJ 2.0 light rig: "#light x y z r g b energy radius" (point),
+    // "#sun dx dy dz r g b strength" (directional), "#ambient r g b" (world).
+    // Comment-prefixed so the file stays valid OBJ for every other importer.
+    std::vector<MeshAsset::MeshLight> objLights;
+    float objAmbient[3] = { 0.05f, 0.05f, 0.05f };
+    bool hasAmbient = false;
+
     char line[512];
     while (fgets(line, sizeof(line), f))
     {
+        if (line[0] == '#') {
+            MeshAsset::MeshLight L; float ar, ag, ab;
+            if (sscanf(line, "#light %f %f %f %f %f %f %f %f",
+                       &L.x, &L.y, &L.z, &L.r, &L.g, &L.b, &L.energy, &L.radius) >= 7)
+            { L.type = 0; objLights.push_back(L); }
+            else if (sscanf(line, "#sun %f %f %f %f %f %f %f",
+                            &L.x, &L.y, &L.z, &L.r, &L.g, &L.b, &L.energy) == 7)
+            { L.type = 1; L.radius = 0.0f; objLights.push_back(L); }
+            else if (sscanf(line, "#ambient %f %f %f", &ar, &ag, &ab) == 3)
+            { objAmbient[0] = ar; objAmbient[1] = ag; objAmbient[2] = ab; hasAmbient = true; }
+            continue;
+        }
         if (strncmp(line, "mtllib", 6) == 0 && (line[6]==' '||line[6]=='\t')) {
             char mn[256] = {0};
             if (sscanf(line + 6, "%255s", mn) == 1) parseMtl(mn);
@@ -7210,6 +7238,12 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         auto it = mtlTex.find(out.matName(s));
         if (it != mtlTex.end() && !it->second.empty()) LoadMeshTextureSlot(out, s, it->second);
     }
+
+    // OBJ 2.0 light rig — overwrite unconditionally so a re-import drops lights
+    // that were removed from the source file.
+    out.lights = std::move(objLights);
+    if (hasAmbient) { out.lightAmbient[0] = objAmbient[0]; out.lightAmbient[1] = objAmbient[1]; out.lightAmbient[2] = objAmbient[2]; }
+    else            { out.lightAmbient[0] = out.lightAmbient[1] = out.lightAmbient[2] = 0.05f; }
 
     // Extract filename as name
     size_t slash = path.find_last_of("/\\");
@@ -8062,6 +8096,10 @@ static bool SaveProject(const std::string& path)
     {
         const MeshAsset& ma = sMeshAssets[mi];
         fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0, ma.useSoftAlpha ? 1 : 0, ma.psvColors);
+        // Light Intensity multiplier for the OBJ 2.0 light rig (the lights
+        // themselves re-parse from the source OBJ on load).
+        if (ma.lightBake != 1.0f)
+            fprintf(f, "meshLightBake=%.3f\n", ma.lightBake);
         // Manual per-slot texture overrides (extraMaterials). usemtl/.mtl auto-loads
         // on re-import, so only user-replaced slot textures need persisting.
         for (int s = 1; s < ma.matCount(); s++) {
@@ -9497,6 +9535,11 @@ static bool LoadProject(const std::string& path)
         {
             // Manual per-slot texture override (mesh was pushed + re-imported above).
             { int mtSlot = -1; char mtPath[4096] = {};
+              float mlb = 1.0f;
+              if (sscanf(line, "meshLightBake=%f", &mlb) == 1 && !sMeshAssets.empty()) {
+                  sMeshAssets.back().lightBake = mlb;
+                  continue;
+              }
               if (sscanf(line, "meshMat=%d|%4095[^\n]", &mtSlot, mtPath) == 2 && !sMeshAssets.empty() && mtPath[0]) {
                   MeshAsset& lm = sMeshAssets.back();
                   if (mtSlot > 0 && mtSlot < lm.matCount()) { LoadMeshTextureSlot(lm, mtSlot, std::string(mtPath)); lm.extraMaterials[mtSlot - 1].textureManual = true; }
@@ -13592,6 +13635,36 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Collision##meshCol", &ma.collision);
         ImGui::DragInt("Draw Priority##meshPri", &ma.drawPriority, 0.1f, 0, 10);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = draws on top, higher = draws behind");
+
+        // OBJ 2.0 light rig (Blender lights that traveled with the .obj). Values
+        // are read-only — the source of truth is the Blender scene; re-export the
+        // OBJ to change them. The intensity multiplier scales every light at
+        // preview + PSV export (runtime vitaGL GL_LIGHTING).
+        if (!ma.lights.empty()) {
+            ImGui::Separator();
+            int nPt = 0, nSun = 0;
+            for (const auto& L : ma.lights) (L.type == 1 ? nSun : nPt)++;
+            ImGui::Text("Blender lights: %d point, %d sun  (ambient %.2f %.2f %.2f)",
+                        nPt, nSun, ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2]);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Imported from OBJ 2.0 #light/#sun/#ambient lines.\n"
+                "Edit the lights in Blender and re-export to change them.");
+            for (int li = 0; li < (int)ma.lights.size(); li++) {
+                const auto& L = ma.lights[li];
+                if (L.type == 1)
+                    ImGui::Text("  sun %d: dir (%.2f %.2f %.2f)  %.2f W/m2", li, L.x, L.y, L.z, L.energy);
+                else
+                    ImGui::Text("  point %d: (%.1f %.1f %.1f)  %.0f W%s", li, L.x, L.y, L.z, L.energy,
+                                L.radius > 0.0f ? "  (custom dist)" : "");
+                ImGui::SameLine();
+                ImGui::ColorButton(("##meshLightCol" + std::to_string(li)).c_str(),
+                                   ImVec4(L.r, L.g, L.b, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(14, 14));
+            }
+            if (ImGui::DragFloat("Light Intensity##meshLB", &ma.lightBake, 0.01f, 0.0f, 8.0f, "%.2f"))
+                { s3DRenderNeeded = true; sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Multiplier on every imported light's energy (editor preview + PSV export).");
+        }
 
         ImGui::Separator();
         {
@@ -19466,6 +19539,21 @@ void FrameTick(float dt)
                 {
                     AfnMeshExport me;
                     me.hasVertexColor = ma.hasVertexColor ? 1 : 0;
+                    // OBJ 2.0 light rig -> IR (energy folds in the editor's Light
+                    // Intensity multiplier; PSV exporter world-places per instance).
+                    for (const auto& L : ma.lights)
+                    {
+                        AfnMeshExport::LightExp le;
+                        le.type = L.type;
+                        le.x = L.x; le.y = L.y; le.z = L.z;
+                        le.r = L.r; le.g = L.g; le.b = L.b;
+                        le.energy = L.energy * ma.lightBake;
+                        le.radius = L.radius;
+                        me.lights.push_back(le);
+                    }
+                    me.lightAmbient[0] = ma.lightAmbient[0];
+                    me.lightAmbient[1] = ma.lightAmbient[1];
+                    me.lightAmbient[2] = ma.lightAmbient[2];
                     for (const auto& v : ma.vertices)
                     {
                         me.positions.push_back(v.px);
@@ -38247,6 +38335,51 @@ void Render3DViewport()
             }
             // CullMode::None — no culling
 
+            // OBJ 2.0 light rig preview: real GL point/sun lights, specified in
+            // mesh-local space AFTER the instance transform is on the modelview
+            // so GL carries them into eye space — mirrors the PSV runtime's
+            // vitaGL GL_LIGHTING setup. Intensity matches Blender's diffuse
+            // response under the Standard view transform: point = E·(N·L)/(4π²·d²)
+            // (kq=1, eye-space distance scale folded into the diffuse), sun =
+            // strength/π. Vertex color (or white) is the albedo via COLOR_MATERIAL.
+            bool sceneLit = !ma.lights.empty() && !s3DWireframe;
+            if (sceneLit)
+            {
+                glEnable(GL_LIGHTING);
+                glEnable(GL_NORMALIZE);
+                float amb[4] = { ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2], 1.0f };
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
+                int nl = (int)ma.lights.size(); if (nl > 8) nl = 8;
+                for (int li = 0; li < nl; li++) {
+                    const MeshAsset::MeshLight& L = ma.lights[li];
+                    float e = L.energy * ma.lightBake;
+                    float pos[4], dif[4] = { 0, 0, 0, 1.0f }, zero4[4] = { 0, 0, 0, 1.0f };
+                    if (L.type == 1) {   // sun: stored as travel dir; GL wants "toward the light"
+                        pos[0] = -L.x; pos[1] = -L.y; pos[2] = -L.z; pos[3] = 0.0f;
+                        float k = e / 3.14159265f;
+                        dif[0] = L.r * k; dif[1] = L.g * k; dif[2] = L.b * k;
+                        glLightf(GL_LIGHT0 + li, GL_CONSTANT_ATTENUATION, 1.0f);
+                        glLightf(GL_LIGHT0 + li, GL_LINEAR_ATTENUATION, 0.0f);
+                        glLightf(GL_LIGHT0 + li, GL_QUADRATIC_ATTENUATION, 0.0f);
+                    } else {             // point
+                        pos[0] = L.x; pos[1] = L.y; pos[2] = L.z; pos[3] = 1.0f;
+                        float k = e * fs.scale * fs.scale / 39.478418f;   // 4π²; d_eye scales with the instance
+                        dif[0] = L.r * k; dif[1] = L.g * k; dif[2] = L.b * k;
+                        glLightf(GL_LIGHT0 + li, GL_CONSTANT_ATTENUATION, 0.01f);
+                        glLightf(GL_LIGHT0 + li, GL_LINEAR_ATTENUATION, 0.0f);
+                        glLightf(GL_LIGHT0 + li, GL_QUADRATIC_ATTENUATION, 1.0f);
+                    }
+                    glLightfv(GL_LIGHT0 + li, GL_POSITION, pos);
+                    glLightfv(GL_LIGHT0 + li, GL_DIFFUSE, dif);
+                    glLightfv(GL_LIGHT0 + li, GL_AMBIENT, zero4);
+                    glLightfv(GL_LIGHT0 + li, GL_SPECULAR, zero4);
+                    glEnable(GL_LIGHT0 + li);
+                }
+                glEnable(GL_COLOR_MATERIAL);
+                glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+                glColor3f(1, 1, 1);
+            }
+
             bool useTex = ma.textured && ma.glTexID != 0;
             if (useTex)
             {
@@ -38254,7 +38387,7 @@ void Render3DViewport()
                 glBindTexture(GL_TEXTURE_2D, ma.glTexID);
                 glColor3f(1, 1, 1);
             }
-            else
+            else if (!sceneLit)
             {
                 glEnable(GL_LIGHTING);
                 glEnable(GL_LIGHT0);
@@ -38298,8 +38431,8 @@ void Render3DViewport()
                 int quadCount = (int)ma.quadIndices.size() / 4;
                 for (int s = 0; s < ma.matCount(); s++) {
                     bool sTex = ma.matTextured(s) && ma.matGlTexID(s) != 0;
-                    if (sTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.matGlTexID(s)); glColor3f(1, 1, 1); glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); }
-                    else      { glDisable(GL_TEXTURE_2D); if (!vcol) { glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); } }
+                    if (sTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.matGlTexID(s)); glColor3f(1, 1, 1); if (!sceneLit) { glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); } }
+                    else      { glDisable(GL_TEXTURE_2D); if (!vcol && !sceneLit) { glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); } }
                     glBegin(GL_TRIANGLES);
                     for (int t = 0; t < triCount; t++) {
                         int slot = t < (int)ma.triMaterial.size() ? ma.triMaterial[t] : 0;
@@ -38381,12 +38514,22 @@ void Render3DViewport()
             if (vcol) glDisable(GL_COLOR_MATERIAL);
             if (wf) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore fill for next mesh
 
+            if (sceneLit)
+            {
+                // Neutralize the scene lights so the next mesh starts clean.
+                for (int li = 0; li < 8; li++) glDisable(GL_LIGHT0 + li);
+                float defAmb[4] = { 0.2f, 0.2f, 0.2f, 1.0f };   // GL default
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, defAmb);
+                glDisable(GL_COLOR_MATERIAL);
+                glDisable(GL_NORMALIZE);
+                glDisable(GL_LIGHTING);
+            }
             if (useTex)
             {
                 glDisable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, 0);
             }
-            else
+            else if (!sceneLit)
             {
                 glDisable(GL_LIGHTING);
                 glDisable(GL_LIGHT0);
