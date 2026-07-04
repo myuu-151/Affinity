@@ -6980,6 +6980,46 @@ static int ReimportSceneOBJ(const std::string& objPath,
 // ---- OBJ mesh loader ----
 static bool LoadMeshTextureSlot(MeshAsset& mesh, int slot, const std::string& path);
 
+// Evaluate the OBJ 2.0 light rig at one vertex (mesh-local space) — the same
+// per-vertex math the Meshes-tab GL preview runs, hard clamp included, so a
+// bake of these values is pixel-identical to the live preview:
+//   point: E·max(0,N·L) / (4π²·(0.01 + d²));  sun: E·max(0,N·L)/π
+//   out = base · (ambient + LightIntensity·Σ), clamped to 1.
+// Vertices with no normal (OBJ without vn) light with N·L = 1.
+static void EvalMeshLightAt(const MeshAsset& ma, const MeshVertex& v,
+                            float& outR, float& outG, float& outB)
+{
+    float nx = v.nx, ny = v.ny, nz = v.nz;
+    float nl = sqrtf(nx*nx + ny*ny + nz*nz);
+    bool hasN = nl > 1e-6f;
+    if (hasN) { nx /= nl; ny /= nl; nz /= nl; }
+    float sr = 0, sg = 0, sb = 0;
+    for (const MeshAsset::MeshLight& L : ma.lights) {
+        float inten;
+        if (L.type == 1) {          // sun: stored travel dir; light comes from -dir
+            float dx = -L.x, dy = -L.y, dz = -L.z;
+            float dl = sqrtf(dx*dx + dy*dy + dz*dz); if (dl < 1e-6f) continue;
+            float ndl = hasN ? (nx*dx + ny*dy + nz*dz) / dl : 1.0f;
+            if (ndl <= 0.0f) continue;
+            inten = L.energy * (1.0f / 3.14159265f) * ndl;
+        } else {                    // point
+            float dx = L.x - v.px, dy = L.y - v.py, dz = L.z - v.pz;
+            float d2 = dx*dx + dy*dy + dz*dz;
+            float d = sqrtf(d2); if (d < 1e-6f) continue;
+            float ndl = hasN ? (nx*dx + ny*dy + nz*dz) / d : 1.0f;
+            if (ndl <= 0.0f) continue;
+            inten = L.energy * ndl / (39.478418f * (0.01f + d2));
+        }
+        sr += L.r * inten; sg += L.g * inten; sb += L.b * inten;
+    }
+    float fr = ma.lightAmbient[0] + ma.lightBake * sr;
+    float fg = ma.lightAmbient[1] + ma.lightBake * sg;
+    float fb = ma.lightAmbient[2] + ma.lightBake * sb;
+    outR = v.r * fr; if (outR > 1.0f) outR = 1.0f;
+    outG = v.g * fg; if (outG > 1.0f) outG = 1.0f;
+    outB = v.b * fb; if (outB > 1.0f) outB = 1.0f;
+}
+
 static bool LoadOBJ(const std::string& path, MeshAsset& out)
 {
     FILE* f = nullptr;
@@ -13639,7 +13679,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         // OBJ 2.0 light rig (Blender lights that traveled with the .obj). Values
         // are read-only — the source of truth is the Blender scene; re-export the
         // OBJ to change them. The intensity multiplier scales every light at
-        // preview + PSV export (runtime vitaGL GL_LIGHTING).
+        // preview + PSV export (baked into vertex colors at export — the live
+        // preview and the runtime compute the same per-vertex values).
         if (!ma.lights.empty()) {
             ImGui::Separator();
             int nPt = 0, nSun = 0;
@@ -19554,6 +19595,16 @@ void FrameTick(float dt)
                     me.lightAmbient[0] = ma.lightAmbient[0];
                     me.lightAmbient[1] = ma.lightAmbient[1];
                     me.lightAmbient[2] = ma.lightAmbient[2];
+                    // OBJ 2.0 light rig: BAKE into the exported vertex colors —
+                    // runtime only; the editor keeps the live GL preview. The
+                    // dynamic vitaGL GL_LIGHTING path rendered swimming garbage
+                    // through the custom Vita3K vitaGL build (2026-07-04), and
+                    // FFP lighting is jitter-prone on real SGX anyway. FFP
+                    // lighting is per-vertex Gouraud either way, so baking the
+                    // same per-vertex values is pixel-identical for static
+                    // lights and matches the Meshes-tab preview exactly.
+                    bool bakeLights = !ma.lights.empty() && ma.lit && !ma.useSoftAlpha;
+                    auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
                     for (const auto& v : ma.vertices)
                     {
                         me.positions.push_back(v.px);
@@ -19565,13 +19616,19 @@ void FrameTick(float dt)
                         me.objPosIdx.push_back(v.objPosIdx);
                         me.uvs.push_back(v.u);
                         me.uvs.push_back(v.v);
-                        if (ma.hasVertexColor) {
-                            auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
+                        if (bakeLights) {
+                            float lr, lg, lb;
+                            EvalMeshLightAt(ma, v, lr, lg, lb);
+                            me.vertexColors.push_back(to8(lr));
+                            me.vertexColors.push_back(to8(lg));
+                            me.vertexColors.push_back(to8(lb));
+                        } else if (ma.hasVertexColor) {
                             me.vertexColors.push_back(to8(v.r));
                             me.vertexColors.push_back(to8(v.g));
                             me.vertexColors.push_back(to8(v.b));
                         }
                     }
+                    if (bakeLights) me.hasVertexColor = 1;
                     me.indices = ma.indices;
                     if (ma.useQuads)
                     {
@@ -19599,7 +19656,9 @@ void FrameTick(float dt)
                         std::unordered_map<std::string, int> wmap;
                         std::vector<float> nPos, nNorm, nUV;
                         std::vector<int> nObj;
+                        std::vector<uint8_t> nCol;
                         int vc = (int)me.positions.size() / 3;
+                        bool hasCol = (int)me.vertexColors.size() == vc * 3;  // keep colors in sync through the weld
                         std::vector<int> remap(vc, 0);
                         char key[160];
                         for (int v = 0; v < vc; v++) {
@@ -19616,12 +19675,14 @@ void FrameTick(float dt)
                             nNorm.push_back(me.normals[v*3+0]); nNorm.push_back(me.normals[v*3+1]); nNorm.push_back(me.normals[v*3+2]);
                             nUV.push_back(u); nUV.push_back(vv);
                             nObj.push_back(v < (int)me.objPosIdx.size() ? me.objPosIdx[v] : -1);
+                            if (hasCol) { nCol.push_back(me.vertexColors[v*3+0]); nCol.push_back(me.vertexColors[v*3+1]); nCol.push_back(me.vertexColors[v*3+2]); }
                             wmap[key] = ni; remap[v] = ni;
                         }
                         for (auto& idx : me.indices)     idx = (uint32_t)remap[idx];
                         for (auto& idx : me.quadIndices) idx = (uint32_t)remap[idx];
                         me.positions = std::move(nPos); me.normals = std::move(nNorm);
                         me.uvs = std::move(nUV); me.objPosIdx = std::move(nObj);
+                        if (hasCol) me.vertexColors = std::move(nCol);
                     }
                     // Convert sprite color to RGB15 (use magenta as default)
                     me.colorRGB15 = 0x7C1F; // magenta
@@ -38363,11 +38424,12 @@ void Render3DViewport()
                         glLightf(GL_LIGHT0 + li, GL_QUADRATIC_ATTENUATION, 0.0f);
                     } else {             // point
                         pos[0] = L.x; pos[1] = L.y; pos[2] = L.z; pos[3] = 1.0f;
-                        float k = e * fs.scale * fs.scale / 39.478418f;   // 4π²; d_eye scales with the instance
+                        float k = e / 39.478418f;   // E/(4π²); Blender-unit falloff via kq below
                         dif[0] = L.r * k; dif[1] = L.g * k; dif[2] = L.b * k;
+                        float is = (fs.scale > 1e-6f) ? fs.scale : 1.0f;
                         glLightf(GL_LIGHT0 + li, GL_CONSTANT_ATTENUATION, 0.01f);
                         glLightf(GL_LIGHT0 + li, GL_LINEAR_ATTENUATION, 0.0f);
-                        glLightf(GL_LIGHT0 + li, GL_QUADRATIC_ATTENUATION, 1.0f);
+                        glLightf(GL_LIGHT0 + li, GL_QUADRATIC_ATTENUATION, 1.0f / (is * is)); // d_eye -> Blender units
                     }
                     glLightfv(GL_LIGHT0 + li, GL_POSITION, pos);
                     glLightfv(GL_LIGHT0 + li, GL_DIFFUSE, dif);

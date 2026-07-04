@@ -918,10 +918,29 @@ static void lights_setup(const float* view)
 {
     static const float zero4[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     glMatrixMode(GL_MODELVIEW);
-    glLoadMatrixf(view);
+    // Identity modelview + CPU-side view transform. Spec GL multiplies light
+    // positions by the CURRENT modelview at glLightfv time, but vitaGL builds
+    // have passed them through raw to a shader that lights in eye space —
+    // world-space positions through that path made the lighting swim/garbage
+    // while the camera rotated. With identity loaded and the transform done
+    // here, both behaviors receive the same correct eye-space light.
+    glLoadIdentity();
     glLightModelfv(GL_LIGHT_MODEL_AMBIENT, afn_light_ambient);
     for (int i = 0; i < afn_light_count && i < 8; i++) {
-        glLightfv(GL_LIGHT0 + i, GL_POSITION, afn_lights[i].pos);
+        const float* p = afn_lights[i].pos;
+        float ep[4];
+        if (p[3] != 0.0f) {   // point: full view transform (view is column-major)
+            ep[0] = view[0]*p[0] + view[4]*p[1] + view[8]*p[2]  + view[12];
+            ep[1] = view[1]*p[0] + view[5]*p[1] + view[9]*p[2]  + view[13];
+            ep[2] = view[2]*p[0] + view[6]*p[1] + view[10]*p[2] + view[14];
+            ep[3] = 1.0f;
+        } else {              // directional ("toward the light"): rotation only
+            ep[0] = view[0]*p[0] + view[4]*p[1] + view[8]*p[2];
+            ep[1] = view[1]*p[0] + view[5]*p[1] + view[9]*p[2];
+            ep[2] = view[2]*p[0] + view[6]*p[1] + view[10]*p[2];
+            ep[3] = 0.0f;
+        }
+        glLightfv(GL_LIGHT0 + i, GL_POSITION, ep);
         glLightfv(GL_LIGHT0 + i, GL_DIFFUSE,  afn_lights[i].col);
         glLightfv(GL_LIGHT0 + i, GL_AMBIENT,  zero4);
         glLightfv(GL_LIGHT0 + i, GL_SPECULAR, zero4);
