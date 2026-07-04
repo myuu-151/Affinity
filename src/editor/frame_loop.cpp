@@ -6224,6 +6224,11 @@ static bool  s3DRailVertexSnap  = false; // while grabbing a rail point, snap it
 static int   s3DSelCamKf        = -1;   // PRIMARY selected camera-keyframe index (-1 = none)
 static std::vector<int> s3DSelCamKfs;   // ALL selected cam-kf indices (shift-click multi-select)
 static bool  s3DGrabIsCamKf     = false; // current G grab moves a camera-keyframe eye
+static int   s3DSelSceneLight   = -1;    // selected scene POINT light (viewport pick, -1 = none)
+static bool  s3DGrabIsSceneLight = false;               // current G grab moves a scene light
+static float s3DSceneLightGrabOrig[3] = { 0, 0, 0 };    // its pre-grab world position
+static MeshAsset::MeshLight s3DLightClipboard;          // Ctrl+C'd scene light
+static bool  s3DLightClipboardSet = false;              // true = last viewport copy was a light
 static int   s3DCamKfSprite     = -1;   // player sprite whose cam-kf eyes are being grabbed
 static std::vector<s3DGrabSnap> s3DCamKfGrabOrigs;  // pre-grab eye positions (idx = keyframe index)
 // Camera-anim Edit Mode: the viewport camera DRIVES the selected keyframe (eye+yaw+pitch
@@ -6257,6 +6262,13 @@ static float s3DVtxMulLight = 0.97f, s3DVtxMulDark = 0.85f; // Multiply popup: p
 static bool  s3DVtxMulOpen = false;        // Multiply popup open last frame (open/close edge detect)
 static int   s3DVtxMulMesh = -1;           // mesh the live-preview baseline belongs to
 static std::vector<float> s3DVtxMulBase;   // baseline rgb per vertex captured when the popup opened
+// Dirty AO popup (Blender "Dirty Vertex Colors"): cavity-darkens creases/edges.
+static float s3DVtxDirtStrength = 0.6f;    // how dark the dirt gets (0 = off)
+static float s3DVtxDirtRamp = 1.0f;        // dirt^ramp shaping: low = wide/soft, high = tight creases
+static bool  s3DVtxDirtOpen = false;       // popup open last frame (open/close edge detect)
+static int   s3DVtxDirtMesh = -1;          // mesh the baseline + dirt cache belong to
+static std::vector<float> s3DVtxDirtBase;  // baseline rgb per vertex captured when the popup opened
+static std::vector<float> s3DVtxDirtVals;  // cached per-vertex cavity factor 0..1 (computed on open)
 static std::string s3DVtxXferMsg;          // Copy/Paste Colors status line (clipboard transfer feedback)
 // Live-preview tonal-adjustment popups (Photoshop-style slider sets).
 static float s3DHueShift = 0.0f, s3DHueSat = 0.0f, s3DHueLight = 0.0f;        // deg(-180..180), -100..100, -100..100
@@ -6639,6 +6651,75 @@ static void VtxPaintPushUndo(const MeshAsset& m, int idx)
     if ((int)s3DVtxUndoStack.size() > kVtxUndoMax) s3DVtxUndoStack.erase(s3DVtxUndoStack.begin());
 }
 
+// Blender-style "Dirty Vertex Colors": per-vertex cavity factor 0..1 (1 = deep
+// crease). Concavity at each position-welded vertex = mean over edge-connected
+// neighbors of dot(dir-to-neighbor, vertex normal) — positive means neighbors
+// sit above the tangent plane (a crease/inner edge, where ambient light can't
+// reach); convex edges and flat areas stay 0. One relaxation pass afterwards so
+// the dirt grades into the surrounding faces instead of hugging single verts.
+static void ComputeMeshDirt(const MeshAsset& m, std::vector<float>& dirtOut)
+{
+    int n = (int)m.vertices.size();
+    dirtOut.assign(n, 0.0f);
+    if (n == 0) return;
+    auto pidx = [&](uint32_t vi)->int { int p = m.vertices[vi].objPosIdx; return (p >= 0 && p < n) ? p : (int)vi; };
+    // Per welded position: coordinates + accumulated normal.
+    std::vector<float> px(n,0), py(n,0), pz(n,0), nx(n,0), ny(n,0), nz(n,0);
+    std::vector<int> have(n,0);
+    for (int i = 0; i < n; i++) {
+        int p = pidx(i);
+        const MeshVertex& v = m.vertices[i];
+        px[p] = v.px; py[p] = v.py; pz[p] = v.pz;
+        nx[p] += v.nx; ny[p] += v.ny; nz[p] += v.nz; have[p] = 1;
+    }
+    // Deduped edge adjacency (tris + quads) on welded ids.
+    std::vector<std::vector<int>> adj(n);
+    std::unordered_map<unsigned long long, char> seen;
+    auto addEdge = [&](uint32_t a, uint32_t b) {
+        int pa = pidx(a), pb = pidx(b); if (pa == pb) return;
+        unsigned long long k = pa < pb ? (((unsigned long long)pa << 32) | (unsigned)pb)
+                                       : (((unsigned long long)pb << 32) | (unsigned)pa);
+        if (!seen.emplace(k, 1).second) return;
+        adj[pa].push_back(pb); adj[pb].push_back(pa);
+    };
+    for (size_t t = 0; t + 3 <= m.indices.size(); t += 3) {
+        addEdge(m.indices[t], m.indices[t+1]);
+        addEdge(m.indices[t+1], m.indices[t+2]);
+        addEdge(m.indices[t+2], m.indices[t]);
+    }
+    for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
+        addEdge(m.quadIndices[q],   m.quadIndices[q+1]);
+        addEdge(m.quadIndices[q+1], m.quadIndices[q+2]);
+        addEdge(m.quadIndices[q+2], m.quadIndices[q+3]);
+        addEdge(m.quadIndices[q+3], m.quadIndices[q]);
+    }
+    // Concavity per welded position.
+    std::vector<float> dirt(n, 0.0f);
+    for (int p = 0; p < n; p++) {
+        if (!have[p] || adj[p].empty()) continue;
+        float nl = sqrtf(nx[p]*nx[p] + ny[p]*ny[p] + nz[p]*nz[p]);
+        if (nl < 1e-6f) continue;   // no normals (OBJ without vn) — no dirt
+        float ux = nx[p]/nl, uy = ny[p]/nl, uz = nz[p]/nl;
+        float acc = 0.0f;
+        for (int q : adj[p]) {
+            float dx = px[q]-px[p], dy = py[q]-py[p], dz = pz[q]-pz[p];
+            float dl = sqrtf(dx*dx + dy*dy + dz*dz); if (dl < 1e-6f) continue;
+            acc += (dx*ux + dy*uy + dz*uz) / dl;
+        }
+        float c = 2.0f * acc / (float)adj[p].size();
+        dirt[p] = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
+    }
+    // Relax once so creases bleed a little into their surroundings.
+    std::vector<float> sm = dirt;
+    for (int p = 0; p < n; p++) {
+        if (adj[p].empty()) continue;
+        float a = 0.0f;
+        for (int q : adj[p]) a += dirt[q];
+        sm[p] = dirt[p] * 0.6f + (a / (float)adj[p].size()) * 0.4f;
+    }
+    for (int i = 0; i < n; i++) dirtOut[i] = sm[pidx(i)];
+}
+
 // One pass of Laplacian color smoothing over the whole mesh: each position's color
 // moves a fraction toward the average of its edge-connected neighbors. Welds verts
 // by objPosIdx so duplicated face-corners stay in sync. Spammable for more blur.
@@ -6980,13 +7061,54 @@ static int ReimportSceneOBJ(const std::string& objPath,
 // ---- OBJ mesh loader ----
 static bool LoadMeshTextureSlot(MeshAsset& mesh, int slot, const std::string& path);
 
-// Evaluate the OBJ 2.0 light rig at one vertex (mesh-local space) — the same
-// per-vertex math the Meshes-tab GL preview runs, hard clamp included, so a
-// bake of these values is pixel-identical to the live preview:
+// Editor-spawned scene lights: WORLD space, applied to every LIT mesh in the
+// scene (viewport preview + export bake) — unlike the per-mesh Blender rig,
+// which is authored in Blender and lives in each OBJ's local space. A sun here
+// is the scene-wide directional light. Persisted as sceneLight= project lines.
+static std::vector<MeshAsset::MeshLight> sSceneLights;
+
+// Transform the scene lights into one mesh instance's local space so the same
+// local-space math (EvalMeshLightAt / GL preview) evaluates them. rotOrderZXY:
+// true = runtime instance basis (T·Rz·Rx·Ry·S — export bake), false = editor
+// viewport basis (T·Ry·Rx·Rz·S). Point energy passes through UNCHANGED: it is
+// authored in "Blender watts" falling off in the mesh's model units, so an
+// editor light behaves like the same lamp authored in the model's Blender
+// scene. Sun x/y/z is the travel direction (rotated only).
+static void AppendSceneLightsLocal(std::vector<MeshAsset::MeshLight>& out,
+                                   float tx, float ty, float tz,
+                                   float rotYdeg, float rotXdeg, float rotZdeg,
+                                   float scale, bool rotOrderZXY)
+{
+    if (sSceneLights.empty()) return;
+    float s = (scale > 1e-6f) ? scale : 1.0f;
+    const float d2r = 3.14159265f / 180.0f;
+    float cy = cosf(rotYdeg*d2r), sy = sinf(rotYdeg*d2r);
+    float cx = cosf(rotXdeg*d2r), sx = sinf(rotXdeg*d2r);
+    float cz = cosf(rotZdeg*d2r), sz = sinf(rotZdeg*d2r);
+    auto invY = [&](float& x, float& z){ float nx =  cy*x - sy*z; z = sy*x + cy*z; x = nx; };
+    auto invX = [&](float& y, float& z){ float ny =  cx*y + sx*z; z = -sx*y + cx*z; y = ny; };
+    auto invZ = [&](float& x, float& y){ float nx =  cz*x + sz*y; y = -sz*x + cz*y; x = nx; };
+    for (const MeshAsset::MeshLight& L : sSceneLights) {
+        MeshAsset::MeshLight o = L;
+        float x, y, z;
+        if (L.type == 1) { x = L.x; y = L.y; z = L.z; }               // sun: direction
+        else             { x = L.x - tx; y = L.y - ty; z = L.z - tz; } // point: position
+        if (rotOrderZXY) { invZ(x, y); invX(y, z); invY(x, z); }       // (Rz·Rx·Ry)⁻¹
+        else             { invY(x, z); invX(y, z); invZ(x, y); }       // (Ry·Rx·Rz)⁻¹
+        if (L.type == 1) { o.x = x; o.y = y; o.z = z; }
+        else             { o.x = x / s; o.y = y / s; o.z = z / s; }
+        out.push_back(o);
+    }
+}
+
+// Evaluate a light list at one vertex (mesh-local space) — the same per-vertex
+// math the Meshes-tab GL preview runs, hard clamp included, so a bake of these
+// values is pixel-identical to the live preview:
 //   point: E·max(0,N·L) / (4π²·(0.01 + d²));  sun: E·max(0,N·L)/π
-//   out = base · (ambient + LightIntensity·Σ), clamped to 1.
+//   out = base · (ambient + intensity·Σ), clamped to 1.
 // Vertices with no normal (OBJ without vn) light with N·L = 1.
-static void EvalMeshLightAt(const MeshAsset& ma, const MeshVertex& v,
+static void EvalMeshLightAt(const std::vector<MeshAsset::MeshLight>& lights,
+                            const float* ambient, float intensity, const MeshVertex& v,
                             float& outR, float& outG, float& outB)
 {
     float nx = v.nx, ny = v.ny, nz = v.nz;
@@ -6994,7 +7116,7 @@ static void EvalMeshLightAt(const MeshAsset& ma, const MeshVertex& v,
     bool hasN = nl > 1e-6f;
     if (hasN) { nx /= nl; ny /= nl; nz /= nl; }
     float sr = 0, sg = 0, sb = 0;
-    for (const MeshAsset::MeshLight& L : ma.lights) {
+    for (const MeshAsset::MeshLight& L : lights) {
         float inten;
         if (L.type == 1) {          // sun: stored travel dir; light comes from -dir
             float dx = -L.x, dy = -L.y, dz = -L.z;
@@ -7012,9 +7134,9 @@ static void EvalMeshLightAt(const MeshAsset& ma, const MeshVertex& v,
         }
         sr += L.r * inten; sg += L.g * inten; sb += L.b * inten;
     }
-    float fr = ma.lightAmbient[0] + ma.lightBake * sr;
-    float fg = ma.lightAmbient[1] + ma.lightBake * sg;
-    float fb = ma.lightAmbient[2] + ma.lightBake * sb;
+    float fr = ambient[0] + intensity * sr;
+    float fg = ambient[1] + intensity * sg;
+    float fb = ambient[2] + intensity * sb;
     outR = v.r * fr; if (outR > 1.0f) outR = 1.0f;
     outG = v.g * fg; if (outG > 1.0f) outG = 1.0f;
     outB = v.b * fb; if (outB > 1.0f) outB = 1.0f;
@@ -8140,6 +8262,14 @@ static bool SaveProject(const std::string& path)
         // themselves re-parse from the source OBJ on load).
         if (ma.lightBake != 1.0f)
             fprintf(f, "meshLightBake=%.3f\n", ma.lightBake);
+        // User deleted imported lights in-editor: persist the SURVIVORS and
+        // replace the re-parsed OBJ rig with them on load.
+        if (ma.lightsEdited) {
+            fprintf(f, "meshLightsEdited=1\n");
+            for (const auto& L : ma.lights)
+                fprintf(f, "meshLight=%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.3f|%.3f\n",
+                        L.type, L.x, L.y, L.z, L.r, L.g, L.b, L.energy, L.radius);
+        }
         // Manual per-slot texture overrides (extraMaterials). usemtl/.mtl auto-loads
         // on re-import, so only user-replaced slot textures need persisting.
         for (int s = 1; s < ma.matCount(); s++) {
@@ -8148,6 +8278,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "meshMat=%d|%s\n", s, em.texturePath.c_str());
         }
     }
+    // Editor-spawned scene lights (world space, light every lit mesh).
+    for (const auto& L : sSceneLights)
+        fprintf(f, "sceneLight=%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.3f|%.3f\n",
+                L.type, L.x, L.y, L.z, L.r, L.g, L.b, L.energy, L.radius);
     fprintf(f, "\n");
 
     // Rigged (skinned glTF) mesh assets. Geometry/animation is re-imported from
@@ -9036,6 +9170,7 @@ static bool LoadProject(const std::string& path)
     sAssetDirSprites.clear();
     sSelectedAsset = -1;
     sMeshAssets.clear();
+    sSceneLights.clear();
     sRiggedMeshAssets.clear();
     sSelectedMesh = -1;
     sSelectedMeshes.clear();
@@ -9580,6 +9715,25 @@ static bool LoadProject(const std::string& path)
                   sMeshAssets.back().lightBake = mlb;
                   continue;
               }
+              // User-edited light rig: drop what LoadOBJ re-parsed, replay survivors.
+              if (strncmp(line, "meshLightsEdited=", 17) == 0 && !sMeshAssets.empty()) {
+                  sMeshAssets.back().lights.clear();
+                  sMeshAssets.back().lightsEdited = true;
+                  continue;
+              }
+              { MeshAsset::MeshLight L;
+                if (sscanf(line, "meshLight=%d|%f|%f|%f|%f|%f|%f|%f|%f",
+                           &L.type, &L.x, &L.y, &L.z, &L.r, &L.g, &L.b, &L.energy, &L.radius) == 9
+                    && !sMeshAssets.empty()) {
+                    sMeshAssets.back().lights.push_back(L);
+                    continue;
+                } }
+              { MeshAsset::MeshLight L;
+                if (sscanf(line, "sceneLight=%d|%f|%f|%f|%f|%f|%f|%f|%f",
+                           &L.type, &L.x, &L.y, &L.z, &L.r, &L.g, &L.b, &L.energy, &L.radius) == 9) {
+                    sSceneLights.push_back(L);
+                    continue;
+                } }
               if (sscanf(line, "meshMat=%d|%4095[^\n]", &mtSlot, mtPath) == 2 && !sMeshAssets.empty() && mtPath[0]) {
                   MeshAsset& lm = sMeshAssets.back();
                   if (mtSlot > 0 && mtSlot < lm.matCount()) { LoadMeshTextureSlot(lm, mtSlot, std::string(mtPath)); lm.extraMaterials[mtSlot - 1].textureManual = true; }
@@ -12073,6 +12227,7 @@ static void CloseProject()
     sSelectedAnim = -1;
 
     sMeshAssets.clear();
+    sSceneLights.clear();
     sRiggedMeshAssets.clear();
     sSelectedMesh = -1;
 
@@ -12841,6 +12996,33 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
             }
         }
+        // ---- Scene-light pick (editor-spawned point lights) ----
+        // Same GL-matching projection; suns are directional (no position) and
+        // are skipped. A hit selects the light so G grabs it; a miss drops it.
+        if (!railHit && !sSceneLights.empty()) {
+            float pcx = s3DTargetX + s3DOrbitDist*cosf(s3DOrbitPitch)*sinf(s3DOrbitYaw);
+            float pcy = s3DTargetY + s3DOrbitDist*sinf(s3DOrbitPitch);
+            float pcz = s3DTargetZ + s3DOrbitDist*cosf(s3DOrbitPitch)*cosf(s3DOrbitYaw);
+            float pfx = s3DTargetX-pcx, pfy = s3DTargetY-pcy, pfz = s3DTargetZ-pcz;
+            { float l=sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if(l>0){pfx/=l;pfy/=l;pfz/=l;} }
+            float psx=-pfz, psy=0.0f, psz=pfx; { float l=sqrtf(psx*psx+psz*psz); if(l>0){psx/=l;psz/=l;} }
+            float pux=psy*pfz-psz*pfy, puy=psz*pfx-psx*pfz, puz=psx*pfy-psy*pfx;
+            float pTanH=tanf(45.0f*3.14159265f/360.0f), pAsp=vpAreaW/size.y;
+            float bestPx = 22.0f; int bestL = -1;
+            for (int li = 0; li < (int)sSceneLights.size(); li++) {
+                const MeshAsset::MeshLight& L = sSceneLights[li];
+                if (L.type != 0) continue;   // point lights only
+                float ex=L.x-pcx, ey=L.y-pcy, ez=L.z-pcz;
+                float vz=-(pfx*ex+pfy*ey+pfz*ez); if (vz>=-0.01f) continue;
+                float vx=psx*ex+psy*ey+psz*ez, vy=pux*ex+puy*ey+puz*ez;
+                float sx_=pos.x+((vx/(-vz))/(pTanH*pAsp)+1.0f)*0.5f*vpAreaW;
+                float sy_=pos.y+(1.0f-(vy/(-vz))/pTanH)*0.5f*size.y;
+                float d = sqrtf((sx_-mpos.x)*(sx_-mpos.x) + (sy_-mpos.y)*(sy_-mpos.y));
+                if (d < bestPx) { bestPx = d; bestL = li; }
+            }
+            if (bestL >= 0) { railHit = true; s3DSelSceneLight = bestL; }
+            else if (!railPickShift) s3DSelSceneLight = -1;
+        }
         for (int i = 0; !railHit && i < sSpriteCount; i++)
         {
             const FloorSprite& sp = sSprites[i];
@@ -13015,11 +13197,31 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGuiIO& io = ImGui::GetIO();
         if (hovered && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
         {
-            s3DSpriteClipboard.clear();
-            for (int i = 0; i < sSpriteCount; i++)
-                if (sSprites[i].selected) s3DSpriteClipboard.push_back(sSprites[i]);
+            // A picked scene light takes priority: copy the LIGHT, not sprites.
+            // Whichever was copied last owns the next Ctrl+V.
+            if (s3DSelSceneLight >= 0 && s3DSelSceneLight < (int)sSceneLights.size()) {
+                s3DLightClipboard = sSceneLights[s3DSelSceneLight];
+                s3DLightClipboardSet = true;
+                s3DSpriteClipboard.clear();
+            } else {
+                s3DSpriteClipboard.clear();
+                s3DLightClipboardSet = false;
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].selected) s3DSpriteClipboard.push_back(sSprites[i]);
+            }
         }
         if (hovered && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)
+            && s3DLightClipboardSet)
+        {
+            // Paste a duplicate light, nudged so it sits visibly off the source,
+            // and select it so G moves it straight away.
+            MeshAsset::MeshLight L = s3DLightClipboard;
+            if (L.type == 0) { L.x += 16.0f; L.z += 16.0f; }
+            sSceneLights.push_back(L);
+            s3DSelSceneLight = (int)sSceneLights.size() - 1;
+            sProjectDirty = true; s3DRenderNeeded = true;
+        }
+        else if (hovered && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)
             && !s3DSpriteClipboard.empty())
         {
             for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
@@ -13053,6 +13255,16 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             && ImGui::IsKeyPressed(ImGuiKey_G, false)
             && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
         {
+            // A selected scene light takes top priority: G grabs just it.
+            if (s3DSelSceneLight >= 0 && s3DSelSceneLight < (int)sSceneLights.size()
+                && sSceneLights[s3DSelSceneLight].type == 0)
+            {
+                const MeshAsset::MeshLight& L = sSceneLights[s3DSelSceneLight];
+                s3DSceneLightGrabOrig[0] = L.x; s3DSceneLightGrabOrig[1] = L.y; s3DSceneLightGrabOrig[2] = L.z;
+                s3DGrabIsSceneLight = true; s3DGrabIsCamKf = false; s3DGrabIsRailPoint = false;
+                s3DGrabMode = true; s3DGrabAxis = 0; s3DGrabStartMouse = mpos;
+            }
+            else {
             // A selected rail point takes priority: G grabs just that point.
             CameraAnim* grabCa = nullptr;
             if (s3DSelCamKf >= 0) {
@@ -13104,6 +13316,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                     s3DGrabStartMouse = mpos;
                 }
             }
+            }   // end scene-light-grab else
         }
 
         // ---- W: subdivide — insert a midpoint between selected rail points ----
@@ -13192,7 +13405,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 return nullptr;
             };
             auto resetAnchor = [&]() {
-                if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
+                if (s3DGrabIsSceneLight && s3DSelSceneLight >= 0 && s3DSelSceneLight < (int)sSceneLights.size()) {
+                    auto& L = sSceneLights[s3DSelSceneLight];
+                    L.x = s3DSceneLightGrabOrig[0]; L.y = s3DSceneLightGrabOrig[1]; L.z = s3DSceneLightGrabOrig[2];
+                    s3DRenderNeeded = true;
+                } else if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
                     CameraAnim* ca = curCamAnim(sSprites[s3DCamKfSprite]);
                     if (ca) for (auto& g : s3DCamKfGrabOrigs)
                         if (g.idx >= 0 && g.idx < (int)ca->keyframes.size()) {
@@ -13247,7 +13464,13 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 dx = ( dpx * right_x + dpy * fwd_x) * scale;
                 dz = ( dpx * right_z + dpy * fwd_z) * scale;
             }
-            if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
+            if (s3DGrabIsSceneLight && s3DSelSceneLight >= 0 && s3DSelSceneLight < (int)sSceneLights.size()) {
+                auto& L = sSceneLights[s3DSelSceneLight];
+                L.x = s3DSceneLightGrabOrig[0] + dx;
+                L.y = s3DSceneLightGrabOrig[1] + dy;
+                L.z = s3DSceneLightGrabOrig[2] + dz;
+                s3DRenderNeeded = true;   // relight the cached viewport live while dragging
+            } else if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
                 CameraAnim* ca = curCamAnim(sSprites[s3DCamKfSprite]);
                 if (ca) for (auto& g : s3DCamKfGrabOrigs)
                     if (g.idx >= 0 && g.idx < (int)ca->keyframes.size()) {
@@ -13323,10 +13546,15 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 s3DGrabMode = false;
                 s3DGrabIsRailPoint = false;
                 s3DGrabIsCamKf = false;
+                s3DGrabIsSceneLight = false;
                 sProjectDirty = true;
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
+                if (s3DGrabIsSceneLight && s3DSelSceneLight >= 0 && s3DSelSceneLight < (int)sSceneLights.size()) {
+                    auto& L = sSceneLights[s3DSelSceneLight];
+                    L.x = s3DSceneLightGrabOrig[0]; L.y = s3DSceneLightGrabOrig[1]; L.z = s3DSceneLightGrabOrig[2];
+                    s3DRenderNeeded = true;
+                } else if (s3DGrabIsCamKf && s3DCamKfSprite >= 0 && s3DCamKfSprite < sSpriteCount) {
                     CameraAnim* ca = curCamAnim(sSprites[s3DCamKfSprite]);
                     if (ca) for (auto& g : s3DCamKfGrabOrigs)
                         if (g.idx >= 0 && g.idx < (int)ca->keyframes.size()) {
@@ -13345,6 +13573,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 s3DGrabMode = false;
                 s3DGrabIsRailPoint = false;
                 s3DGrabIsCamKf = false;
+                s3DGrabIsSceneLight = false;
             }
         }
     }
@@ -13624,6 +13853,56 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
+    // Scene Lights: editor-spawned, WORLD space, applied to every lit mesh in
+    // the scene (viewport preview + export bake). A sun here is the scene-wide
+    // directional light; the per-mesh Blender rig (below, on the selected mesh)
+    // stays local to its OBJ.
+    {
+        ImGui::Separator();
+        ImGui::Text("Scene Lights: %d", (int)sSceneLights.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+ Point##scnAddP")) {
+            MeshAsset::MeshLight L; L.type = 0;
+            L.x = s3DTargetX; L.y = s3DTargetY + 20.0f; L.z = s3DTargetZ;
+            L.energy = 1000.0f;
+            sSceneLights.push_back(L); sProjectDirty = true; s3DRenderNeeded = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+ Sun##scnAddS")) {
+            MeshAsset::MeshLight L; L.type = 1;
+            L.x = -0.35f; L.y = -0.8f; L.z = -0.5f;   // travel direction (down-ish)
+            L.energy = 3.0f;
+            sSceneLights.push_back(L); sProjectDirty = true; s3DRenderNeeded = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Directional light over the whole scene.\nDirection = where the light travels; strength in W/m2 like a Blender sun.");
+        for (int li = 0; li < (int)sSceneLights.size(); li++) {
+            MeshAsset::MeshLight& L = sSceneLights[li];
+            ImGui::PushID(42000 + li);
+            if (ImGui::SmallButton("X")) {
+                sSceneLights.erase(sSceneLights.begin() + li); li--;
+                s3DSelSceneLight = -1;   // viewport pick may now dangle
+                sProjectDirty = true; s3DRenderNeeded = true;
+                ImGui::PopID(); continue;
+            }
+            ImGui::SameLine();
+            ImGui::Text(L.type == 1 ? "sun" : "point");
+            ImGui::SameLine();
+            bool ch = false;
+            ImGui::SetNextItemWidth(Scaled(140));
+            if (L.type == 1) ch |= ImGui::DragFloat3("##dir", &L.x, 0.01f, -1.0f, 1.0f, "%.2f");
+            else             ch |= ImGui::DragFloat3("##pos", &L.x, 0.5f, 0.0f, 0.0f, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(L.type == 1 ? "Travel direction" : "World position (editor units)");
+            ImGui::SameLine();
+            ch |= ImGui::ColorEdit3("##col", &L.r, ImGuiColorEditFlags_NoInputs);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(Scaled(52));
+            ch |= ImGui::DragFloat("##en", &L.energy, L.type == 1 ? 0.05f : 10.0f, 0.0f, 100000.0f, L.type == 1 ? "%.2f" : "%.0fW");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(L.type == 1 ? "Strength (W/m2)" : "Energy in Blender watts — falls off in the mesh's model units");
+            if (ch) { sProjectDirty = true; s3DRenderNeeded = true; }
+            ImGui::PopID();
+        }
+    }
+
     // Selected mesh info
     if (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size())
     {
@@ -13692,14 +13971,27 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 "Edit the lights in Blender and re-export to change them.");
             for (int li = 0; li < (int)ma.lights.size(); li++) {
                 const auto& L = ma.lights[li];
+                ImGui::PushID(41000 + li);
+                if (ImGui::SmallButton("X")) {
+                    ma.lights.erase(ma.lights.begin() + li); li--;
+                    ma.lightsEdited = true; sProjectDirty = true; s3DRenderNeeded = true;
+                    ImGui::PopID(); continue;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete this imported light (persists — the OBJ is not re-read for lights)");
+                ImGui::SameLine();
                 if (L.type == 1)
-                    ImGui::Text("  sun %d: dir (%.2f %.2f %.2f)  %.2f W/m2", li, L.x, L.y, L.z, L.energy);
+                    ImGui::Text("sun %d: dir (%.2f %.2f %.2f)  %.2f W/m2", li, L.x, L.y, L.z, L.energy);
                 else
-                    ImGui::Text("  point %d: (%.1f %.1f %.1f)  %.0f W%s", li, L.x, L.y, L.z, L.energy,
+                    ImGui::Text("point %d: (%.1f %.1f %.1f)  %.0f W%s", li, L.x, L.y, L.z, L.energy,
                                 L.radius > 0.0f ? "  (custom dist)" : "");
                 ImGui::SameLine();
-                ImGui::ColorButton(("##meshLightCol" + std::to_string(li)).c_str(),
+                ImGui::ColorButton("##meshLightCol",
                                    ImVec4(L.r, L.g, L.b, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(14, 14));
+                ImGui::PopID();
+            }
+            if (ImGui::SmallButton("Delete All Blender Lights##meshLDA")) {
+                ma.lights.clear();
+                ma.lightsEdited = true; sProjectDirty = true; s3DRenderNeeded = true;
             }
             if (ImGui::DragFloat("Light Intensity##meshLB", &ma.lightBake, 0.01f, 0.0f, 8.0f, "%.2f"))
                 { s3DRenderNeeded = true; sProjectDirty = true; }
@@ -13916,6 +14208,76 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                     PersistMeshVertexColors(ma, sSelectedMesh);
                     sProjectDirty = true; s3DRenderNeeded = true;
                     s3DVtxMulLight = 1.0f; s3DVtxMulDark = 1.0f; // neutral after apply
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(live preview)");
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Dirty##vpdirt"))
+                ImGui::OpenPopup("vpDirtPopup");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Dirty Vertex Colors: darken creases and inner edges (cavity AO) — live-preview sliders.");
+            {
+                // Open/close edge detect: snapshot baseline colors + compute the
+                // cavity factors once on open; closing without Apply reverts.
+                bool dirtOpen = ImGui::IsPopupOpen("vpDirtPopup");
+                if (dirtOpen && !s3DVtxDirtOpen) {
+                    s3DVtxDirtBase.clear(); s3DVtxDirtBase.reserve(ma.vertices.size()*3);
+                    for (const MeshVertex& v : ma.vertices) { s3DVtxDirtBase.push_back(v.r); s3DVtxDirtBase.push_back(v.g); s3DVtxDirtBase.push_back(v.b); }
+                    ComputeMeshDirt(ma, s3DVtxDirtVals);
+                    s3DVtxDirtMesh = sSelectedMesh;
+                } else if (!dirtOpen && s3DVtxDirtOpen) {
+                    if (s3DVtxDirtMesh == sSelectedMesh && s3DVtxDirtBase.size() == ma.vertices.size()*3) {
+                        for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DVtxDirtBase[i*3]; ma.vertices[i].g = s3DVtxDirtBase[i*3+1]; ma.vertices[i].b = s3DVtxDirtBase[i*3+2]; }
+                        s3DRenderNeeded = true;
+                    }
+                    s3DVtxDirtBase.clear(); s3DVtxDirtVals.clear(); s3DVtxDirtMesh = -1;
+                }
+                s3DVtxDirtOpen = dirtOpen;
+            }
+            if (ImGui::BeginPopup("vpDirtPopup"))
+            {
+                ImGui::TextUnformatted("Dirty Vertex Colors (cavity AO)");
+                ImGui::SetNextItemWidth(Scaled(150));
+                ImGui::SliderFloat("Dirty##vpdstr", &s3DVtxDirtStrength, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How dark the creases get (0 = no effect).");
+                ImGui::SetNextItemWidth(Scaled(150));
+                ImGui::SliderFloat("Ramp##vpdramp", &s3DVtxDirtRamp, 0.25f, 4.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shapes the falloff (dirt^ramp):\nlow = wide, soft grime spreading onto faces\nhigh = tight, only the deepest creases");
+                bool haveBase = (s3DVtxDirtMesh == sSelectedMesh
+                                 && s3DVtxDirtBase.size() == ma.vertices.size()*3
+                                 && s3DVtxDirtVals.size() == ma.vertices.size());
+                auto dirtMul = [&](size_t i) {
+                    float d = powf(s3DVtxDirtVals[i], s3DVtxDirtRamp);
+                    float f = 1.0f - s3DVtxDirtStrength * d;
+                    return f < 0.0f ? 0.0f : f;
+                };
+                if (haveBase) {
+                    // Live preview: recompute from the baseline every frame.
+                    for (size_t i = 0; i < ma.vertices.size(); i++) {
+                        float f = dirtMul(i);
+                        ma.vertices[i].r = s3DVtxDirtBase[i*3]   * f;
+                        ma.vertices[i].g = s3DVtxDirtBase[i*3+1] * f;
+                        ma.vertices[i].b = s3DVtxDirtBase[i*3+2] * f;
+                    }
+                    ma.hasVertexColor = true;
+                    s3DRenderNeeded = true;
+                }
+                if (ImGui::Button("Apply##vpdapply") && haveBase)
+                {
+                    // Commit: restore baseline, undo-snapshot it, bake the dirt in,
+                    // and make the result the new baseline (spammable for more grime).
+                    for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DVtxDirtBase[i*3]; ma.vertices[i].g = s3DVtxDirtBase[i*3+1]; ma.vertices[i].b = s3DVtxDirtBase[i*3+2]; }
+                    VtxPaintPushUndo(ma, sSelectedMesh);
+                    for (size_t i = 0; i < ma.vertices.size(); i++) {
+                        float f = dirtMul(i);
+                        float rr = s3DVtxDirtBase[i*3] * f, rg = s3DVtxDirtBase[i*3+1] * f, rb = s3DVtxDirtBase[i*3+2] * f;
+                        ma.vertices[i].r = rr; ma.vertices[i].g = rg; ma.vertices[i].b = rb;
+                        s3DVtxDirtBase[i*3] = rr; s3DVtxDirtBase[i*3+1] = rg; s3DVtxDirtBase[i*3+2] = rb;
+                    }
+                    ma.hasVertexColor = true;
+                    PersistMeshVertexColors(ma, sSelectedMesh);
+                    sProjectDirty = true; s3DRenderNeeded = true;
                 }
                 ImGui::SameLine();
                 ImGui::TextDisabled("(live preview)");
@@ -19603,7 +19965,23 @@ void FrameTick(float dt)
                     // lighting is per-vertex Gouraud either way, so baking the
                     // same per-vertex values is pixel-identical for static
                     // lights and matches the Meshes-tab preview exactly.
-                    bool bakeLights = !ma.lights.empty() && ma.lit && !ma.useSoftAlpha;
+                    // Combined bake list: the mesh's own Blender rig (local) +
+                    // the editor's world-space scene lights, transformed via the
+                    // asset's FIRST placed instance (multi-instance assets share
+                    // vertex colors, so the first placement wins).
+                    std::vector<MeshAsset::MeshLight> bakeList = ma.lights;
+                    if (!sSceneLights.empty()) {
+                        int maIdx = (int)(&ma - sMeshAssets.data());
+                        for (int si = 0; si < sSpriteCount; si++) {
+                            const FloorSprite& lfs = sSprites[si];
+                            if (lfs.type != SpriteType::Mesh || lfs.meshIdx != maIdx) continue;
+                            AppendSceneLightsLocal(bakeList, lfs.x, lfs.y, lfs.z,
+                                                   lfs.rotation, lfs.rotationX, lfs.rotationZ,
+                                                   lfs.scale, true /* runtime Rz·Rx·Ry basis */);
+                            break;
+                        }
+                    }
+                    bool bakeLights = !bakeList.empty() && ma.lit && !ma.useSoftAlpha;
                     auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
                     for (const auto& v : ma.vertices)
                     {
@@ -19618,7 +19996,7 @@ void FrameTick(float dt)
                         me.uvs.push_back(v.v);
                         if (bakeLights) {
                             float lr, lg, lb;
-                            EvalMeshLightAt(ma, v, lr, lg, lb);
+                            EvalMeshLightAt(bakeList, ma.lightAmbient, ma.lightBake, v, lr, lg, lb);
                             me.vertexColors.push_back(to8(lr));
                             me.vertexColors.push_back(to8(lg));
                             me.vertexColors.push_back(to8(lb));
@@ -38403,16 +38781,23 @@ void Render3DViewport()
             // response under the Standard view transform: point = E·(N·L)/(4π²·d²)
             // (kq=1, eye-space distance scale folded into the diffuse), sun =
             // strength/π. Vertex color (or white) is the albedo via COLOR_MATERIAL.
-            bool sceneLit = !ma.lights.empty() && !s3DWireframe;
+            // Combined rig: the mesh's own Blender lights (already local) + the
+            // editor's world-space scene lights transformed into this instance's
+            // local space (editor Ry·Rx·Rz basis).
+            std::vector<MeshAsset::MeshLight> prevLights = ma.lights;
+            AppendSceneLightsLocal(prevLights, sx, sy, sz,
+                                   fs.rotation, fs.rotationX, fs.rotationZ,
+                                   fs.scale, false);
+            bool sceneLit = !prevLights.empty() && ma.lit && !s3DWireframe;
             if (sceneLit)
             {
                 glEnable(GL_LIGHTING);
                 glEnable(GL_NORMALIZE);
                 float amb[4] = { ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2], 1.0f };
                 glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
-                int nl = (int)ma.lights.size(); if (nl > 8) nl = 8;
+                int nl = (int)prevLights.size(); if (nl > 8) nl = 8;
                 for (int li = 0; li < nl; li++) {
-                    const MeshAsset::MeshLight& L = ma.lights[li];
+                    const MeshAsset::MeshLight& L = prevLights[li];
                     float e = L.energy * ma.lightBake;
                     float pos[4], dif[4] = { 0, 0, 0, 1.0f }, zero4[4] = { 0, 0, 0, 1.0f };
                     if (L.type == 1) {   // sun: stored as travel dir; GL wants "toward the light"
@@ -38982,6 +39367,36 @@ void Render3DViewport()
             glEnable(GL_DEPTH_TEST);
             glDisable(GL_BLEND);
         }
+    }
+
+    // ---- Scene-light markers ----
+    // Editor-spawned point lights draw as a star marker in the light's color
+    // (selected = gold, bigger); right-click picks one, G/X/Y/Z moves it and
+    // the lit preview follows live. Suns are directional — nothing to place.
+    if (!sSceneLights.empty())
+    {
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING);
+        glLineWidth(2.5f);
+        glBegin(GL_LINES);
+        for (int li = 0; li < (int)sSceneLights.size(); li++) {
+            const MeshAsset::MeshLight& L = sSceneLights[li];
+            if (L.type != 0) continue;
+            bool sel = (li == s3DSelSceneLight);
+            if (sel) glColor4f(1.0f, 0.85f, 0.25f, 1.0f);
+            else     glColor4f(L.r*0.5f + 0.5f, L.g*0.5f + 0.5f, L.b*0.5f + 0.5f, 1.0f);
+            float r = sel ? 12.0f : 8.0f;
+            glVertex3f(L.x - r, L.y, L.z); glVertex3f(L.x + r, L.y, L.z);
+            glVertex3f(L.x, L.y - r, L.z); glVertex3f(L.x, L.y + r, L.z);
+            glVertex3f(L.x, L.y, L.z - r); glVertex3f(L.x, L.y, L.z + r);
+            float q = r * 0.6f;   // diagonals so it reads as a light star, not an axis gizmo
+            glVertex3f(L.x - q, L.y - q, L.z); glVertex3f(L.x + q, L.y + q, L.z);
+            glVertex3f(L.x - q, L.y + q, L.z); glVertex3f(L.x + q, L.y - q, L.z);
+        }
+        glEnd();
+        glLineWidth(1.0f);
+        glEnable(GL_DEPTH_TEST);
     }
 
     // ---- Camera slot helpers (selected Player) ----

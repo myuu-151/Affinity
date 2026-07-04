@@ -239,6 +239,8 @@ struct MeshAsset
     std::vector<MeshLight> lights;       // empty = mesh contributes no lights
     float lightAmbient[3] = { 0.05f, 0.05f, 0.05f }; // "#ambient" world term
     float lightBake = 1.0f;              // intensity multiplier (editor tunable, persisted)
+    bool lightsEdited = false;           // user deleted imported lights in-editor —
+                                         // persist the survivors instead of re-parsing the OBJ
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated
