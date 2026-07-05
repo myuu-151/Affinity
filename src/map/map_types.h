@@ -165,6 +165,7 @@ struct MeshVertex
     float r, g, b;      // vertex color (default white)
     float u, v;         // texture coordinates (0..1)
     float u2 = 0, v2 = 0; // lightmap UV (OBJ 2.0 4-component vt); unused when the mesh has no lightmap
+    float u3 = 0, v3 = 0; // AO-map UV (OBJ 2.0 6-component vt); unused when the mesh has no AO map
     int   objPosIdx = -1; // original OBJ 'v' index (for vertex welding)
 };
 
@@ -254,6 +255,42 @@ struct MeshAsset
     std::vector<uint8_t> lmPixels;       // RGBA8 (lmW * lmH * 4)
     int lmW = 0, lmH = 0;
     unsigned int lmGlTex = 0;            // editor preview texture (LINEAR)
+
+    // AO map (OBJ 2.0 "#aomap file.png" + 6-component vt): GRAYSCALE occlusion
+    // multiplied over the mesh through the THIRD UV set, between the lightmap
+    // multiply and the additive lights — so AO darkens baked lighting but a
+    // live point light still reaches occluded corners.
+    bool hasAOMap = false;
+    bool hasUV3 = false;                 // OBJ carried 6-component vt (AO UV channel)
+    bool aoManual = false;               // user assigned/removed the AO map in-editor (persisted)
+    std::string aoMapPath;               // AO PNG path (kept on load failure for the warning)
+    std::vector<uint8_t> aoPixels;       // grayscale bytes (aoW * aoH)
+    int aoW = 0, aoH = 0;
+    unsigned int aoGlTex = 0;            // editor preview texture (LINEAR)
+    float aoStrength = 1.0f;             // AO multiplier 0..2: effective = clamp(1 - k + k*ao).
+                                         // 1 = baked AO, <1 fades out, >1 multiplies DARKER.
+                                         // Folded into the texture at upload (FFP color caps at 1).
+                                         // Applies to every map group too.
+
+    // MAP GROUPS (OBJ 2.0 v1.5): one OBJ can carry SEVERAL lightmap/AO pairs —
+    // each "#lightmap"/"#aomap" after faces have been emitted starts a new
+    // group, and the faces that follow belong to it. Used when the model was
+    // split into sections for lightmap density but authored as a single OBJ.
+    // Single-pair OBJs keep using the legacy hasLightmap/hasAOMap fields above;
+    // mapGroups is populated only when there are 2+ groups.
+    struct MeshMapGroup
+    {
+        std::string lmPath, aoPath;          // as referenced by the OBJ (may be empty)
+        std::vector<uint8_t> lmPixels;       // RGBA8 (lmW*lmH*4)
+        int lmW = 0, lmH = 0;
+        unsigned int lmGlTex = 0;
+        std::vector<uint8_t> aoPixels;       // grayscale (aoW*aoH)
+        int aoW = 0, aoH = 0;
+        unsigned int aoGlTex = 0;            // aoStrength-folded, like the single slot
+    };
+    std::vector<MeshMapGroup> mapGroups;     // 2+ entries = multi-map mesh
+    std::vector<uint8_t> triMapGroup;        // group per triangle (parallel to indices/3)
+    std::vector<uint8_t> quadMapGroup;       // group per quad (parallel to quadIndices/4)
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated

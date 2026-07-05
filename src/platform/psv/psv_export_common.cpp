@@ -139,33 +139,121 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             f << "\n};\n";
         }
 
+        // Octal string-literal blob emit — GCC parses a multi-MB string far
+        // faster than that many integer initializers (the PCM trick).
+        auto emitOct = [&](const std::vector<unsigned char>& bytes, const std::string& name) {
+            f << "static const unsigned char " << name << "[] __attribute__((aligned(16))) =\n  \"";
+            int run = 0;
+            for (size_t p = 0; p < bytes.size(); p++) {
+                unsigned bv = bytes[p] & 0xFF;
+                f << '\\' << ((bv>>6)&7) << ((bv>>3)&7) << (bv&7);
+                if (++run >= 96) { f << "\"\n  \""; run = 0; }
+            }
+            f << "\";\n";
+        };
+
         // Lightmap (OBJ 2.0 #lightmap): UV2 (V flipped like the base UVs) +
-        // the RGBA8 texture as an octal STRING LITERAL — GCC parses a multi-MB
-        // string far faster than that many integer initializers (same trick as
-        // the PCM emit in GenerateSharedSound).
-        bool hasLm = isPsv && m.lmW > 0 && m.lmH > 0 && !m.lmPixels.empty()
+        // the RGBA8 texture. Map-group meshes (2+ pairs) emit per-group blobs
+        // below instead of the single-slot ones.
+        bool multiMaps = isPsv && m.mapGroups.size() > 1;
+        bool hasLm = isPsv && !multiMaps && m.lmW > 0 && m.lmH > 0 && !m.lmPixels.empty()
                      && (int)m.uvs2.size() == vc * 2;
-        if (hasLm) {
+        bool needUV2 = (hasLm || multiMaps) && (int)m.uvs2.size() == vc * 2;
+        if (needUV2) {
             f << "static const float afn_mesh" << mi << "_uv2[" << (vc * 2) << "] = {";
             for (int v = 0; v < vc; v++) {
                 if (v % 8 == 0) f << "\n  ";
                 f << Flt(m.uvs2[v*2+0]) << "," << Flt(1.0f - m.uvs2[v*2+1]) << ",";
             }
             f << "\n};\n";
-            f << "static const unsigned char afn_mesh" << mi << "_lm[] __attribute__((aligned(16))) =\n  \"";
-            auto emitB = [&](unsigned bv) { bv &= 0xFF; f << '\\' << ((bv>>6)&7) << ((bv>>3)&7) << (bv&7); };
-            int run = 0;
-            for (size_t p = 0; p < m.lmPixels.size(); p++) {
-                emitB(m.lmPixels[p]);
-                if (++run >= 96) { f << "\"\n  \""; run = 0; }
+        }
+        if (hasLm)
+            emitOct(m.lmPixels, "afn_mesh" + std::to_string(mi) + "_lm");
+
+        // AO map (grayscale, third UV set): fb *= lerp(1, ao, aoStrength),
+        // drawn between the lightmap multiply and the additive lights.
+        bool hasAo = isPsv && !multiMaps && m.aoW > 0 && m.aoH > 0 && !m.aoPixels.empty()
+                     && (int)m.uvs3.size() == vc * 2;
+        bool needUV3 = (hasAo || multiMaps) && (int)m.uvs3.size() == vc * 2;
+        if (needUV3) {
+            f << "static const float afn_mesh" << mi << "_uv3[" << (vc * 2) << "] = {";
+            for (int v = 0; v < vc; v++) {
+                if (v % 8 == 0) f << "\n  ";
+                f << Flt(m.uvs3[v*2+0]) << "," << Flt(1.0f - m.uvs3[v*2+1]) << ",";
             }
-            f << "\";\n";
+            f << "\n};\n";
+        }
+        if (hasAo)
+            emitOct(m.aoPixels, "afn_mesh" + std::to_string(mi) + "_ao");
+
+        // MAP GROUPS: per-group index buffers (tris + triangulated quads) and
+        // per-group lightmap/AO blobs, drawn group-by-group at runtime.
+        if (multiMaps) {
+            int lmg = (int)m.mapGroups.size(); if (lmg > 8) lmg = 8;
+            std::vector<std::vector<unsigned short>> gidx(lmg);
+            int triCount = (int)m.indices.size() / 3;
+            for (int t = 0; t < triCount; t++) {
+                int g = t < (int)m.triMapGroup.size() ? m.triMapGroup[t] : 0;
+                if (g < 0 || g >= lmg) g = 0;
+                gidx[g].push_back((unsigned short)m.indices[t*3+0]);
+                gidx[g].push_back((unsigned short)m.indices[t*3+1]);
+                gidx[g].push_back((unsigned short)m.indices[t*3+2]);
+            }
+            for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
+                int qi2 = (int)(q / 4);
+                int g = qi2 < (int)m.quadMapGroup.size() ? m.quadMapGroup[qi2] : 0;
+                if (g < 0 || g >= lmg) g = 0;
+                unsigned a = m.quadIndices[q], b = m.quadIndices[q+1], c = m.quadIndices[q+2], d = m.quadIndices[q+3];
+                auto& gi = gidx[g];
+                gi.push_back((unsigned short)a); gi.push_back((unsigned short)b); gi.push_back((unsigned short)c);
+                gi.push_back((unsigned short)a); gi.push_back((unsigned short)c); gi.push_back((unsigned short)d);
+            }
+            for (int g = 0; g < lmg; g++) {
+                const auto& si = gidx[g];
+                f << "static const unsigned short afn_mesh" << mi << "_lmgidx" << g << "[" << (si.empty() ? 1 : si.size()) << "] = {";
+                for (size_t k = 0; k < si.size(); k++) { if (k % 16 == 0) f << "\n  "; f << si[k] << ","; }
+                if (si.empty()) f << "0,";
+                f << "\n};\n";
+                const auto& mgp = m.mapGroups[g];
+                if (!mgp.lmPixels.empty() && mgp.lmW > 0)
+                    emitOct(mgp.lmPixels, "afn_mesh" + std::to_string(mi) + "_lmglm" + std::to_string(g));
+                if (!mgp.aoPixels.empty() && mgp.aoW > 0)
+                    emitOct(mgp.aoPixels, "afn_mesh" + std::to_string(mi) + "_lmgao" + std::to_string(g));
+            }
+            f << "static const unsigned short* const afn_mesh" << mi << "_lmg_idx[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++) f << "afn_mesh" << mi << "_lmgidx" << g << ",";
+            f << "};\n";
+            f << "static const int afn_mesh" << mi << "_lmg_idxn[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++) f << (int)gidx[g].size() << ",";
+            f << "};\n";
+            f << "static const unsigned char* const afn_mesh" << mi << "_lmg_lm[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++)
+                f << ((!m.mapGroups[g].lmPixels.empty() && m.mapGroups[g].lmW > 0)
+                        ? ("afn_mesh" + std::to_string(mi) + "_lmglm" + std::to_string(g)) : std::string("0")) << ",";
+            f << "};\n";
+            f << "static const int afn_mesh" << mi << "_lmg_lmw[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++) f << m.mapGroups[g].lmW << ",";
+            f << "};\n";
+            f << "static const int afn_mesh" << mi << "_lmg_lmh[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++) f << m.mapGroups[g].lmH << ",";
+            f << "};\n";
+            f << "static const unsigned char* const afn_mesh" << mi << "_lmg_ao[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++)
+                f << ((!m.mapGroups[g].aoPixels.empty() && m.mapGroups[g].aoW > 0)
+                        ? ("afn_mesh" + std::to_string(mi) + "_lmgao" + std::to_string(g)) : std::string("0")) << ",";
+            f << "};\n";
+            f << "static const int afn_mesh" << mi << "_lmg_aow[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++) f << m.mapGroups[g].aoW << ",";
+            f << "};\n";
+            f << "static const int afn_mesh" << mi << "_lmg_aoh[" << lmg << "] = {";
+            for (int g = 0; g < lmg; g++) f << m.mapGroups[g].aoH << ",";
+            f << "};\n";
         }
 
         // Editor/imported lights on a lightmapped mesh: per-vertex additive
         // light term (0xAABBGGRR), drawn as fb += albedo × lcol on top of the
         // lightmap multiply pass.
-        bool hasACol = isPsv && hasLm && (int)m.addLightColors.size() == vc * 3;
+        bool hasACol = isPsv && (hasLm || multiMaps) && (int)m.addLightColors.size() == vc * 3;
         if (hasACol) {
             f << "static const unsigned int afn_mesh" << mi << "_lcol[" << vc << "] = {";
             for (int v = 0; v < vc; v++) {
@@ -290,17 +378,37 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             else
                 f << ", 0, 0, 0, 0, 0, 0";
             f << ", " << (meshEmitsNormals(m) ? ("afn_mesh" + std::to_string(mi) + "_nrm") : std::string("0"));
-            bool hasLm = m.lmW > 0 && m.lmH > 0 && !m.lmPixels.empty() && (int)m.uvs2.size() == vc * 2;
+            bool hasLm = m.mapGroups.size() <= 1 && m.lmW > 0 && m.lmH > 0 && !m.lmPixels.empty() && (int)m.uvs2.size() == vc * 2;
             if (hasLm)
                 f << ", afn_mesh" << mi << "_uv2, afn_mesh" << mi << "_lm, " << m.lmW << ", " << m.lmH;
+            else if (m.mapGroups.size() > 1 && (int)m.uvs2.size() == vc * 2)
+                f << ", afn_mesh" << mi << "_uv2, 0, 0, 0";   // map groups sample UV2 with their own textures
             else
                 f << ", 0, 0, 0, 0";
             bool hasACol = hasLm && (int)m.addLightColors.size() == vc * 3;
             f << ", " << (hasACol ? ("afn_mesh" + std::to_string(mi) + "_lcol") : std::string("0"));
+            bool multiMaps2 = m.mapGroups.size() > 1;
+            bool hasAo = !multiMaps2 && m.aoW > 0 && m.aoH > 0 && !m.aoPixels.empty() && (int)m.uvs3.size() == vc * 2;
+            if (hasAo)
+                f << ", afn_mesh" << mi << "_uv3, afn_mesh" << mi << "_ao, " << m.aoW << ", " << m.aoH
+                  << ", " << Flt(m.aoStrength);
+            else if (multiMaps2 && (int)m.uvs3.size() == vc * 2)
+                f << ", afn_mesh" << mi << "_uv3, 0, 0, 0, " << Flt(m.aoStrength);
+            else
+                f << ", 0, 0, 0, 0, " << Flt(m.aoStrength);
+            if (multiMaps2) {
+                int lmg = (int)m.mapGroups.size(); if (lmg > 8) lmg = 8;
+                f << ", " << lmg
+                  << ", afn_mesh" << mi << "_lmg_idx, afn_mesh" << mi << "_lmg_idxn"
+                  << ", afn_mesh" << mi << "_lmg_lm, afn_mesh" << mi << "_lmg_lmw, afn_mesh" << mi << "_lmg_lmh"
+                  << ", afn_mesh" << mi << "_lmg_ao, afn_mesh" << mi << "_lmg_aow, afn_mesh" << mi << "_lmg_aoh";
+            } else {
+                f << ", 0, 0, 0, 0, 0, 0, 0, 0, 0";
+            }
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----

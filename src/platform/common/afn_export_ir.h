@@ -225,6 +225,23 @@ struct AfnMeshExport
     // term (zero ambient) drawn as an ADDITIVE third pass on top of the
     // lightmap — fb = albedo×lightmap + albedo×lights. Empty = no such pass.
     std::vector<uint8_t> addLightColors;   // r, g, b per vertex (flat)
+    // AO map (OBJ 2.0 #aomap + 6-component vt) — PSV only: GRAYSCALE occlusion
+    // multiplied through the THIRD UV set between the lightmap and the
+    // additive lights, faded by aoStrength (fb *= lerp(1, ao, strength)).
+    std::vector<float> uvs3;        // u3, v3 per vertex (flat); empty = no AO map
+    std::vector<uint8_t> aoPixels;  // grayscale bytes (aoW * aoH)
+    int aoW = 0, aoH = 0;
+    float aoStrength = 1.0f;
+    // MAP GROUPS (OBJ 2.0 v1.5) — PSV only: 2+ lightmap/AO pairs in one mesh,
+    // applied per face. Empty = single-slot fields above.
+    struct MapGroupExp {
+        std::vector<uint8_t> lmPixels;  // RGBA8 (lmW*lmH*4); empty = none
+        int lmW = 0, lmH = 0;
+        std::vector<uint8_t> aoPixels;  // grayscale (aoW*aoH); empty = none
+        int aoW = 0, aoH = 0;
+    };
+    std::vector<MapGroupExp> mapGroups;
+    std::vector<uint8_t> triMapGroup, quadMapGroup;   // group per tri / quad
     std::vector<int>   objPosIdx; // original OBJ 'v' index per vertex (for welding)
     std::vector<uint32_t> indices;      // triangle indices (3 per face)
     std::vector<uint32_t> quadIndices;  // quad indices (4 per face)

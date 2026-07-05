@@ -6521,9 +6521,12 @@ static std::string MeshAssetToOBJ(const MeshAsset& m)
 {
     std::string s = "# Affinity edited mesh\n";
     char buf[160];
-    // Carry the OBJ 2.0 lightmap reference so edited geometry keeps it.
+    // Carry the OBJ 2.0 lightmap/AO references so edited geometry keeps them.
     if (m.hasLightmap && !m.lightmapPath.empty()) {
         snprintf(buf, sizeof(buf), "#lightmap %s\n", m.lightmapPath.c_str()); s += buf;
+    }
+    if (m.hasAOMap && !m.aoMapPath.empty()) {
+        snprintf(buf, sizeof(buf), "#aomap %s\n", m.aoMapPath.c_str()); s += buf;
     }
     // Carry the OBJ 2.0 light rig so edited geometry keeps its Blender lights.
     if (!m.lights.empty()) {
@@ -6545,8 +6548,9 @@ static std::string MeshAssetToOBJ(const MeshAsset& m)
         s += buf;
     }
     for (const MeshVertex& v : m.vertices) {
-        if (m.hasLightmap) snprintf(buf, sizeof(buf), "vt %.5f %.5f %.5f %.5f\n", v.u, v.v, v.u2, v.v2);
-        else               snprintf(buf, sizeof(buf), "vt %.5f %.5f\n", v.u, v.v);
+        if (m.hasAOMap)         snprintf(buf, sizeof(buf), "vt %.5f %.5f %.5f %.5f %.5f %.5f\n", v.u, v.v, v.u2, v.v2, v.u3, v.v3);
+        else if (m.hasLightmap) snprintf(buf, sizeof(buf), "vt %.5f %.5f %.5f %.5f\n", v.u, v.v, v.u2, v.v2);
+        else                    snprintf(buf, sizeof(buf), "vt %.5f %.5f\n", v.u, v.v);
         s += buf;
     }
     for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vn %.5f %.5f %.5f\n", v.nx, v.ny, v.nz); s += buf; }
@@ -7184,6 +7188,74 @@ static bool LoadMeshLightmap(MeshAsset& out, const std::string& path)
     return true;
 }
 
+// Upload an RGBA image as a LINEAR + clamped GL texture (lightmaps / AO).
+static unsigned int UploadLinearTex(unsigned int oldTex, const uint8_t* rgba, int w, int h)
+{
+    if (oldTex) glDeleteTextures(1, &oldTex);
+    unsigned int tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+// Grayscale AO -> aoStrength-folded RGBA GL texture: effective =
+// clamp(1 - k + k*ao). k=1 leaves the bake as-is, <1 fades toward off, >1
+// multiplies DARKER. Folded here because fixed-function color clamps at 1,
+// so >1 can't ride the blend stage (editor == PSV runtime).
+static unsigned int BuildAOTex(unsigned int oldTex, const std::vector<uint8_t>& gray,
+                               int w, int h, float k)
+{
+    if (gray.empty() || w <= 0 || h <= 0) return oldTex;
+    std::vector<uint8_t> rgba((size_t)w * h * 4);
+    for (size_t i = 0; i < (size_t)w * h; i++) {
+        float e = 1.0f - k + k * (gray[i] / 255.0f);
+        int gi = (int)lroundf((e < 0.0f ? 0.0f : e > 1.0f ? 1.0f : e) * 255.0f);
+        uint8_t g = (uint8_t)gi;
+        rgba[i*4+0] = g; rgba[i*4+1] = g; rgba[i*4+2] = g; rgba[i*4+3] = 255;
+    }
+    return UploadLinearTex(oldTex, rgba.data(), w, h);
+}
+
+// (Re)build every AO preview texture (single slot + map groups) with the
+// current AO Multiplier folded in. Called on load and on slider change.
+static void RebuildMeshAOTex(MeshAsset& out)
+{
+    if (!out.aoPixels.empty() && out.aoW > 0)
+        out.aoGlTex = BuildAOTex(out.aoGlTex, out.aoPixels, out.aoW, out.aoH, out.aoStrength);
+    for (auto& g : out.mapGroups)
+        if (!g.aoPixels.empty() && g.aoW > 0)
+            g.aoGlTex = BuildAOTex(g.aoGlTex, g.aoPixels, g.aoW, g.aoH, out.aoStrength);
+}
+
+// Load a GRAYSCALE AO map into the mesh (stored single-channel — quarter the
+// memory of the lightmap) plus its LINEAR editor preview texture. Shared by
+// the OBJ 2.0 "#aomap" auto-load, the panel's Import AO Map button, and
+// project load.
+static bool LoadMeshAOMap(MeshAsset& out, const std::string& path)
+{
+    int aw = 0, ah = 0, ach = 0;
+    unsigned char* aimg = nullptr;
+    auto ait = sPackedAssets.find(path);
+    if (ait != sPackedAssets.end() && !ait->second.empty())
+        aimg = stbi_load_from_memory(ait->second.data(), (int)ait->second.size(), &aw, &ah, &ach, 1);
+    else
+        aimg = stbi_load(ResolveAssetPath(path).c_str(), &aw, &ah, &ach, 1);
+    if (!aimg) return false;
+    out.aoW = aw; out.aoH = ah;
+    out.aoPixels.assign(aimg, aimg + (size_t)aw * ah);
+    stbi_image_free(aimg);
+    out.hasAOMap = true;
+    out.aoMapPath = path;
+    RebuildMeshAOTex(out);
+    return true;
+}
+
 static bool LoadOBJ(const std::string& path, MeshAsset& out)
 {
     FILE* f = nullptr;
@@ -7218,8 +7290,15 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     std::vector<V3> normals;
     std::vector<V2> texcoords;
     std::vector<V2> texcoords2;   // parallel to texcoords; OBJ 2.0 "vt u v u2 v2" (lightmap UV)
-    bool anyUV2 = false;
-    std::string lightmapRel;      // OBJ 2.0 "#lightmap file.png"
+    std::vector<V2> texcoords3;   // parallel to texcoords; OBJ 2.0 6-component vt (AO-map UV)
+    bool anyUV2 = false, anyUV3 = false;
+    // OBJ 2.0 map groups: each "#lightmap"/"#aomap" declaration after faces
+    // have been emitted starts a NEW group; the faces that follow belong to
+    // it. One declaration pair = the classic single-slot form.
+    struct MGrp { std::string lm, ao; };
+    std::vector<MGrp> mgroups;
+    bool grpHasFaces = false;
+    std::vector<uint8_t> triGrp, quadGrp;   // group per tri/quad (parallel to triMat/quadMat)
     std::vector<MeshVertex> verts;
     std::vector<uint32_t> idxs;
     std::vector<uint32_t> quadIdxs;
@@ -7298,7 +7377,17 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
             { objAmbient[0] = ar; objAmbient[1] = ag; objAmbient[2] = ab; hasAmbient = true; }
             else if (strncmp(line, "#lightmap", 9) == 0) {
                 char lp[512] = {};
-                if (sscanf(line + 9, " %511[^\r\n]", lp) == 1) lightmapRel = lp;
+                if (sscanf(line + 9, " %511[^\r\n]", lp) == 1) {
+                    if (mgroups.empty() || grpHasFaces) { mgroups.push_back(MGrp()); grpHasFaces = false; }
+                    mgroups.back().lm = lp;
+                }
+            }
+            else if (strncmp(line, "#aomap", 6) == 0) {
+                char ap[512] = {};
+                if (sscanf(line + 6, " %511[^\r\n]", ap) == 1) {
+                    if (mgroups.empty() || grpHasFaces) { mgroups.push_back(MGrp()); grpHasFaces = false; }
+                    mgroups.back().ao = ap;
+                }
             }
             continue;
         }
@@ -7338,14 +7427,16 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         }
         else if (line[0] == 'v' && line[1] == 't')
         {
-            // OBJ 2.0 extension: an optional lightmap UV pair follows the base
-            // UV (vt u v u2 v2). 2 floats = base only; 4 = base + lightmap.
-            V2 tc; float q2u = 0, q2v = 0;
-            int n = sscanf(line + 3, "%f %f %f %f", &tc.u, &tc.v, &q2u, &q2v);
+            // OBJ 2.0 extension: optional extra UV pairs follow the base UV —
+            // vt u v [u2 v2 [u3 v3]]. Pair 2 = lightmap, pair 3 = AO map.
+            V2 tc; float q[4] = { 0, 0, 0, 0 };
+            int n = sscanf(line + 3, "%f %f %f %f %f %f", &tc.u, &tc.v, &q[0], &q[1], &q[2], &q[3]);
             if (n >= 2) {
                 texcoords.push_back(tc);
-                if (n >= 4) { texcoords2.push_back({ q2u, q2v }); anyUV2 = true; }
+                if (n >= 4) { texcoords2.push_back({ q[0], q[1] }); anyUV2 = true; }
                 else        texcoords2.push_back({ 0.0f, 0.0f });
+                if (n >= 6) { texcoords3.push_back({ q[2], q[3] }); anyUV3 = true; }
+                else        texcoords3.push_back({ 0.0f, 0.0f });
             }
         }
         else if (line[0] == 'v' && line[1] == 'n')
@@ -7391,6 +7482,8 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 { mv.u = texcoords[tci].u; mv.v = texcoords[tci].v; }
                 if (tci >= 0 && tci < (int)texcoords2.size())
                 { mv.u2 = texcoords2[tci].u; mv.v2 = texcoords2[tci].v; }
+                if (tci >= 0 && tci < (int)texcoords3.size())
+                { mv.u3 = texcoords3[tci].u; mv.v3 = texcoords3[tci].v; }
                 if (nni >= 0 && nni < (int)normals.size())
                 { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
                 if (pi >= 0 && pi < (int)colors.size())
@@ -7400,7 +7493,9 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 verts.push_back(mv);
             }
             // Respect OBJ topology: quads stay quads, tris stay tris.
-            // Tag each emitted tri/quad with the active usemtl slot.
+            // Tag each emitted tri/quad with the active usemtl slot + map group.
+            uint8_t mg = mgroups.empty() ? 0 : (uint8_t)(mgroups.size() - 1);
+            grpHasFaces = true;
             if (count == 4)
             {
                 quadIdxs.push_back(faceBaseIdx);
@@ -7408,6 +7503,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 quadIdxs.push_back(faceBaseIdx + 2);
                 quadIdxs.push_back(faceBaseIdx + 3);
                 quadMat.push_back((uint8_t)curSlot);
+                quadGrp.push_back(mg);
             }
             else if (count == 3)
             {
@@ -7415,6 +7511,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 idxs.push_back(faceBaseIdx + 1);
                 idxs.push_back(faceBaseIdx + 2);
                 triMat.push_back((uint8_t)curSlot);
+                triGrp.push_back(mg);
             }
             else
             {
@@ -7425,6 +7522,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                     idxs.push_back(faceBaseIdx + t);
                     idxs.push_back(faceBaseIdx + t + 1);
                     triMat.push_back((uint8_t)curSlot);
+                    triGrp.push_back(mg);
                 }
             }
         }
@@ -7464,8 +7562,11 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     if (hasAmbient) { out.lightAmbient[0] = objAmbient[0]; out.lightAmbient[1] = objAmbient[1]; out.lightAmbient[2] = objAmbient[2]; }
     else            { out.lightAmbient[0] = out.lightAmbient[1] = out.lightAmbient[2] = 0.05f; }
 
-    // OBJ 2.0 lightmap — auto-load from the "#lightmap" line. Manual panel
-    // assignments re-apply afterwards via meshLmTex= persistence.
+    // OBJ 2.0 lightmap — single declaration pair = legacy one-slot path;
+    // 2+ pairs = MAP GROUPS (loaded below). Manual panel assignments re-apply
+    // afterwards via meshLmTex= persistence.
+    std::string lightmapRel = mgroups.size() == 1 ? mgroups[0].lm : std::string();
+    std::string aoMapRel    = mgroups.size() == 1 ? mgroups[0].ao : std::string();
     out.hasUV2 = anyUV2;
     out.hasLightmap = false;
     out.lightmapPath.clear();
@@ -7475,6 +7576,58 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         std::string lmPath = resolveRel(lightmapRel);
         if (!LoadMeshLightmap(out, lmPath) && !LoadMeshLightmap(out, lightmapRel))
             out.lightmapPath = lmPath;   // keep for the "PNG missing" panel warning
+    }
+
+    // OBJ 2.0 AO map — auto-load from the "#aomap" line (UV pair 3).
+    out.hasUV3 = anyUV3;
+    out.hasAOMap = false;
+    out.aoMapPath.clear();
+    out.aoPixels.clear();
+    out.aoW = out.aoH = 0;
+    if (!aoMapRel.empty() && anyUV3) {
+        std::string aoPath = resolveRel(aoMapRel);
+        if (!LoadMeshAOMap(out, aoPath) && !LoadMeshAOMap(out, aoMapRel))
+            out.aoMapPath = aoPath;      // keep for the "PNG missing" panel warning
+    }
+
+    // MAP GROUPS (2+): per-face lightmap/AO pairs from one OBJ.
+    for (auto& g : out.mapGroups) {
+        if (g.lmGlTex) glDeleteTextures(1, &g.lmGlTex);
+        if (g.aoGlTex) glDeleteTextures(1, &g.aoGlTex);
+    }
+    out.mapGroups.clear();
+    out.triMapGroup.clear();
+    out.quadMapGroup.clear();
+    if (mgroups.size() > 1) {
+        out.triMapGroup = triGrp;
+        out.quadMapGroup = quadGrp;
+        auto loadImg = [&](const std::string& rel, int chans, std::vector<uint8_t>& px, int& w, int& h) {
+            if (rel.empty()) return false;
+            int iw = 0, ih = 0, ic = 0;
+            unsigned char* img = nullptr;
+            std::string p = resolveRel(rel);
+            auto it = sPackedAssets.find(p);
+            if (it == sPackedAssets.end()) it = sPackedAssets.find(rel);
+            if (it != sPackedAssets.end() && !it->second.empty())
+                img = stbi_load_from_memory(it->second.data(), (int)it->second.size(), &iw, &ih, &ic, chans);
+            else
+                img = stbi_load(ResolveAssetPath(p).c_str(), &iw, &ih, &ic, chans);
+            if (!img) return false;
+            w = iw; h = ih;
+            px.assign(img, img + (size_t)iw * ih * chans);
+            stbi_image_free(img);
+            return true;
+        };
+        for (const auto& srcg : mgroups) {
+            MeshAsset::MeshMapGroup g;
+            g.lmPath = srcg.lm;
+            g.aoPath = srcg.ao;
+            if (anyUV2 && loadImg(srcg.lm, 4, g.lmPixels, g.lmW, g.lmH))
+                g.lmGlTex = UploadLinearTex(0, g.lmPixels.data(), g.lmW, g.lmH);
+            if (anyUV3 && loadImg(srcg.ao, 1, g.aoPixels, g.aoW, g.aoH))
+                g.aoGlTex = BuildAOTex(0, g.aoPixels, g.aoW, g.aoH, out.aoStrength);
+            out.mapGroups.push_back(std::move(g));
+        }
     }
 
     // Extract filename as name
@@ -8336,6 +8489,12 @@ static bool SaveProject(const std::string& path)
         if (ma.lmManual)
             fprintf(f, "meshLmTex=%s\n", ma.hasLightmap && !ma.lightmapPath.empty()
                                              ? ma.lightmapPath.c_str() : "(none)");
+        // Same for the AO map (third UV channel) + its opacity.
+        if (ma.aoManual)
+            fprintf(f, "meshAoTex=%s\n", ma.hasAOMap && !ma.aoMapPath.empty()
+                                             ? ma.aoMapPath.c_str() : "(none)");
+        if (ma.aoStrength != 1.0f)
+            fprintf(f, "meshAoStrength=%.3f\n", ma.aoStrength);
         // User deleted imported lights in-editor: persist the SURVIVORS and
         // replace the re-parsed OBJ rig with them on load.
         if (ma.lightsEdited) {
@@ -9789,6 +9948,29 @@ static bool LoadProject(const std::string& path)
                   sMeshAssets.back().lightBake = mlb;
                   continue;
               }
+              // Manual AO-map assign/remove + opacity (third UV channel).
+              if (strncmp(line, "meshAoTex=", 10) == 0 && !sMeshAssets.empty()) {
+                  MeshAsset& aom = sMeshAssets.back();
+                  char aop[512] = {};
+                  sscanf(line + 10, "%511[^\r\n]", aop);
+                  aom.aoManual = true;
+                  if (strcmp(aop, "(none)") == 0 || !aop[0]) {
+                      aom.hasAOMap = false;
+                      aom.aoMapPath.clear();
+                      aom.aoPixels.clear();
+                      aom.aoW = aom.aoH = 0;
+                      if (aom.aoGlTex) { glDeleteTextures(1, &aom.aoGlTex); aom.aoGlTex = 0; }
+                  } else {
+                      LoadMeshAOMap(aom, std::string(aop));
+                  }
+                  continue;
+              }
+              { float aos = 1.0f;
+                if (sscanf(line, "meshAoStrength=%f", &aos) == 1 && !sMeshAssets.empty()) {
+                    sMeshAssets.back().aoStrength = aos;
+                    RebuildMeshAOTex(sMeshAssets.back());   // texture was built at strength 1
+                    continue;
+                } }
               // Manual lightmap assign/remove — overrides the OBJ's #lightmap.
               if (strncmp(line, "meshLmTex=", 10) == 0 && !sMeshAssets.empty()) {
                   MeshAsset& lmm = sMeshAssets.back();
@@ -14169,11 +14351,33 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                     ImGui::SetTooltip("Export this texture as 256-colour (GL_RGB256, 8bpp) instead of 16-colour (GL_RGB16, 4bpp).\nBetter gradients/detail; 2x the VRAM.");
             }
 
+            // MAP GROUPS: one OBJ carrying several lightmap/AO pairs — display
+            // only (Blender owns them); the AO Multiplier below applies to all.
+            if (ma.mapGroups.size() > 1)
+            {
+                ImGui::Separator();
+                ImGui::Text("Map groups: %d (multi lightmap/AO)", (int)ma.mapGroups.size());
+                for (int gi = 0; gi < (int)ma.mapGroups.size(); gi++) {
+                    const auto& g = ma.mapGroups[gi];
+                    ImGui::Text("  [%d] LM %s%dx%d  AO %s%dx%d", gi,
+                                g.lmGlTex ? "" : "(missing) ", g.lmW, g.lmH,
+                                g.aoGlTex ? "" : "(missing) ", g.aoW, g.aoH);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("LM: %s\nAO: %s",
+                                          g.lmPath.empty() ? "(none)" : g.lmPath.c_str(),
+                                          g.aoPath.empty() ? "(none)" : g.aoPath.c_str());
+                }
+                ImGui::SetNextItemWidth(Scaled(150));
+                if (ImGui::SliderFloat("AO Multiplier##meshAoStrG", &ma.aoStrength, 0.0f, 2.0f, "%.2f"))
+                    { RebuildMeshAOTex(ma); sProjectDirty = true; s3DRenderNeeded = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Multiplies every group's occlusion depth: 1 = baked, <1 fades, >1 darkens.");
+            }
             // Lightmap channel (second UV set from the OBJ 2.0 4-component vt).
             // Auto-loads from the OBJ's #lightmap line; assignable/replaceable
             // here. Multiplied over the base texture in a second draw pass —
             // editor preview and PSV runtime identically.
-            if (ma.hasUV2)
+            else if (ma.hasUV2)
             {
                 ImGui::Separator();
                 if (ma.hasLightmap)
@@ -14211,6 +14415,52 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             }
             else if (ma.textured)
                 ImGui::TextDisabled("(no 2nd UV channel in this OBJ — no lightmap slot)");
+
+            // AO channel (third UV set, grayscale). Multiplied between the
+            // lightmap and the additive lights; Opacity fades it toward off.
+            // (Map-group meshes list their AO per group above instead.)
+            if (ma.hasUV3 && ma.mapGroups.size() <= 1)
+            {
+                if (ma.hasAOMap)
+                    ImGui::Text("AO Map (UV3): %dx%d (%s)", ma.aoW, ma.aoH, ma.aoMapPath.c_str());
+                else if (!ma.aoMapPath.empty())
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "AO PNG missing: %s", ma.aoMapPath.c_str());
+                else
+                    ImGui::TextDisabled("AO Map (UV3): none");
+                if (ImGui::Button("Import AO Map##meshAoBtn"))
+                {
+                    std::string ap = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                    if (!ap.empty() && LoadMeshAOMap(ma, ap)) {
+                        ma.aoManual = true;
+                        sProjectDirty = true; s3DRenderNeeded = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Assign a grayscale ambient-occlusion PNG to the third UV channel.\n"
+                    "Multiplies the lit result (after the lightmap, before additive lights),\n"
+                    "so a live point light still reaches occluded corners.");
+                if (ma.hasAOMap)
+                {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Remove##meshAoRm"))
+                    {
+                        ma.hasAOMap = false;
+                        ma.aoMapPath.clear();
+                        ma.aoPixels.clear();
+                        ma.aoW = ma.aoH = 0;
+                        if (ma.aoGlTex) { glDeleteTextures(1, &ma.aoGlTex); ma.aoGlTex = 0; }
+                        ma.aoManual = true;
+                        sProjectDirty = true; s3DRenderNeeded = true;
+                    }
+                    ImGui::SetNextItemWidth(Scaled(150));
+                    if (ImGui::SliderFloat("AO Multiplier##meshAoStr", &ma.aoStrength, 0.0f, 2.0f, "%.2f"))
+                        { RebuildMeshAOTex(ma); sProjectDirty = true; s3DRenderNeeded = true; }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                        "Multiplies the occlusion depth: 1 = baked AO as-is,\n"
+                        "below fades it out, above darkens it further.\n"
+                        "Live in the viewport and identical on PSV.");
+                }
+            }
         }
         // Multi-material slots (from the OBJ's usemtl groups). Each slot binds its
         // own texture on PSV, drawn as a separate group. (PSV target.)
@@ -20128,14 +20378,32 @@ void FrameTick(float dt)
                     // A lightmapped mesh skips the vertex bake (the lightmap owns
                     // ambient+GI); its editor/imported lights bake instead into a
                     // separate ADDITIVE per-vertex term (zero ambient) that the
-                    // runtime draws on top of the lightmap pass.
-                    bool bakeLights = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && !ma.hasLightmap;
-                    bool addLights  = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && ma.hasLightmap;
+                    // runtime draws on top of the lightmap pass. Map-group meshes
+                    // count as lightmapped.
+                    bool multiMaps  = ma.mapGroups.size() > 1;
+                    bool anyLmMesh  = ma.hasLightmap || multiMaps;
+                    bool bakeLights = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && !anyLmMesh;
+                    bool addLights  = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && anyLmMesh;
                     static const float kZeroAmb[3] = { 0.0f, 0.0f, 0.0f };
                     auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
                     if (ma.hasLightmap && !ma.lmPixels.empty()) {
                         me.lmPixels = ma.lmPixels;
                         me.lmW = ma.lmW; me.lmH = ma.lmH;
+                    }
+                    if (ma.hasAOMap && !ma.aoPixels.empty()) {
+                        me.aoPixels = ma.aoPixels;
+                        me.aoW = ma.aoW; me.aoH = ma.aoH;
+                    }
+                    me.aoStrength = ma.aoStrength;
+                    if (multiMaps) {
+                        for (const auto& g : ma.mapGroups) {
+                            AfnMeshExport::MapGroupExp ge;
+                            ge.lmPixels = g.lmPixels; ge.lmW = g.lmW; ge.lmH = g.lmH;
+                            ge.aoPixels = g.aoPixels; ge.aoW = g.aoW; ge.aoH = g.aoH;
+                            me.mapGroups.push_back(std::move(ge));
+                        }
+                        me.triMapGroup = ma.triMapGroup;
+                        me.quadMapGroup = ma.quadMapGroup;
                     }
                     for (const auto& v : ma.vertices)
                     {
@@ -20148,7 +20416,8 @@ void FrameTick(float dt)
                         me.objPosIdx.push_back(v.objPosIdx);
                         me.uvs.push_back(v.u);
                         me.uvs.push_back(v.v);
-                        if (ma.hasLightmap) { me.uvs2.push_back(v.u2); me.uvs2.push_back(v.v2); }
+                        if (ma.hasLightmap || multiMaps) { me.uvs2.push_back(v.u2); me.uvs2.push_back(v.v2); }
+                        if (ma.hasAOMap || (multiMaps && ma.hasUV3)) { me.uvs3.push_back(v.u3); me.uvs3.push_back(v.v3); }
                         if (addLights) {
                             float lr, lg, lb;
                             EvalMeshLightAt(bakeList, kZeroAmb, ma.lightBake, v, lr, lg, lb);
@@ -20185,7 +20454,13 @@ void FrameTick(float dt)
                             me.indices.push_back(ma.quadIndices[qi + 0]);
                             me.indices.push_back(ma.quadIndices[qi + 2]);
                             me.indices.push_back(ma.quadIndices[qi + 3]);
+                            if (multiMaps) {   // keep the map-group tags aligned
+                                uint8_t qg = (qi / 4) < ma.quadMapGroup.size() ? ma.quadMapGroup[qi / 4] : 0;
+                                me.triMapGroup.push_back(qg);
+                                me.triMapGroup.push_back(qg);
+                            }
                         }
+                        if (multiMaps) me.quadMapGroup.clear();
                     }
                     // Remove Doubles: weld vertices that are identical in position,
                     // UV and normal into one, remapping the index buffers — so the
@@ -20194,25 +20469,29 @@ void FrameTick(float dt)
                     if (ma.removeDoubles && !me.positions.empty())
                     {
                         std::unordered_map<std::string, int> wmap;
-                        std::vector<float> nPos, nNorm, nUV, nUV2;
+                        std::vector<float> nPos, nNorm, nUV, nUV2, nUV3;
                         std::vector<int> nObj;
                         std::vector<uint8_t> nCol, nACol;
                         int vc = (int)me.positions.size() / 3;
                         bool hasCol  = (int)me.vertexColors.size() == vc * 3;   // keep colors in sync through the weld
                         bool hasACol = (int)me.addLightColors.size() == vc * 3; // additive light term too
                         bool hasUV2 = (int)me.uvs2.size() == vc * 2;            // and the lightmap UVs
+                        bool hasUV3 = (int)me.uvs3.size() == vc * 2;            // and the AO UVs
                         std::vector<int> remap(vc, 0);
-                        char key[200];
+                        char key[240];
                         for (int v = 0; v < vc; v++) {
                             float u = (v*2+1 < (int)me.uvs.size()) ? me.uvs[v*2+0] : 0.0f;
                             float vv = (v*2+1 < (int)me.uvs.size()) ? me.uvs[v*2+1] : 0.0f;
                             float u2 = hasUV2 ? me.uvs2[v*2+0] : 0.0f;
                             float v2 = hasUV2 ? me.uvs2[v*2+1] : 0.0f;
-                            snprintf(key, sizeof(key), "%d_%d_%d_%d_%d_%d_%d_%d_%d_%d",
+                            float u3 = hasUV3 ? me.uvs3[v*2+0] : 0.0f;
+                            float v3 = hasUV3 ? me.uvs3[v*2+1] : 0.0f;
+                            snprintf(key, sizeof(key), "%d_%d_%d_%d_%d_%d_%d_%d_%d_%d_%d_%d",
                                 (int)lroundf(me.positions[v*3+0]*1024), (int)lroundf(me.positions[v*3+1]*1024), (int)lroundf(me.positions[v*3+2]*1024),
                                 (int)lroundf(u*4096), (int)lroundf(vv*4096),
                                 (int)lroundf(me.normals[v*3+0]*127), (int)lroundf(me.normals[v*3+1]*127), (int)lroundf(me.normals[v*3+2]*127),
-                                (int)lroundf(u2*4096), (int)lroundf(v2*4096));
+                                (int)lroundf(u2*4096), (int)lroundf(v2*4096),
+                                (int)lroundf(u3*4096), (int)lroundf(v3*4096));
                             auto it = wmap.find(key);
                             if (it != wmap.end()) { remap[v] = it->second; continue; }
                             int ni = (int)nPos.size() / 3;
@@ -20220,6 +20499,7 @@ void FrameTick(float dt)
                             nNorm.push_back(me.normals[v*3+0]); nNorm.push_back(me.normals[v*3+1]); nNorm.push_back(me.normals[v*3+2]);
                             nUV.push_back(u); nUV.push_back(vv);
                             if (hasUV2) { nUV2.push_back(u2); nUV2.push_back(v2); }
+                            if (hasUV3) { nUV3.push_back(u3); nUV3.push_back(v3); }
                             nObj.push_back(v < (int)me.objPosIdx.size() ? me.objPosIdx[v] : -1);
                             if (hasCol) { nCol.push_back(me.vertexColors[v*3+0]); nCol.push_back(me.vertexColors[v*3+1]); nCol.push_back(me.vertexColors[v*3+2]); }
                             if (hasACol) { nACol.push_back(me.addLightColors[v*3+0]); nACol.push_back(me.addLightColors[v*3+1]); nACol.push_back(me.addLightColors[v*3+2]); }
@@ -20230,6 +20510,7 @@ void FrameTick(float dt)
                         me.positions = std::move(nPos); me.normals = std::move(nNorm);
                         me.uvs = std::move(nUV); me.objPosIdx = std::move(nObj);
                         if (hasUV2) me.uvs2 = std::move(nUV2);
+                        if (hasUV3) me.uvs3 = std::move(nUV3);
                         if (hasCol) me.vertexColors = std::move(nCol);
                         if (hasACol) me.addLightColors = std::move(nACol);
                     }
@@ -38960,17 +39241,19 @@ void Render3DViewport()
                                    fs.rotation, fs.rotationX, fs.rotationZ,
                                    fs.scale, false);
             // GL light setup shared by the direct-lit path (ambient from the
-            // mesh) and the lightmap ADDITIVE pass (zero ambient — the lightmap
-            // already holds ambient+GI, lights only add on top).
-            auto setupPrevGlLights = [&](float ar, float ag, float ab)
+            // mesh) and the additive passes (zero ambient). FFP has only 8
+            // light slots, so `first` selects an 8-light CHUNK — lights beyond
+            // the first chunk draw as extra additive relight passes below.
+            auto setupPrevGlLights = [&](float ar, float ag, float ab, int first)
             {
                 glEnable(GL_LIGHTING);
                 glEnable(GL_NORMALIZE);
                 float amb[4] = { ar, ag, ab, 1.0f };
                 glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
-                int nl = (int)prevLights.size(); if (nl > 8) nl = 8;
-                for (int li = 0; li < nl; li++) {
-                    const MeshAsset::MeshLight& L = prevLights[li];
+                for (int li = 0; li < 8; li++) {
+                    int idx = first + li;
+                    if (idx >= (int)prevLights.size()) { glDisable(GL_LIGHT0 + li); continue; }
+                    const MeshAsset::MeshLight& L = prevLights[idx];
                     float e = L.energy * ma.lightBake;
                     float pos[4], dif[4] = { 0, 0, 0, 1.0f }, zero4[4] = { 0, 0, 0, 1.0f };
                     if (L.type == 1) {   // sun: stored as travel dir; GL wants "toward the light"
@@ -39008,10 +39291,12 @@ void Render3DViewport()
                 glDisable(GL_NORMALIZE);
                 glDisable(GL_LIGHTING);
             };
-            // Lightmapped meshes light ADDITIVELY (pass below); others directly.
-            bool sceneLit = !prevLights.empty() && ma.lit && !ma.hasLightmap && !s3DWireframe;
+            // Lightmapped meshes light ADDITIVELY (pass below); others directly
+            // (first 8 lights in the base pass, the rest via additive passes).
+            bool anyLmBound = (ma.hasLightmap && ma.lmGlTex != 0) || ma.mapGroups.size() > 1;
+            bool sceneLit = !prevLights.empty() && ma.lit && !anyLmBound && !s3DWireframe;
             if (sceneLit)
-                setupPrevGlLights(ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2]);
+                setupPrevGlLights(ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2], 0);
 
             bool useTex = ma.textured && ma.glTexID != 0;
             // Textured toggled but no base texture assigned yet: show the
@@ -39197,46 +39482,145 @@ void Render3DViewport()
                 glDisable(GL_TEXTURE_2D);
             }
 
-            // Scene/imported lights ON TOP of a lightmap: additive third pass —
-            // framebuffer += albedo × lightContrib with ZERO ambient (the
-            // lightmap already carries ambient+GI; multiplying lights in would
-            // darken instead). Mirrors the baked afn_meshN_lcol pass on PSV.
-            if (ma.hasLightmap && ma.lmGlTex && !prevLights.empty()
-                && ma.lit && !lmAsBase && !wf)
+            // AO multiply pass (grayscale, third UV set): the AO Multiplier is
+            // already FOLDED into the texture (RebuildMeshAOTex), so this is a
+            // plain fb *= tex multiply. Runs BEFORE the additive lights so
+            // occlusion darkens baked lighting but not a live point light.
+            if (ma.hasAOMap && ma.aoGlTex && ma.aoStrength > 0.001f && !wf)
             {
-                setupPrevGlLights(0.0f, 0.0f, 0.0f);
-                bool baseTex = ma.textured && ma.glTexID != 0;
-                if (baseTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.glTexID); }
-                else glDisable(GL_TEXTURE_2D);
+                glDisable(GL_LIGHTING);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, ma.aoGlTex);
                 glEnable(GL_BLEND);
-                glBlendFunc(GL_ONE, GL_ONE);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
                 glDepthFunc(GL_EQUAL);
                 glDepthMask(GL_FALSE);
+                glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
                 glBegin(GL_TRIANGLES);
                 for (size_t ti = 0; ti < ma.indices.size(); ti++) {
                     const MeshVertex& v = ma.vertices[ma.indices[ti]];
-                    if (baseTex) glTexCoord2f(v.u, 1.0f - v.v);
-                    if (vcol) glColor3f(v.r, v.g, v.b);
-                    glNormal3f(v.nx, v.ny, v.nz);
+                    glTexCoord2f(v.u3, 1.0f - v.v3);
                     glVertex3f(v.px, v.py, v.pz);
                 }
                 for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4) {
                     const MeshVertex* tv[6] = {
                         &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+1]], &ma.vertices[ma.quadIndices[qi+2]],
                         &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+2]], &ma.vertices[ma.quadIndices[qi+3]] };
-                    for (int k = 0; k < 6; k++) {
-                        if (baseTex) glTexCoord2f(tv[k]->u, 1.0f - tv[k]->v);
-                        if (vcol) glColor3f(tv[k]->r, tv[k]->g, tv[k]->b);
-                        glNormal3f(tv[k]->nx, tv[k]->ny, tv[k]->nz);
-                        glVertex3f(tv[k]->px, tv[k]->py, tv[k]->pz);
+                    for (int k2 = 0; k2 < 6; k2++) {
+                        glTexCoord2f(tv[k2]->u3, 1.0f - tv[k2]->v3);
+                        glVertex3f(tv[k2]->px, tv[k2]->py, tv[k2]->pz);
                     }
                 }
                 glEnd();
+                glColor4f(1, 1, 1, 1);
                 glDepthMask(GL_TRUE);
                 glDepthFunc(GL_LESS);
                 glDisable(GL_BLEND);
-                if (baseTex) { glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D); }
-                teardownPrevGlLights();
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_TEXTURE_2D);
+            }
+
+            // MAP GROUPS (multi lightmap/AO in one OBJ): per-group multiply
+            // passes — each group's faces sample that group's textures through
+            // UV2 (lightmaps) and UV3 (AO, aoStrength already folded in).
+            if (ma.mapGroups.size() > 1 && !wf)
+            {
+                int triCount  = (int)ma.indices.size() / 3;
+                int quadCount = (int)ma.quadIndices.size() / 4;
+                glDisable(GL_LIGHTING);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                glDepthFunc(GL_EQUAL);
+                glDepthMask(GL_FALSE);
+                glColor4f(1, 1, 1, 1);
+                glEnable(GL_TEXTURE_2D);
+                for (int pass = 0; pass < 2; pass++)   // 0 = lightmaps, 1 = AO
+                {
+                    if (pass == 1 && ma.aoStrength <= 0.001f) break;
+                    for (int gi2 = 0; gi2 < (int)ma.mapGroups.size(); gi2++)
+                    {
+                        const MeshAsset::MeshMapGroup& mgp = ma.mapGroups[gi2];
+                        unsigned int tex = (pass == 0) ? mgp.lmGlTex : mgp.aoGlTex;
+                        if (!tex) continue;
+                        glBindTexture(GL_TEXTURE_2D, tex);
+                        glBegin(GL_TRIANGLES);
+                        for (int t = 0; t < triCount; t++) {
+                            if (t < (int)ma.triMapGroup.size() && ma.triMapGroup[t] != gi2) continue;
+                            for (int k = 0; k < 3; k++) {
+                                const MeshVertex& v = ma.vertices[ma.indices[t*3+k]];
+                                if (pass == 0) glTexCoord2f(v.u2, 1.0f - v.v2);
+                                else           glTexCoord2f(v.u3, 1.0f - v.v3);
+                                glVertex3f(v.px, v.py, v.pz);
+                            }
+                        }
+                        for (int q = 0; q < quadCount; q++) {
+                            if (q < (int)ma.quadMapGroup.size() && ma.quadMapGroup[q] != gi2) continue;
+                            const MeshVertex* tv[6] = {
+                                &ma.vertices[ma.quadIndices[q*4+0]], &ma.vertices[ma.quadIndices[q*4+1]], &ma.vertices[ma.quadIndices[q*4+2]],
+                                &ma.vertices[ma.quadIndices[q*4+0]], &ma.vertices[ma.quadIndices[q*4+2]], &ma.vertices[ma.quadIndices[q*4+3]] };
+                            for (int k = 0; k < 6; k++) {
+                                if (pass == 0) glTexCoord2f(tv[k]->u2, 1.0f - tv[k]->v2);
+                                else           glTexCoord2f(tv[k]->u3, 1.0f - tv[k]->v3);
+                                glVertex3f(tv[k]->px, tv[k]->py, tv[k]->pz);
+                            }
+                        }
+                        glEnd();
+                    }
+                }
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LESS);
+                glDisable(GL_BLEND);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_TEXTURE_2D);
+            }
+
+            // Additive relight passes — framebuffer += albedo × lightContrib
+            // with ZERO ambient. Two users:
+            //  - lightmapped meshes: ALL their lights add on top of the lightmap
+            //    (the lightmap carries ambient+GI; multiplying would darken);
+            //  - direct-lit meshes with MORE THAN 8 lights: FFP has 8 light
+            //    slots per pass, so chunks 2..N relight additively.
+            {
+                bool lmAdd = anyLmBound && !prevLights.empty()
+                             && ma.lit && !lmAsBase && !wf;
+                int chunkStart = lmAdd ? 0 : (sceneLit ? 8 : (int)prevLights.size());
+                bool any = chunkStart < (int)prevLights.size();
+                for (; chunkStart < (int)prevLights.size(); chunkStart += 8)
+                {
+                    setupPrevGlLights(0.0f, 0.0f, 0.0f, chunkStart);
+                    bool baseTex = ma.textured && ma.glTexID != 0;
+                    if (baseTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.glTexID); }
+                    else glDisable(GL_TEXTURE_2D);
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_ONE, GL_ONE);
+                    glDepthFunc(GL_EQUAL);
+                    glDepthMask(GL_FALSE);
+                    glBegin(GL_TRIANGLES);
+                    for (size_t ti = 0; ti < ma.indices.size(); ti++) {
+                        const MeshVertex& v = ma.vertices[ma.indices[ti]];
+                        if (baseTex) glTexCoord2f(v.u, 1.0f - v.v);
+                        if (vcol) glColor3f(v.r, v.g, v.b);
+                        glNormal3f(v.nx, v.ny, v.nz);
+                        glVertex3f(v.px, v.py, v.pz);
+                    }
+                    for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4) {
+                        const MeshVertex* tv[6] = {
+                            &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+1]], &ma.vertices[ma.quadIndices[qi+2]],
+                            &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+2]], &ma.vertices[ma.quadIndices[qi+3]] };
+                        for (int k = 0; k < 6; k++) {
+                            if (baseTex) glTexCoord2f(tv[k]->u, 1.0f - tv[k]->v);
+                            if (vcol) glColor3f(tv[k]->r, tv[k]->g, tv[k]->b);
+                            glNormal3f(tv[k]->nx, tv[k]->ny, tv[k]->nz);
+                            glVertex3f(tv[k]->px, tv[k]->py, tv[k]->pz);
+                        }
+                    }
+                    glEnd();
+                    glDepthMask(GL_TRUE);
+                    glDepthFunc(GL_LESS);
+                    glDisable(GL_BLEND);
+                    if (baseTex) { glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D); }
+                }
+                if (any) teardownPrevGlLights();
             }
 
             if (vcol) glDisable(GL_COLOR_MATERIAL);

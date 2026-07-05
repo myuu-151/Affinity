@@ -81,6 +81,25 @@ typedef struct {
     // light term (0xAABBGGRR), drawn as fb += albedo × lcol in a third pass on
     // top of the lightmap multiply. 0/NULL = none.
     const unsigned int*          addCol;   // [vertCount]
+    // AO map (OBJ 2.0 #aomap): GRAYSCALE occlusion through a THIRD UV set,
+    // fb *= lerp(1, ao, aoStrength) between the lightmap multiply and the
+    // additive lights. 0/NULL = none.
+    const float*                 uv3;      // [vertCount*2]
+    const unsigned char*         aoTex;    // grayscale bytes (aoW*aoH)
+    int                          aoW, aoH;
+    float                        aoStrength; // AO multiplier (folded at upload)
+    // MAP GROUPS (OBJ 2.0 v1.5): 2+ lightmap/AO pairs in ONE mesh, applied per
+    // face group — each group's triangles multiply that group's textures
+    // through the shared UV2/UV3 channels. 0 = single-slot fields above.
+    int                          lmgCount;
+    const unsigned short* const* lmgIdx;      // [lmgCount] triangle indices per group
+    const int*                   lmgIdxCount; // [lmgCount]
+    const unsigned char* const*  lmgLm;       // [lmgCount] RGBA lightmap (0 = none)
+    const int*                   lmgLmW;
+    const int*                   lmgLmH;
+    const unsigned char* const*  lmgAo;       // [lmgCount] grayscale AO (0 = none)
+    const int*                   lmgAoW;
+    const int*                   lmgAoH;
 } AfnMesh;
 
 // A static scene light (OBJ 2.0 "#light"/"#sun" lines, exporter-placed in world

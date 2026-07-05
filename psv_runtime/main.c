@@ -867,8 +867,45 @@ static void look_at(float m[16],
     m[3]=0;   m[7]=0;   m[11]=0;   m[15] = 1.0f;
 }
 
+// newlib heap: the vitasdk default is 32 MB — the AO-map upload expands the
+// grayscale to RGBA at boot (a 16 MB malloc at 2048², 64 MB at 4096²), which
+// would fail silently on the default heap and drop the AO pass on hardware.
+// The expand buffer is freed right after glTexImage2D, so this is peak, not
+// resident.
+int _newlib_heap_size_user = 96 * 1024 * 1024;
+
 static GLuint s_meshLmTex[256];   // lightmap texture per mesh (0 = none)
+static GLuint s_meshAoTex[256];   // AO-map texture per mesh (0 = none)
+#define AFN_MESH_MAX_LMG 8
+static GLuint s_meshLmgLmTex[256][AFN_MESH_MAX_LMG];  // map-group lightmaps
+static GLuint s_meshLmgAoTex[256][AFN_MESH_MAX_LMG];  // map-group AO (strength-folded)
 static float  s_meshLmBias = 0.0f; // current instance's polygon-offset units (set by the mesh loop)
+
+// Grayscale AO -> RGBA GL texture with the AO Multiplier FOLDED IN:
+// effective = clamp(1 - k + k*ao); k=1 = baked, <1 fades, >1 darkens (FFP
+// color clamps at 1, so >1 can't ride the blend stage). Transient buffer.
+static GLuint ao_upload(const unsigned char* gray, int w, int h, float k)
+{
+    int an = w * h;
+    unsigned char* rgba = (unsigned char*)malloc((size_t)an * 4);
+    GLuint tex = 0;
+    if (!rgba) return 0;
+    for (int p = 0; p < an; p++) {
+        float e = 1.0f - k + k * (gray[p] / 255.0f);
+        if (e < 0.0f) e = 0.0f; else if (e > 1.0f) e = 1.0f;
+        unsigned char gv = (unsigned char)(e * 255.0f + 0.5f);
+        rgba[p*4+0] = gv; rgba[p*4+1] = gv; rgba[p*4+2] = gv; rgba[p*4+3] = 255;
+    }
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    free(rgba);
+    return tex;
+}
 
 static void upload_textures(void)
 {
@@ -887,6 +924,29 @@ static void upload_textures(void)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->lmW, m->lmH, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, m->lmTex);
+        }
+        // AO map: stored grayscale (quarter the ROM), expanded to RGBA here
+        // with the AO Multiplier FOLDED IN: effective = clamp(1 - k + k*ao).
+        // k=1 = baked AO, <1 fades out, >1 multiplies DARKER (can't ride the
+        // blend stage — FFP color clamps at 1). The pass is a plain multiply.
+        s_meshAoTex[mi] = 0;
+        if (m->aoTex && m->aoW > 0 && m->aoH > 0)
+            s_meshAoTex[mi] = ao_upload(m->aoTex, m->aoW, m->aoH, m->aoStrength);
+        // MAP GROUPS: one lightmap + one (strength-folded) AO per group.
+        for (int g = 0; g < AFN_MESH_MAX_LMG; g++) { s_meshLmgLmTex[mi][g] = 0; s_meshLmgAoTex[mi][g] = 0; }
+        for (int g = 0; g < m->lmgCount && g < AFN_MESH_MAX_LMG; g++) {
+            if (m->lmgLm && m->lmgLm[g] && m->lmgLmW[g] > 0 && m->lmgLmH[g] > 0) {
+                glGenTextures(1, &s_meshLmgLmTex[mi][g]);
+                glBindTexture(GL_TEXTURE_2D, s_meshLmgLmTex[mi][g]);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->lmgLmW[g], m->lmgLmH[g], 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, m->lmgLm[g]);
+            }
+            if (m->lmgAo && m->lmgAo[g] && m->lmgAoW[g] > 0 && m->lmgAoH[g] > 0)
+                s_meshLmgAoTex[mi][g] = ao_upload(m->lmgAo[g], m->lmgAoW[g], m->lmgAoH[g], m->aoStrength);
         }
         // Multi-material (OBJ usemtl): one GL texture per slot.
         if (m->mats > 0) {
@@ -1029,57 +1089,91 @@ static void draw_mesh(int mi)
         glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
     }
 
-    // Lightmap second pass: multiply the framebuffer by the lightmap sampled
-    // through UV2 (DST_COLOR x ZERO = dst *= src), vertex colors off (white) so
-    // only the lightmap modulates. NOT depth EQUAL: this pass runs a different
-    // generated FFP shader (no color array, other texcoord source) and the
-    // re-run vertex pipeline is not bit-identical on SGX — EQUAL then fails
-    // per-pixel at random and the geometry shimmers lit/unlit. Instead keep
-    // LEQUAL and pull the pass HALF an instance depth-step nearer (instances
-    // sit 128 units apart — one invisible D16 quantum — so -64 can never
-    // punch through other geometry but always wins against its own pass 1).
-    if (m->uv2 && s_meshLmTex[mi] && !m->blend) {
-        glDisableClientState(GL_COLOR_ARRAY);
-        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-        glTexCoordPointer(2, GL_FLOAT, 0, m->uv2);
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, s_meshLmTex[mi]);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_DST_COLOR, GL_ZERO);
-        glDepthMask(GL_FALSE);
-        glPolygonOffset(0.0f, s_meshLmBias - 64.0f);
-        glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
-
-        // Editor/imported lights on top of the lightmap: additive third pass —
-        // fb += albedo × baked light term (zero ambient; the lightmap already
-        // carries ambient+GI, so lights only ADD). Base texture + base UVs
-        // again, per-vertex light term as the color array, blend ONE x ONE.
-        if (m->addCol) {
-            glEnableClientState(GL_COLOR_ARRAY);
-            glColorPointer(4, GL_UNSIGNED_BYTE, 0, m->addCol);
-            glTexCoordPointer(2, GL_FLOAT, sizeof(AfnVertex), &v->u);
-            glBlendFunc(GL_ONE, GL_ONE);
-            if (m->mats > 0) {
-                for (int g = 0; g < m->mats && g < AFN_MESH_MAX_MATS; g++) {
-                    int ic = m->slotIdxCount ? m->slotIdxCount[g] : 0;
-                    if (ic <= 0 || !m->slotIdx || !m->slotIdx[g]) continue;
-                    if (s_meshSlotTex[mi][g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshSlotTex[mi][g]); }
-                    else glDisable(GL_TEXTURE_2D);
-                    glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, m->slotIdx[g]);
-                }
-            } else {
-                if (m->textured && s_meshTex[mi]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]); }
-                else glDisable(GL_TEXTURE_2D);
+    // Post passes. All share the half-step depth bias (instances sit 128
+    // offset-units apart — one invisible D16 quantum — so -64 always wins
+    // against this mesh's own pass 1 but can't punch through other geometry;
+    // depth EQUAL is avoided on purpose: each pass runs a different generated
+    // FFP shader and the re-run vertex pipeline is not bit-identical on SGX,
+    // so EQUAL shimmers per-pixel). Order matters:
+    //   2) lightmap multiply   fb *= lm              (UV2, DST_COLOR x ZERO)
+    //   3) AO multiply         fb *= lerp(1, ao, k)  (UV3, DST_COLOR x 1-SRC_A,
+    //                          color (k,k,k,k) — k = AO Opacity)
+    //   4) additive lights     fb += albedo x lcol   (base UVs, ONE x ONE)
+    // AO before the lights: occlusion darkens baked lighting, but a live
+    // point light still reaches occluded corners.
+    {
+        int grpN    = (m->lmgCount > AFN_MESH_MAX_LMG) ? AFN_MESH_MAX_LMG : m->lmgCount;
+        int passGrp = (grpN > 1 && m->uv2 && !m->blend);
+        int passLm  = (m->uv2 && s_meshLmTex[mi] && !m->blend);
+        int passAo  = (m->uv3 && s_meshAoTex[mi] && m->aoStrength > 0.001f && !m->blend);
+        int passAdd = (m->addCol && !m->blend);
+        if (passLm || passAo || passAdd || passGrp) {
+            glDisableClientState(GL_COLOR_ARRAY);
+            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+            glEnable(GL_BLEND);
+            glDepthMask(GL_FALSE);
+            glPolygonOffset(0.0f, s_meshLmBias - 64.0f);
+            if (passLm) {
+                glTexCoordPointer(2, GL_FLOAT, 0, m->uv2);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, s_meshLmTex[mi]);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
                 glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
             }
-            glDisableClientState(GL_COLOR_ARRAY);
+            if (passAo) {
+                // AO Multiplier already folded into the texture at upload.
+                glTexCoordPointer(2, GL_FLOAT, 0, m->uv3);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, s_meshAoTex[mi]);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+            }
+            if (passGrp) {
+                // MAP GROUPS: each group's faces multiply that group's own
+                // lightmap (UV2) and strength-folded AO (UV3).
+                glEnable(GL_TEXTURE_2D);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                glTexCoordPointer(2, GL_FLOAT, 0, m->uv2);
+                for (int g = 0; g < grpN; g++) {
+                    if (!s_meshLmgLmTex[mi][g] || m->lmgIdxCount[g] <= 0) continue;
+                    glBindTexture(GL_TEXTURE_2D, s_meshLmgLmTex[mi][g]);
+                    glDrawElements(GL_TRIANGLES, m->lmgIdxCount[g], GL_UNSIGNED_SHORT, m->lmgIdx[g]);
+                }
+                if (m->uv3 && m->aoStrength > 0.001f) {
+                    glTexCoordPointer(2, GL_FLOAT, 0, m->uv3);
+                    for (int g = 0; g < grpN; g++) {
+                        if (!s_meshLmgAoTex[mi][g] || m->lmgIdxCount[g] <= 0) continue;
+                        glBindTexture(GL_TEXTURE_2D, s_meshLmgAoTex[mi][g]);
+                        glDrawElements(GL_TRIANGLES, m->lmgIdxCount[g], GL_UNSIGNED_SHORT, m->lmgIdx[g]);
+                    }
+                }
+            }
+            if (passAdd) {
+                glEnableClientState(GL_COLOR_ARRAY);
+                glColorPointer(4, GL_UNSIGNED_BYTE, 0, m->addCol);
+                glTexCoordPointer(2, GL_FLOAT, sizeof(AfnVertex), &v->u);
+                glBlendFunc(GL_ONE, GL_ONE);
+                if (m->mats > 0) {
+                    for (int g = 0; g < m->mats && g < AFN_MESH_MAX_MATS; g++) {
+                        int ic = m->slotIdxCount ? m->slotIdxCount[g] : 0;
+                        if (ic <= 0 || !m->slotIdx || !m->slotIdx[g]) continue;
+                        if (s_meshSlotTex[mi][g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshSlotTex[mi][g]); }
+                        else glDisable(GL_TEXTURE_2D);
+                        glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, m->slotIdx[g]);
+                    }
+                } else {
+                    if (m->textured && s_meshTex[mi]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]); }
+                    else glDisable(GL_TEXTURE_2D);
+                    glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+                }
+                glDisableClientState(GL_COLOR_ARRAY);
+            }
+            glPolygonOffset(0.0f, s_meshLmBias);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glEnableClientState(GL_COLOR_ARRAY);
         }
-
-        glPolygonOffset(0.0f, s_meshLmBias);
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glEnableClientState(GL_COLOR_ARRAY);
     }
 
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
