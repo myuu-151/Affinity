@@ -77,6 +77,10 @@ typedef struct {
     const float*                 uv2;      // [vertCount*2]
     const unsigned char*         lmTex;    // RGBA8 bytes (lmW*lmH*4)
     int                          lmW, lmH;
+    // Editor/imported lights baked for a LIGHTMAPPED mesh: per-vertex additive
+    // light term (0xAABBGGRR), drawn as fb += albedo × lcol in a third pass on
+    // top of the lightmap multiply. 0/NULL = none.
+    const unsigned int*          addCol;   // [vertCount]
 } AfnMesh;
 
 // A static scene light (OBJ 2.0 "#light"/"#sun" lines, exporter-placed in world

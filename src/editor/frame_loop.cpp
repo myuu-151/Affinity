@@ -14052,7 +14052,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                 "%s\nMultiplied over the mesh through its second UV set —\n"
                 "editor preview and PSV runtime draw the identical pass.\n"
-                "Lights/vertex-bake are skipped for lightmapped meshes.", ma.lightmapPath.c_str());
+                "Scene/imported lights ADD on top of the lightmap (zero ambient);\n"
+                "the per-vertex light bake is skipped (the lightmap owns ambient+GI).", ma.lightmapPath.c_str());
         }
 
         // OBJ 2.0 light rig (Blender lights that traveled with the .obj). Values
@@ -20124,8 +20125,13 @@ void FrameTick(float dt)
                             break;
                         }
                     }
-                    // A lightmapped mesh owns its lighting — skip the vertex bake.
+                    // A lightmapped mesh skips the vertex bake (the lightmap owns
+                    // ambient+GI); its editor/imported lights bake instead into a
+                    // separate ADDITIVE per-vertex term (zero ambient) that the
+                    // runtime draws on top of the lightmap pass.
                     bool bakeLights = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && !ma.hasLightmap;
+                    bool addLights  = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && ma.hasLightmap;
+                    static const float kZeroAmb[3] = { 0.0f, 0.0f, 0.0f };
                     auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
                     if (ma.hasLightmap && !ma.lmPixels.empty()) {
                         me.lmPixels = ma.lmPixels;
@@ -20143,6 +20149,13 @@ void FrameTick(float dt)
                         me.uvs.push_back(v.u);
                         me.uvs.push_back(v.v);
                         if (ma.hasLightmap) { me.uvs2.push_back(v.u2); me.uvs2.push_back(v.v2); }
+                        if (addLights) {
+                            float lr, lg, lb;
+                            EvalMeshLightAt(bakeList, kZeroAmb, ma.lightBake, v, lr, lg, lb);
+                            me.addLightColors.push_back(to8(lr));
+                            me.addLightColors.push_back(to8(lg));
+                            me.addLightColors.push_back(to8(lb));
+                        }
                         if (bakeLights) {
                             float lr, lg, lb;
                             EvalMeshLightAt(bakeList, ma.lightAmbient, ma.lightBake, v, lr, lg, lb);
@@ -20183,10 +20196,11 @@ void FrameTick(float dt)
                         std::unordered_map<std::string, int> wmap;
                         std::vector<float> nPos, nNorm, nUV, nUV2;
                         std::vector<int> nObj;
-                        std::vector<uint8_t> nCol;
+                        std::vector<uint8_t> nCol, nACol;
                         int vc = (int)me.positions.size() / 3;
-                        bool hasCol = (int)me.vertexColors.size() == vc * 3;  // keep colors in sync through the weld
-                        bool hasUV2 = (int)me.uvs2.size() == vc * 2;          // and the lightmap UVs
+                        bool hasCol  = (int)me.vertexColors.size() == vc * 3;   // keep colors in sync through the weld
+                        bool hasACol = (int)me.addLightColors.size() == vc * 3; // additive light term too
+                        bool hasUV2 = (int)me.uvs2.size() == vc * 2;            // and the lightmap UVs
                         std::vector<int> remap(vc, 0);
                         char key[200];
                         for (int v = 0; v < vc; v++) {
@@ -20208,6 +20222,7 @@ void FrameTick(float dt)
                             if (hasUV2) { nUV2.push_back(u2); nUV2.push_back(v2); }
                             nObj.push_back(v < (int)me.objPosIdx.size() ? me.objPosIdx[v] : -1);
                             if (hasCol) { nCol.push_back(me.vertexColors[v*3+0]); nCol.push_back(me.vertexColors[v*3+1]); nCol.push_back(me.vertexColors[v*3+2]); }
+                            if (hasACol) { nACol.push_back(me.addLightColors[v*3+0]); nACol.push_back(me.addLightColors[v*3+1]); nACol.push_back(me.addLightColors[v*3+2]); }
                             wmap[key] = ni; remap[v] = ni;
                         }
                         for (auto& idx : me.indices)     idx = (uint32_t)remap[idx];
@@ -20216,6 +20231,7 @@ void FrameTick(float dt)
                         me.uvs = std::move(nUV); me.objPosIdx = std::move(nObj);
                         if (hasUV2) me.uvs2 = std::move(nUV2);
                         if (hasCol) me.vertexColors = std::move(nCol);
+                        if (hasACol) me.addLightColors = std::move(nACol);
                     }
                     // Convert sprite color to RGB15 (use magenta as default)
                     me.colorRGB15 = 0x7C1F; // magenta
@@ -38943,13 +38959,14 @@ void Render3DViewport()
             AppendSceneLightsLocal(prevLights, sx, sy, sz,
                                    fs.rotation, fs.rotationX, fs.rotationZ,
                                    fs.scale, false);
-            // A lightmapped mesh owns its lighting — no GL lights on top.
-            bool sceneLit = !prevLights.empty() && ma.lit && !ma.hasLightmap && !s3DWireframe;
-            if (sceneLit)
+            // GL light setup shared by the direct-lit path (ambient from the
+            // mesh) and the lightmap ADDITIVE pass (zero ambient — the lightmap
+            // already holds ambient+GI, lights only add on top).
+            auto setupPrevGlLights = [&](float ar, float ag, float ab)
             {
                 glEnable(GL_LIGHTING);
                 glEnable(GL_NORMALIZE);
-                float amb[4] = { ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2], 1.0f };
+                float amb[4] = { ar, ag, ab, 1.0f };
                 glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
                 int nl = (int)prevLights.size(); if (nl > 8) nl = 8;
                 for (int li = 0; li < nl; li++) {
@@ -38981,7 +38998,20 @@ void Render3DViewport()
                 glEnable(GL_COLOR_MATERIAL);
                 glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
                 glColor3f(1, 1, 1);
-            }
+            };
+            auto teardownPrevGlLights = [&]()
+            {
+                for (int li = 0; li < 8; li++) glDisable(GL_LIGHT0 + li);
+                float defAmb[4] = { 0.2f, 0.2f, 0.2f, 1.0f };   // GL default
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, defAmb);
+                glDisable(GL_COLOR_MATERIAL);
+                glDisable(GL_NORMALIZE);
+                glDisable(GL_LIGHTING);
+            };
+            // Lightmapped meshes light ADDITIVELY (pass below); others directly.
+            bool sceneLit = !prevLights.empty() && ma.lit && !ma.hasLightmap && !s3DWireframe;
+            if (sceneLit)
+                setupPrevGlLights(ma.lightAmbient[0], ma.lightAmbient[1], ma.lightAmbient[2]);
 
             bool useTex = ma.textured && ma.glTexID != 0;
             // Textured toggled but no base texture assigned yet: show the
@@ -39165,6 +39195,48 @@ void Render3DViewport()
                 glDisable(GL_BLEND);
                 glBindTexture(GL_TEXTURE_2D, 0);
                 glDisable(GL_TEXTURE_2D);
+            }
+
+            // Scene/imported lights ON TOP of a lightmap: additive third pass —
+            // framebuffer += albedo × lightContrib with ZERO ambient (the
+            // lightmap already carries ambient+GI; multiplying lights in would
+            // darken instead). Mirrors the baked afn_meshN_lcol pass on PSV.
+            if (ma.hasLightmap && ma.lmGlTex && !prevLights.empty()
+                && ma.lit && !lmAsBase && !wf)
+            {
+                setupPrevGlLights(0.0f, 0.0f, 0.0f);
+                bool baseTex = ma.textured && ma.glTexID != 0;
+                if (baseTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.glTexID); }
+                else glDisable(GL_TEXTURE_2D);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_ONE, GL_ONE);
+                glDepthFunc(GL_EQUAL);
+                glDepthMask(GL_FALSE);
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti < ma.indices.size(); ti++) {
+                    const MeshVertex& v = ma.vertices[ma.indices[ti]];
+                    if (baseTex) glTexCoord2f(v.u, 1.0f - v.v);
+                    if (vcol) glColor3f(v.r, v.g, v.b);
+                    glNormal3f(v.nx, v.ny, v.nz);
+                    glVertex3f(v.px, v.py, v.pz);
+                }
+                for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4) {
+                    const MeshVertex* tv[6] = {
+                        &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+1]], &ma.vertices[ma.quadIndices[qi+2]],
+                        &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+2]], &ma.vertices[ma.quadIndices[qi+3]] };
+                    for (int k = 0; k < 6; k++) {
+                        if (baseTex) glTexCoord2f(tv[k]->u, 1.0f - tv[k]->v);
+                        if (vcol) glColor3f(tv[k]->r, tv[k]->g, tv[k]->b);
+                        glNormal3f(tv[k]->nx, tv[k]->ny, tv[k]->nz);
+                        glVertex3f(tv[k]->px, tv[k]->py, tv[k]->pz);
+                    }
+                }
+                glEnd();
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LESS);
+                glDisable(GL_BLEND);
+                if (baseTex) { glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D); }
+                teardownPrevGlLights();
             }
 
             if (vcol) glDisable(GL_COLOR_MATERIAL);

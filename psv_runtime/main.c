@@ -1049,6 +1049,32 @@ static void draw_mesh(int mi)
         glDepthMask(GL_FALSE);
         glPolygonOffset(0.0f, s_meshLmBias - 64.0f);
         glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+
+        // Editor/imported lights on top of the lightmap: additive third pass —
+        // fb += albedo × baked light term (zero ambient; the lightmap already
+        // carries ambient+GI, so lights only ADD). Base texture + base UVs
+        // again, per-vertex light term as the color array, blend ONE x ONE.
+        if (m->addCol) {
+            glEnableClientState(GL_COLOR_ARRAY);
+            glColorPointer(4, GL_UNSIGNED_BYTE, 0, m->addCol);
+            glTexCoordPointer(2, GL_FLOAT, sizeof(AfnVertex), &v->u);
+            glBlendFunc(GL_ONE, GL_ONE);
+            if (m->mats > 0) {
+                for (int g = 0; g < m->mats && g < AFN_MESH_MAX_MATS; g++) {
+                    int ic = m->slotIdxCount ? m->slotIdxCount[g] : 0;
+                    if (ic <= 0 || !m->slotIdx || !m->slotIdx[g]) continue;
+                    if (s_meshSlotTex[mi][g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshSlotTex[mi][g]); }
+                    else glDisable(GL_TEXTURE_2D);
+                    glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, m->slotIdx[g]);
+                }
+            } else {
+                if (m->textured && s_meshTex[mi]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]); }
+                else glDisable(GL_TEXTURE_2D);
+                glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+            }
+            glDisableClientState(GL_COLOR_ARRAY);
+        }
+
         glPolygonOffset(0.0f, s_meshLmBias);
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);

@@ -221,6 +221,10 @@ struct AfnMeshExport
     std::vector<float> uvs2;        // u2, v2 per vertex (flat); empty = no lightmap
     std::vector<uint8_t> lmPixels;  // RGBA8 (lmW * lmH * 4)
     int lmW = 0, lmH = 0;
+    // Editor/imported lights baked for a LIGHTMAPPED mesh: per-vertex light
+    // term (zero ambient) drawn as an ADDITIVE third pass on top of the
+    // lightmap — fb = albedo×lightmap + albedo×lights. Empty = no such pass.
+    std::vector<uint8_t> addLightColors;   // r, g, b per vertex (flat)
     std::vector<int>   objPosIdx; // original OBJ 'v' index per vertex (for welding)
     std::vector<uint32_t> indices;      // triangle indices (3 per face)
     std::vector<uint32_t> quadIndices;  // quad indices (4 per face)

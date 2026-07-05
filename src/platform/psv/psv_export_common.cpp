@@ -162,6 +162,20 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             f << "\";\n";
         }
 
+        // Editor/imported lights on a lightmapped mesh: per-vertex additive
+        // light term (0xAABBGGRR), drawn as fb += albedo × lcol on top of the
+        // lightmap multiply pass.
+        bool hasACol = isPsv && hasLm && (int)m.addLightColors.size() == vc * 3;
+        if (hasACol) {
+            f << "static const unsigned int afn_mesh" << mi << "_lcol[" << vc << "] = {";
+            for (int v = 0; v < vc; v++) {
+                if (v % 8 == 0) f << "\n  ";
+                unsigned r = m.addLightColors[v*3+0], g = m.addLightColors[v*3+1], b = m.addLightColors[v*3+2];
+                f << "0x" << std::hex << (0xFF000000u | (b << 16) | (g << 8) | r) << std::dec << "u,";
+            }
+            f << "\n};\n";
+        }
+
         // Indices: triangles + triangulated quads.
         std::vector<unsigned int> idx = m.indices;
         for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
@@ -281,10 +295,12 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
                 f << ", afn_mesh" << mi << "_uv2, afn_mesh" << mi << "_lm, " << m.lmW << ", " << m.lmH;
             else
                 f << ", 0, 0, 0, 0";
+            bool hasACol = hasLm && (int)m.addLightColors.size() == vc * 3;
+            f << ", " << (hasACol ? ("afn_mesh" + std::to_string(mi) + "_lcol") : std::string("0"));
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----
