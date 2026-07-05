@@ -216,6 +216,11 @@ struct AfnMeshExport
     struct LightExp { int type = 0; float x=0,y=0,z=0, r=1,g=1,b=1, energy=1000, radius=0; }; // type 0=point 1=sun
     std::vector<LightExp> lights;
     float lightAmbient[3] = { 0.05f, 0.05f, 0.05f };
+    // Lightmap (OBJ 2.0 #lightmap + 4-component vt) — PSV only: RGBA texture
+    // multiplied over the mesh through a second UV set in a second draw pass.
+    std::vector<float> uvs2;        // u2, v2 per vertex (flat); empty = no lightmap
+    std::vector<uint8_t> lmPixels;  // RGBA8 (lmW * lmH * 4)
+    int lmW = 0, lmH = 0;
     std::vector<int>   objPosIdx; // original OBJ 'v' index per vertex (for welding)
     std::vector<uint32_t> indices;      // triangle indices (3 per face)
     std::vector<uint32_t> quadIndices;  // quad indices (4 per face)

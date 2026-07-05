@@ -867,12 +867,27 @@ static void look_at(float m[16],
     m[3]=0;   m[7]=0;   m[11]=0;   m[15] = 1.0f;
 }
 
+static GLuint s_meshLmTex[256];   // lightmap texture per mesh (0 = none)
+static float  s_meshLmBias = 0.0f; // current instance's polygon-offset units (set by the mesh loop)
+
 static void upload_textures(void)
 {
     for (int mi = 0; mi < afn_mesh_count && mi < 256; mi++) {
         s_meshTex[mi] = 0;
         for (int g = 0; g < AFN_MESH_MAX_MATS; g++) s_meshSlotTex[mi][g] = 0;
         const AfnMesh* m = &afn_meshes[mi];
+        // Lightmap: full-color RGBA, LINEAR + clamp (smooth baked gradients).
+        s_meshLmTex[mi] = 0;
+        if (m->lmTex && m->lmW > 0 && m->lmH > 0) {
+            glGenTextures(1, &s_meshLmTex[mi]);
+            glBindTexture(GL_TEXTURE_2D, s_meshLmTex[mi]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->lmW, m->lmH, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, m->lmTex);
+        }
         // Multi-material (OBJ usemtl): one GL texture per slot.
         if (m->mats > 0) {
             for (int g = 0; g < m->mats && g < AFN_MESH_MAX_MATS; g++) {
@@ -1013,6 +1028,34 @@ static void draw_mesh(int mi)
         }
         glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
     }
+
+    // Lightmap second pass: multiply the framebuffer by the lightmap sampled
+    // through UV2 (DST_COLOR x ZERO = dst *= src), vertex colors off (white) so
+    // only the lightmap modulates. NOT depth EQUAL: this pass runs a different
+    // generated FFP shader (no color array, other texcoord source) and the
+    // re-run vertex pipeline is not bit-identical on SGX — EQUAL then fails
+    // per-pixel at random and the geometry shimmers lit/unlit. Instead keep
+    // LEQUAL and pull the pass HALF an instance depth-step nearer (instances
+    // sit 128 units apart — one invisible D16 quantum — so -64 can never
+    // punch through other geometry but always wins against its own pass 1).
+    if (m->uv2 && s_meshLmTex[mi] && !m->blend) {
+        glDisableClientState(GL_COLOR_ARRAY);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+        glTexCoordPointer(2, GL_FLOAT, 0, m->uv2);
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, s_meshLmTex[mi]);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_DST_COLOR, GL_ZERO);
+        glDepthMask(GL_FALSE);
+        glPolygonOffset(0.0f, s_meshLmBias - 64.0f);
+        glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+        glPolygonOffset(0.0f, s_meshLmBias);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnableClientState(GL_COLOR_ARRAY);
+    }
+
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
@@ -7440,6 +7483,7 @@ int main(void)
             // ULPs near z=1) — the PSP proves that step is invisible yet big
             // enough to separate these faces.
             glPolygonOffset(0.0f, (float)((si + 1) * 128));   // later instances sit a hair deeper
+            s_meshLmBias = (float)((si + 1) * 128);           // draw_mesh's lightmap pass biases off this
             glLoadMatrixf(view);
             glTranslatef(mx, my, mz);
             if (sp->rotZ != 0.0f) glRotatef(sp->rotZ, 0,0,1);

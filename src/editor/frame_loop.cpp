@@ -6521,6 +6521,10 @@ static std::string MeshAssetToOBJ(const MeshAsset& m)
 {
     std::string s = "# Affinity edited mesh\n";
     char buf[160];
+    // Carry the OBJ 2.0 lightmap reference so edited geometry keeps it.
+    if (m.hasLightmap && !m.lightmapPath.empty()) {
+        snprintf(buf, sizeof(buf), "#lightmap %s\n", m.lightmapPath.c_str()); s += buf;
+    }
     // Carry the OBJ 2.0 light rig so edited geometry keeps its Blender lights.
     if (!m.lights.empty()) {
         snprintf(buf, sizeof(buf), "#ambient %.4f %.4f %.4f\n", m.lightAmbient[0], m.lightAmbient[1], m.lightAmbient[2]); s += buf;
@@ -6540,7 +6544,11 @@ static std::string MeshAssetToOBJ(const MeshAsset& m)
         else         snprintf(buf, sizeof(buf), "v %.5f %.5f %.5f\n", v.px, v.py, v.pz);
         s += buf;
     }
-    for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vt %.5f %.5f\n", v.u, v.v); s += buf; }
+    for (const MeshVertex& v : m.vertices) {
+        if (m.hasLightmap) snprintf(buf, sizeof(buf), "vt %.5f %.5f %.5f %.5f\n", v.u, v.v, v.u2, v.v2);
+        else               snprintf(buf, sizeof(buf), "vt %.5f %.5f\n", v.u, v.v);
+        s += buf;
+    }
     for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vn %.5f %.5f %.5f\n", v.nx, v.ny, v.nz); s += buf; }
     for (size_t t = 0; t + 3 <= m.indices.size(); t += 3) {
         int a = (int)m.indices[t]+1, b = (int)m.indices[t+1]+1, c = (int)m.indices[t+2]+1;
@@ -7142,6 +7150,40 @@ static void EvalMeshLightAt(const std::vector<MeshAsset::MeshLight>& lights,
     outB = v.b * fb; if (outB > 1.0f) outB = 1.0f;
 }
 
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F   // GL 1.2 enum missing from the Win32 GL 1.1 headers
+#endif
+// Load a lightmap PNG into the mesh (full-color RGBA — a multiplier must not
+// band) plus its LINEAR editor preview texture. Shared by the OBJ 2.0
+// "#lightmap" auto-load, the panel's Import Lightmap button, and project load;
+// the mesh needs a second UV channel (hasUV2) for it to do anything visible.
+static bool LoadMeshLightmap(MeshAsset& out, const std::string& path)
+{
+    int lw = 0, lh = 0, lch = 0;
+    unsigned char* limg = nullptr;
+    auto lit = sPackedAssets.find(path);
+    if (lit != sPackedAssets.end() && !lit->second.empty())
+        limg = stbi_load_from_memory(lit->second.data(), (int)lit->second.size(), &lw, &lh, &lch, 4);
+    else
+        limg = stbi_load(ResolveAssetPath(path).c_str(), &lw, &lh, &lch, 4);
+    if (!limg) return false;
+    out.lmW = lw; out.lmH = lh;
+    out.lmPixels.assign(limg, limg + (size_t)lw * lh * 4);
+    stbi_image_free(limg);
+    out.hasLightmap = true;
+    out.lightmapPath = path;
+    if (out.lmGlTex) glDeleteTextures(1, &out.lmGlTex);
+    glGenTextures(1, &out.lmGlTex);
+    glBindTexture(GL_TEXTURE_2D, out.lmGlTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, out.lmPixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+}
+
 static bool LoadOBJ(const std::string& path, MeshAsset& out)
 {
     FILE* f = nullptr;
@@ -7175,6 +7217,9 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     std::vector<V3> colors;       // parallel to positions; OBJ 2.0 "v x y z r g b"
     std::vector<V3> normals;
     std::vector<V2> texcoords;
+    std::vector<V2> texcoords2;   // parallel to texcoords; OBJ 2.0 "vt u v u2 v2" (lightmap UV)
+    bool anyUV2 = false;
+    std::string lightmapRel;      // OBJ 2.0 "#lightmap file.png"
     std::vector<MeshVertex> verts;
     std::vector<uint32_t> idxs;
     std::vector<uint32_t> quadIdxs;
@@ -7251,6 +7296,10 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
             { L.type = 1; L.radius = 0.0f; objLights.push_back(L); }
             else if (sscanf(line, "#ambient %f %f %f", &ar, &ag, &ab) == 3)
             { objAmbient[0] = ar; objAmbient[1] = ag; objAmbient[2] = ab; hasAmbient = true; }
+            else if (strncmp(line, "#lightmap", 9) == 0) {
+                char lp[512] = {};
+                if (sscanf(line + 9, " %511[^\r\n]", lp) == 1) lightmapRel = lp;
+            }
             continue;
         }
         if (strncmp(line, "mtllib", 6) == 0 && (line[6]==' '||line[6]=='\t')) {
@@ -7289,9 +7338,15 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         }
         else if (line[0] == 'v' && line[1] == 't')
         {
-            V2 tc;
-            if (sscanf(line + 3, "%f %f", &tc.u, &tc.v) >= 2)
+            // OBJ 2.0 extension: an optional lightmap UV pair follows the base
+            // UV (vt u v u2 v2). 2 floats = base only; 4 = base + lightmap.
+            V2 tc; float q2u = 0, q2v = 0;
+            int n = sscanf(line + 3, "%f %f %f %f", &tc.u, &tc.v, &q2u, &q2v);
+            if (n >= 2) {
                 texcoords.push_back(tc);
+                if (n >= 4) { texcoords2.push_back({ q2u, q2v }); anyUV2 = true; }
+                else        texcoords2.push_back({ 0.0f, 0.0f });
+            }
         }
         else if (line[0] == 'v' && line[1] == 'n')
         {
@@ -7334,6 +7389,8 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 { mv.px = positions[pi].x; mv.py = positions[pi].y; mv.pz = positions[pi].z; }
                 if (tci >= 0 && tci < (int)texcoords.size())
                 { mv.u = texcoords[tci].u; mv.v = texcoords[tci].v; }
+                if (tci >= 0 && tci < (int)texcoords2.size())
+                { mv.u2 = texcoords2[tci].u; mv.v2 = texcoords2[tci].v; }
                 if (nni >= 0 && nni < (int)normals.size())
                 { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
                 if (pi >= 0 && pi < (int)colors.size())
@@ -7406,6 +7463,19 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     out.lights = std::move(objLights);
     if (hasAmbient) { out.lightAmbient[0] = objAmbient[0]; out.lightAmbient[1] = objAmbient[1]; out.lightAmbient[2] = objAmbient[2]; }
     else            { out.lightAmbient[0] = out.lightAmbient[1] = out.lightAmbient[2] = 0.05f; }
+
+    // OBJ 2.0 lightmap — auto-load from the "#lightmap" line. Manual panel
+    // assignments re-apply afterwards via meshLmTex= persistence.
+    out.hasUV2 = anyUV2;
+    out.hasLightmap = false;
+    out.lightmapPath.clear();
+    out.lmPixels.clear();
+    out.lmW = out.lmH = 0;
+    if (!lightmapRel.empty() && anyUV2) {
+        std::string lmPath = resolveRel(lightmapRel);
+        if (!LoadMeshLightmap(out, lmPath) && !LoadMeshLightmap(out, lightmapRel))
+            out.lightmapPath = lmPath;   // keep for the "PNG missing" panel warning
+    }
 
     // Extract filename as name
     size_t slash = path.find_last_of("/\\");
@@ -8262,6 +8332,10 @@ static bool SaveProject(const std::string& path)
         // themselves re-parse from the source OBJ on load).
         if (ma.lightBake != 1.0f)
             fprintf(f, "meshLightBake=%.3f\n", ma.lightBake);
+        // Manual lightmap assign/remove (overrides the OBJ's #lightmap on load).
+        if (ma.lmManual)
+            fprintf(f, "meshLmTex=%s\n", ma.hasLightmap && !ma.lightmapPath.empty()
+                                             ? ma.lightmapPath.c_str() : "(none)");
         // User deleted imported lights in-editor: persist the SURVIVORS and
         // replace the re-parsed OBJ rig with them on load.
         if (ma.lightsEdited) {
@@ -9713,6 +9787,23 @@ static bool LoadProject(const std::string& path)
               float mlb = 1.0f;
               if (sscanf(line, "meshLightBake=%f", &mlb) == 1 && !sMeshAssets.empty()) {
                   sMeshAssets.back().lightBake = mlb;
+                  continue;
+              }
+              // Manual lightmap assign/remove — overrides the OBJ's #lightmap.
+              if (strncmp(line, "meshLmTex=", 10) == 0 && !sMeshAssets.empty()) {
+                  MeshAsset& lmm = sMeshAssets.back();
+                  char lmp[512] = {};
+                  sscanf(line + 10, "%511[^\r\n]", lmp);
+                  lmm.lmManual = true;
+                  if (strcmp(lmp, "(none)") == 0 || !lmp[0]) {
+                      lmm.hasLightmap = false;
+                      lmm.lightmapPath.clear();
+                      lmm.lmPixels.clear();
+                      lmm.lmW = lmm.lmH = 0;
+                      if (lmm.lmGlTex) { glDeleteTextures(1, &lmm.lmGlTex); lmm.lmGlTex = 0; }
+                  } else {
+                      LoadMeshLightmap(lmm, std::string(lmp));
+                  }
                   continue;
               }
               // User-edited light rig: drop what LoadOBJ re-parsed, replay survivors.
@@ -13955,6 +14046,15 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::DragInt("Draw Priority##meshPri", &ma.drawPriority, 0.1f, 0, 10);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = draws on top, higher = draws behind");
 
+        // OBJ 2.0 lightmap (baked in Blender, multiplied via UV2 at draw time).
+        if (ma.hasLightmap) {
+            ImGui::Text("Lightmap: %dx%d", ma.lmW, ma.lmH);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "%s\nMultiplied over the mesh through its second UV set —\n"
+                "editor preview and PSV runtime draw the identical pass.\n"
+                "Lights/vertex-bake are skipped for lightmapped meshes.", ma.lightmapPath.c_str());
+        }
+
         // OBJ 2.0 light rig (Blender lights that traveled with the .obj). Values
         // are read-only — the source of truth is the Blender scene; re-export the
         // OBJ to change them. The intensity multiplier scales every light at
@@ -14067,6 +14167,49 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Export this texture as 256-colour (GL_RGB256, 8bpp) instead of 16-colour (GL_RGB16, 4bpp).\nBetter gradients/detail; 2x the VRAM.");
             }
+
+            // Lightmap channel (second UV set from the OBJ 2.0 4-component vt).
+            // Auto-loads from the OBJ's #lightmap line; assignable/replaceable
+            // here. Multiplied over the base texture in a second draw pass —
+            // editor preview and PSV runtime identically.
+            if (ma.hasUV2)
+            {
+                ImGui::Separator();
+                if (ma.hasLightmap)
+                    ImGui::Text("Lightmap (UV2): %dx%d (%s)", ma.lmW, ma.lmH, ma.lightmapPath.c_str());
+                else if (!ma.lightmapPath.empty())
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Lightmap PNG missing: %s", ma.lightmapPath.c_str());
+                else
+                    ImGui::TextDisabled("Lightmap (UV2): none");
+                if (ImGui::Button("Import Lightmap##meshLmBtn"))
+                {
+                    std::string lp = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                    if (!lp.empty() && LoadMeshLightmap(ma, lp)) {
+                        ma.lmManual = true;
+                        sProjectDirty = true; s3DRenderNeeded = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Assign a full-color lightmap PNG to this mesh's second UV channel.\n"
+                    "Bake one in Blender to the 'Lightmap' UV layer and it multiplies the\n"
+                    "base texture at draw time (no palette quantization).");
+                if (ma.hasLightmap)
+                {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Remove##meshLmRm"))
+                    {
+                        ma.hasLightmap = false;
+                        ma.lightmapPath.clear();
+                        ma.lmPixels.clear();
+                        ma.lmW = ma.lmH = 0;
+                        if (ma.lmGlTex) { glDeleteTextures(1, &ma.lmGlTex); ma.lmGlTex = 0; }
+                        ma.lmManual = true;   // persists: OBJ's #lightmap stays off after reload
+                        sProjectDirty = true; s3DRenderNeeded = true;
+                    }
+                }
+            }
+            else if (ma.textured)
+                ImGui::TextDisabled("(no 2nd UV channel in this OBJ — no lightmap slot)");
         }
         // Multi-material slots (from the OBJ's usemtl groups). Each slot binds its
         // own texture on PSV, drawn as a separate group. (PSV target.)
@@ -19981,8 +20124,13 @@ void FrameTick(float dt)
                             break;
                         }
                     }
-                    bool bakeLights = !bakeList.empty() && ma.lit && !ma.useSoftAlpha;
+                    // A lightmapped mesh owns its lighting — skip the vertex bake.
+                    bool bakeLights = !bakeList.empty() && ma.lit && !ma.useSoftAlpha && !ma.hasLightmap;
                     auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
+                    if (ma.hasLightmap && !ma.lmPixels.empty()) {
+                        me.lmPixels = ma.lmPixels;
+                        me.lmW = ma.lmW; me.lmH = ma.lmH;
+                    }
                     for (const auto& v : ma.vertices)
                     {
                         me.positions.push_back(v.px);
@@ -19994,6 +20142,7 @@ void FrameTick(float dt)
                         me.objPosIdx.push_back(v.objPosIdx);
                         me.uvs.push_back(v.u);
                         me.uvs.push_back(v.v);
+                        if (ma.hasLightmap) { me.uvs2.push_back(v.u2); me.uvs2.push_back(v.v2); }
                         if (bakeLights) {
                             float lr, lg, lb;
                             EvalMeshLightAt(bakeList, ma.lightAmbient, ma.lightBake, v, lr, lg, lb);
@@ -20032,26 +20181,31 @@ void FrameTick(float dt)
                     if (ma.removeDoubles && !me.positions.empty())
                     {
                         std::unordered_map<std::string, int> wmap;
-                        std::vector<float> nPos, nNorm, nUV;
+                        std::vector<float> nPos, nNorm, nUV, nUV2;
                         std::vector<int> nObj;
                         std::vector<uint8_t> nCol;
                         int vc = (int)me.positions.size() / 3;
                         bool hasCol = (int)me.vertexColors.size() == vc * 3;  // keep colors in sync through the weld
+                        bool hasUV2 = (int)me.uvs2.size() == vc * 2;          // and the lightmap UVs
                         std::vector<int> remap(vc, 0);
-                        char key[160];
+                        char key[200];
                         for (int v = 0; v < vc; v++) {
                             float u = (v*2+1 < (int)me.uvs.size()) ? me.uvs[v*2+0] : 0.0f;
                             float vv = (v*2+1 < (int)me.uvs.size()) ? me.uvs[v*2+1] : 0.0f;
-                            snprintf(key, sizeof(key), "%d_%d_%d_%d_%d_%d_%d_%d",
+                            float u2 = hasUV2 ? me.uvs2[v*2+0] : 0.0f;
+                            float v2 = hasUV2 ? me.uvs2[v*2+1] : 0.0f;
+                            snprintf(key, sizeof(key), "%d_%d_%d_%d_%d_%d_%d_%d_%d_%d",
                                 (int)lroundf(me.positions[v*3+0]*1024), (int)lroundf(me.positions[v*3+1]*1024), (int)lroundf(me.positions[v*3+2]*1024),
                                 (int)lroundf(u*4096), (int)lroundf(vv*4096),
-                                (int)lroundf(me.normals[v*3+0]*127), (int)lroundf(me.normals[v*3+1]*127), (int)lroundf(me.normals[v*3+2]*127));
+                                (int)lroundf(me.normals[v*3+0]*127), (int)lroundf(me.normals[v*3+1]*127), (int)lroundf(me.normals[v*3+2]*127),
+                                (int)lroundf(u2*4096), (int)lroundf(v2*4096));
                             auto it = wmap.find(key);
                             if (it != wmap.end()) { remap[v] = it->second; continue; }
                             int ni = (int)nPos.size() / 3;
                             nPos.push_back(me.positions[v*3+0]); nPos.push_back(me.positions[v*3+1]); nPos.push_back(me.positions[v*3+2]);
                             nNorm.push_back(me.normals[v*3+0]); nNorm.push_back(me.normals[v*3+1]); nNorm.push_back(me.normals[v*3+2]);
                             nUV.push_back(u); nUV.push_back(vv);
+                            if (hasUV2) { nUV2.push_back(u2); nUV2.push_back(v2); }
                             nObj.push_back(v < (int)me.objPosIdx.size() ? me.objPosIdx[v] : -1);
                             if (hasCol) { nCol.push_back(me.vertexColors[v*3+0]); nCol.push_back(me.vertexColors[v*3+1]); nCol.push_back(me.vertexColors[v*3+2]); }
                             wmap[key] = ni; remap[v] = ni;
@@ -20060,6 +20214,7 @@ void FrameTick(float dt)
                         for (auto& idx : me.quadIndices) idx = (uint32_t)remap[idx];
                         me.positions = std::move(nPos); me.normals = std::move(nNorm);
                         me.uvs = std::move(nUV); me.objPosIdx = std::move(nObj);
+                        if (hasUV2) me.uvs2 = std::move(nUV2);
                         if (hasCol) me.vertexColors = std::move(nCol);
                     }
                     // Convert sprite color to RGB15 (use magenta as default)
@@ -38788,7 +38943,8 @@ void Render3DViewport()
             AppendSceneLightsLocal(prevLights, sx, sy, sz,
                                    fs.rotation, fs.rotationX, fs.rotationZ,
                                    fs.scale, false);
-            bool sceneLit = !prevLights.empty() && ma.lit && !s3DWireframe;
+            // A lightmapped mesh owns its lighting — no GL lights on top.
+            bool sceneLit = !prevLights.empty() && ma.lit && !ma.hasLightmap && !s3DWireframe;
             if (sceneLit)
             {
                 glEnable(GL_LIGHTING);
@@ -38828,11 +38984,26 @@ void Render3DViewport()
             }
 
             bool useTex = ma.textured && ma.glTexID != 0;
+            // Textured toggled but no base texture assigned yet: show the
+            // LIGHTMAP as the texture, sampled through its own UV2 channel —
+            // so a lightmapped import is visible the moment Textured is on.
+            bool lmAsBase = ma.textured && ma.glTexID == 0 && ma.hasLightmap && ma.lmGlTex != 0;
+            auto emitTC = [&](const MeshVertex& tv) {
+                if (lmAsBase) glTexCoord2f(tv.u2, 1.0f - tv.v2);
+                else          glTexCoord2f(tv.u, 1.0f - tv.v);
+            };
             if (useTex)
             {
                 glEnable(GL_TEXTURE_2D);
                 glBindTexture(GL_TEXTURE_2D, ma.glTexID);
                 glColor3f(1, 1, 1);
+            }
+            else if (lmAsBase)
+            {
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, ma.lmGlTex);
+                glColor3f(1, 1, 1);
+                useTex = true;   // draw path below samples via emitTC (UV2)
             }
             else if (!sceneLit)
             {
@@ -38917,7 +39088,7 @@ void Render3DViewport()
                 {
                     const MeshVertex& v = ma.vertices[ma.indices[ti]];
                     if (useTex && !wf)
-                        glTexCoord2f(v.u, 1.0f - v.v);
+                        emitTC(v);
                     if (vcol) glColor3f(v.r, v.g, v.b);
                     glNormal3f(v.nx, v.ny, v.nz);
                     glVertex3f(v.px, v.py, v.pz);
@@ -38935,29 +39106,67 @@ void Render3DViewport()
                     const MeshVertex& v2 = ma.vertices[ma.quadIndices[qi+2]];
                     const MeshVertex& v3 = ma.vertices[ma.quadIndices[qi+3]];
                     // tri 1: v0, v1, v2
-                    if (useTex) glTexCoord2f(v0.u, 1.0f - v0.v);
+                    if (useTex) emitTC(v0);
                     if (vcol) glColor3f(v0.r, v0.g, v0.b);
                     glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
-                    if (useTex) glTexCoord2f(v1.u, 1.0f - v1.v);
+                    if (useTex) emitTC(v1);
                     if (vcol) glColor3f(v1.r, v1.g, v1.b);
                     glNormal3f(v1.nx, v1.ny, v1.nz); glVertex3f(v1.px, v1.py, v1.pz);
-                    if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
+                    if (useTex) emitTC(v2);
                     if (vcol) glColor3f(v2.r, v2.g, v2.b);
                     glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
                     // tri 2: v0, v2, v3
-                    if (useTex) glTexCoord2f(v0.u, 1.0f - v0.v);
+                    if (useTex) emitTC(v0);
                     if (vcol) glColor3f(v0.r, v0.g, v0.b);
                     glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
-                    if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
+                    if (useTex) emitTC(v2);
                     if (vcol) glColor3f(v2.r, v2.g, v2.b);
                     glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
-                    if (useTex && !wf) glTexCoord2f(v3.u, 1.0f - v3.v);
+                    if (useTex && !wf) emitTC(v3);
                     if (vcol) glColor3f(v3.r, v3.g, v3.b);
                     glNormal3f(v3.nx, v3.ny, v3.nz); glVertex3f(v3.px, v3.py, v3.pz);
                 }
                 glEnd();
             }
             }   // end single-material draw branch
+
+            // Lightmap second pass: multiply the framebuffer by the lightmap
+            // sampled through UV2 — the same DST_COLOR×ZERO pass the PSV
+            // runtime draws, so the preview is the runtime look. Skipped when
+            // the lightmap IS the base texture (no-base-texture fallback).
+            if (ma.hasLightmap && ma.lmGlTex && !lmAsBase && !wf)
+            {
+                glDisable(GL_LIGHTING);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, ma.lmGlTex);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                glDepthFunc(GL_EQUAL);      // exactly the depths pass 1 wrote
+                glDepthMask(GL_FALSE);
+                glColor3f(1, 1, 1);
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti < ma.indices.size(); ti++) {
+                    const MeshVertex& v = ma.vertices[ma.indices[ti]];
+                    glTexCoord2f(v.u2, 1.0f - v.v2);
+                    glVertex3f(v.px, v.py, v.pz);
+                }
+                for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4) {
+                    const MeshVertex* tv[6] = {
+                        &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+1]], &ma.vertices[ma.quadIndices[qi+2]],
+                        &ma.vertices[ma.quadIndices[qi]],   &ma.vertices[ma.quadIndices[qi+2]], &ma.vertices[ma.quadIndices[qi+3]] };
+                    for (int k = 0; k < 6; k++) {
+                        glTexCoord2f(tv[k]->u2, 1.0f - tv[k]->v2);
+                        glVertex3f(tv[k]->px, tv[k]->py, tv[k]->pz);
+                    }
+                }
+                glEnd();
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LESS);       // editor default
+                glDisable(GL_BLEND);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_TEXTURE_2D);
+            }
+
             if (vcol) glDisable(GL_COLOR_MATERIAL);
             if (wf) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore fill for next mesh
 

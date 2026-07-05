@@ -71,6 +71,12 @@ typedef struct {
     // [vertCount*3], or 0 when the scene has no light rig / this mesh is unlit —
     // the mesh then draws unlit-vertex-colored exactly as before.
     const float*                 normals;
+    // OBJ 2.0 lightmap: full-color RGBA8 texture multiplied over the mesh via
+    // a SECOND UV set in a second draw pass (blend DST_COLOR x ZERO, depth
+    // EQUAL). 0/NULL = no lightmap.
+    const float*                 uv2;      // [vertCount*2]
+    const unsigned char*         lmTex;    // RGBA8 bytes (lmW*lmH*4)
+    int                          lmW, lmH;
 } AfnMesh;
 
 // A static scene light (OBJ 2.0 "#light"/"#sun" lines, exporter-placed in world

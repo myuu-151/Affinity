@@ -139,6 +139,29 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             f << "\n};\n";
         }
 
+        // Lightmap (OBJ 2.0 #lightmap): UV2 (V flipped like the base UVs) +
+        // the RGBA8 texture as an octal STRING LITERAL — GCC parses a multi-MB
+        // string far faster than that many integer initializers (same trick as
+        // the PCM emit in GenerateSharedSound).
+        bool hasLm = isPsv && m.lmW > 0 && m.lmH > 0 && !m.lmPixels.empty()
+                     && (int)m.uvs2.size() == vc * 2;
+        if (hasLm) {
+            f << "static const float afn_mesh" << mi << "_uv2[" << (vc * 2) << "] = {";
+            for (int v = 0; v < vc; v++) {
+                if (v % 8 == 0) f << "\n  ";
+                f << Flt(m.uvs2[v*2+0]) << "," << Flt(1.0f - m.uvs2[v*2+1]) << ",";
+            }
+            f << "\n};\n";
+            f << "static const unsigned char afn_mesh" << mi << "_lm[] __attribute__((aligned(16))) =\n  \"";
+            auto emitB = [&](unsigned bv) { bv &= 0xFF; f << '\\' << ((bv>>6)&7) << ((bv>>3)&7) << (bv&7); };
+            int run = 0;
+            for (size_t p = 0; p < m.lmPixels.size(); p++) {
+                emitB(m.lmPixels[p]);
+                if (++run >= 96) { f << "\"\n  \""; run = 0; }
+            }
+            f << "\";\n";
+        }
+
         // Indices: triangles + triangulated quads.
         std::vector<unsigned int> idx = m.indices;
         for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
@@ -253,10 +276,15 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             else
                 f << ", 0, 0, 0, 0, 0, 0";
             f << ", " << (meshEmitsNormals(m) ? ("afn_mesh" + std::to_string(mi) + "_nrm") : std::string("0"));
+            bool hasLm = m.lmW > 0 && m.lmH > 0 && !m.lmPixels.empty() && (int)m.uvs2.size() == vc * 2;
+            if (hasLm)
+                f << ", afn_mesh" << mi << "_uv2, afn_mesh" << mi << "_lm, " << m.lmW << ", " << m.lmH;
+            else
+                f << ", 0, 0, 0, 0";
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----

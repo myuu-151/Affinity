@@ -164,6 +164,7 @@ struct MeshVertex
     float nx, ny, nz;   // normal
     float r, g, b;      // vertex color (default white)
     float u, v;         // texture coordinates (0..1)
+    float u2 = 0, v2 = 0; // lightmap UV (OBJ 2.0 4-component vt); unused when the mesh has no lightmap
     int   objPosIdx = -1; // original OBJ 'v' index (for vertex welding)
 };
 
@@ -241,6 +242,18 @@ struct MeshAsset
     float lightBake = 1.0f;              // intensity multiplier (editor tunable, persisted)
     bool lightsEdited = false;           // user deleted imported lights in-editor —
                                          // persist the survivors instead of re-parsing the OBJ
+
+    // Lightmap (OBJ 2.0 "#lightmap file.png" + 4-component vt lines): a full-
+    // color texture multiplied over the mesh through the SECOND UV set, drawn
+    // as a second multiply pass (editor preview and PSV runtime identically).
+    // A lightmapped mesh skips the vertex-color light bake (it owns lighting).
+    bool hasLightmap = false;
+    bool hasUV2 = false;                 // OBJ carried 4-component vt (lightmap UV channel)
+    bool lmManual = false;               // user assigned/removed the lightmap in-editor (persisted)
+    std::string lightmapPath;            // lightmap PNG path (kept on load failure for the warning)
+    std::vector<uint8_t> lmPixels;       // RGBA8 (lmW * lmH * 4)
+    int lmW = 0, lmH = 0;
+    unsigned int lmGlTex = 0;            // editor preview texture (LINEAR)
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated
