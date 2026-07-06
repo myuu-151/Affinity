@@ -49,6 +49,15 @@ extern unsigned char afn_sprite_visible[];          // SetVisible/DestroyObject 
 static AfnRigVertex s_skinned[AFN_RIG_MAX_VERTS];
 static float  s_bonemat[AFN_RIG_MAX_BONES][12];   // 3x4 row-major per bone
 static float  s_player_bone_world[AFN_RIG_MAX_BONES][3] = {{0}};  // player bones in WORLD space (bone-attach)
+// Player world rotation basis (unit right/up/fwd, no scale/translation), as a 4x4
+// column-major matrix. Bone-attached models multiply their local offset + model
+// orientation through the DELTA from the spawn basis so they stay LOCKED to the
+// player's frame instead of orbiting the joint when the player turns. The authored
+// offset is world-space + correct at the spawn facing, so we rotate by (live * ref^-1)
+// — identity at spawn (preserves the authored placement), turning thereafter.
+static float  s_player_rot_mat[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+static float  s_player_rot_ref[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+static int    s_player_rot_ref_set = 0;
 static GLuint s_rigTex[AFN_RIG_COUNT][AFN_RIG_MAX_MATS];
 static float  s_pframe = 0.0f;                     // player anim frame
 static int    s_pclip  = AFN_PLAYER_DEFAULT_CLIP;
@@ -576,10 +585,13 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     glLoadMatrixf(view);
     glMultMatrixf(model);
 
-#ifdef AFN_HAS_SPR_BONE
+#if defined(AFN_HAS_SPR_BONE) || defined(AFN_HAS_MESH_INST_ATTACH)
     // Bone attach: cache each PLAYER bone's WORLD position (model * bone origin)
-    // so attached sub-sprites can ride the live animated joint. s_bonemat is
-    // overwritten per rig during this pass, so we snapshot only the player.
+    // so attached sub-sprites AND attached sub-models can ride the live animated
+    // joint. s_bonemat is overwritten per rig during this pass, so we snapshot
+    // only the player. NOTE: a project with ONLY a bone-attached sub-MODEL (no
+    // bone sub-sprite) still needs this — AFN_HAS_MESH_INST_ATTACH covers it, or
+    // the ball would sit at world origin (0,0,0) off-screen.
     if (s_drawingPlayer) {   // ONLY the player's own draw — NOT the same-rig enemy NPC
         for (int b = 0; b < R->bones; b++) {
             float bx = s_bonemat[b][3], by = s_bonemat[b][7], bz = s_bonemat[b][11];
@@ -587,6 +599,12 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
             s_player_bone_world[b][1] = model[1]*bx + model[5]*by + model[9]*bz + model[13];
             s_player_bone_world[b][2] = model[2]*bx + model[6]*by + model[10]*bz + model[14];
         }
+        // Cache the player's UNIT rotation basis (rgx/ux/fx are pre-scale) so
+        // bone-attached models can lock their local offset + orientation to it.
+        s_player_rot_mat[0]=rgx; s_player_rot_mat[1]=rgy; s_player_rot_mat[2]=rgz;  s_player_rot_mat[3]=0;
+        s_player_rot_mat[4]=ux;  s_player_rot_mat[5]=uy;  s_player_rot_mat[6]=uz;   s_player_rot_mat[7]=0;
+        s_player_rot_mat[8]=fx;  s_player_rot_mat[9]=fy;  s_player_rot_mat[10]=fz;  s_player_rot_mat[11]=0;
+        s_player_rot_mat[12]=0;  s_player_rot_mat[13]=0;  s_player_rot_mat[14]=0;   s_player_rot_mat[15]=1;
     }
     // HARDCODED: also snapshot the enemy NPC's bones (for its projectile orb muzzle).
     if (s_cacheEnemyBones) {
@@ -7590,6 +7608,13 @@ int main(void)
             int eidx = afn_mesh_inst_sprite[si];
             if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
 #endif
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+            // Bone-attached instances (e.g. a pokéball on the hand) are DEFERRED to a
+            // post-rig pass below: rigs_render fills s_player_bone_world AFTER this
+            // loop, so drawing them here would use LAST frame's joint positions and
+            // the mesh would lag the hand by one frame whenever the player moves.
+            if (afn_mesh_inst_bone[si] >= 0) continue;
+#endif
             const AfnSpriteInst* sp = &afn_sprites[si];
             float mx = sp->x, my = sp->y, mz = sp->z;
 #if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
@@ -7639,6 +7664,53 @@ int main(void)
         // Player rig + every NPC: each skinned from its own rig at its own
         // transform/clip (player follows the camera; NPCs at their world spots).
         rigs_render(view, playerX, playerY, playerZ, playerYaw, s_floorN);
+#endif
+
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+        // Bone-attached mesh instances (deferred from the pre-rig mesh loop): draw
+        // them HERE, now that rigs_render has cached THIS frame's joint world
+        // positions in s_player_bone_world — so a hand-held pokéball tracks the hand
+        // exactly instead of lagging a frame while the player moves.
+        // Latch the spawn basis, then build the delta rotation (live * ref^-1) once
+        // for this frame — the authored offset is world-space and correct at spawn,
+        // so delta=I there and the ball tracks the player's turn from then on.
+        if (!s_player_rot_ref_set) { memcpy(s_player_rot_ref, s_player_rot_mat, sizeof(s_player_rot_ref)); s_player_rot_ref_set = 1; }
+        float attachDelta[16] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1};
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) {
+                float s = 0.0f;
+                for (int k = 0; k < 3; k++) s += s_player_rot_mat[k*4+i] * s_player_rot_ref[k*4+j];  // live * ref^T
+                attachDelta[j*4+i] = s;
+            }
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        for (int si = 0; si < afn_sprite_count; si++) {
+            if (afn_mesh_inst_bone[si] < 0) continue;
+            int mi = afn_sprites[si].meshIdx;
+            if (mi < 0 || mi >= afn_mesh_count) continue;
+            int eidx = afn_mesh_inst_sprite[si];
+            if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;
+            int b = afn_mesh_inst_bone[si];
+            const AfnSpriteInst* sp = &afn_sprites[si];
+            glPolygonOffset(0.0f, (float)((si + 1) * 128));
+            s_meshLmBias = (float)((si + 1) * 128);
+            // Anchor at the live bone, then enter the player's ROTATED frame so the
+            // authored offset + model orientation ride the player's facing — the ball
+            // stays locked to the hand instead of orbiting the joint when you turn.
+            glLoadMatrixf(view);
+            glTranslatef(s_player_bone_world[b][0], s_player_bone_world[b][1], s_player_bone_world[b][2]);
+            glMultMatrixf(attachDelta);
+            glTranslatef(afn_mesh_inst_poff[si][0], afn_mesh_inst_poff[si][1], afn_mesh_inst_poff[si][2]);
+            if (sp->rotZ != 0.0f) glRotatef(sp->rotZ, 0,0,1);
+            if (sp->rotX != 0.0f) glRotatef(sp->rotX, 1,0,0);
+            if (sp->rotY != 0.0f) glRotatef(sp->rotY, 0,1,0);
+            glScalef(sp->scale, sp->scale, sp->scale);
+            int blended = afn_meshes[mi].blend;
+            if (blended) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
+            draw_mesh(mi);
+            if (blended) { glDepthMask(GL_TRUE); glDisable(GL_BLEND); }
+        }
+        glPolygonOffset(0.0f, 0.0f);
+        glDisable(GL_POLYGON_OFFSET_FILL);
 #endif
 
 #ifdef AFN_HAS_SPRITES

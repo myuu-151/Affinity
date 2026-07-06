@@ -6023,6 +6023,7 @@ static float Scaled(float base);   // UI-scale helper, defined with the UI globa
 // separate floating window.
 static void DrawCameraPresetsChunk(FloorSprite& sp);
 static void DrawCameraAnimChunk(FloorSprite& sp);
+static void DrawAttachedChunk(FloorSprite& sp);
 static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset>& rigAssets)
 {
     bool dirty = false;
@@ -8484,7 +8485,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0, ma.useSoftAlpha ? 1 : 0, ma.psvColors);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0, ma.useSoftAlpha ? 1 : 0, ma.psvColors, ma.ignoreVertexColor ? 1 : 0);
         // Light Intensity multiplier for the OBJ 2.0 light rig (the lights
         // themselves re-parse from the source OBJ on load).
         if (ma.lightBake != 1.0f)
@@ -10024,10 +10025,10 @@ static bool LoadProject(const std::string& path)
                   continue;
               } }
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0, msoftalpha = 0, mpsvcolors = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0, msoftalpha = 0, mpsvcolors = 0, mignorevcol = 0;
             float mdrawdist = 0.0f;
             // Try newest format: ...|texInIwram|textureUseAlpha|texFiltered|removeDoubles
-            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors);
+            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors, &mignorevcol);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -10036,7 +10037,7 @@ static bool LoadProject(const std::string& path)
                 int pipes = 0;
                 while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
                 if (*p == '|') p++; // skip the empty field's trailing pipe
-                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors);
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors, &mignorevcol);
                 matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
                 if (m2 > 0) matched++; // account for the texpath slot
             }
@@ -10108,6 +10109,8 @@ static bool LoadProject(const std::string& path)
                     ma.useSoftAlpha = (msoftalpha != 0);          // attached-model blended alpha
                 if (matched >= 27 && mpsvcolors > 0)
                     ma.psvColors = mpsvcolors;
+                if (matched >= 28)
+                    ma.ignoreVertexColor = (mignorevcol != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -15172,6 +15175,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 DrawCameraPresetsChunk(sp);
                 DrawCameraAnimChunk(sp);   // keyframed cutscene camera path
             }
+            // ---- Attached Sprites / Attached Models — same chunk as the scene
+            // sprite inspector, so glTF meshes placed in the Meshes tab can carry
+            // sub-sprites (2D billboards) and sub-models (3D auras), incl. bone attach.
+            ImGui::PushItemWidth(-1);
+            DrawAttachedChunk(sp);
+            ImGui::PopItemWidth();
         }
 
         // ---- Navigation (PSV navmesh) ----
@@ -17386,6 +17395,216 @@ static void DrawCameraAnimChunk(FloorSprite& sp)
     }
 }
 
+// Attached Sprites + Attached Models editor chunk. Extracted so both the
+// scene sprite inspector AND the Meshes-tab "Placed glTF" panel can show it.
+// The caller owns item-width: this body assumes an active PushItemWidth.
+static void DrawAttachedChunk(FloorSprite& sp)
+{
+        // Attached sub-sprites
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.7f, 1.0f), "Attached Sprites");
+        for (int si = 0; si < sp.subSpriteCount; si++) {
+            auto& sub = sp.subSprites[si];
+            ImGui::PushID(si + 7000);
+            const char* subPreview = (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
+                ? sSpriteAssets[sub.assetIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Asset##sub", subPreview)) {
+                if (ImGui::Selectable("(none)##subnone", sub.assetIdx < 0))
+                    sub.assetIdx = -1;
+                for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                    bool sel = (sub.assetIdx == ai);
+                    if (ImGui::Selectable(sSpriteAssets[ai].name.c_str(), sel))
+                        sub.assetIdx = ai;
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::DragFloat("X##sub", &sub.offsetX, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Y##sub", &sub.offsetY, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Z##sub", &sub.offsetZ, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Scale##sub", &sub.scale, 0.05f, 0.1f, 10.0f, "%.2f");
+            const char* orderNames[] = { "Behind", "In Front" };
+            ImGui::Combo("Draw##sub", &sub.drawOrder, orderNames, 2);
+            ImGui::Checkbox("Static##sub", &sub.forceStatic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force static rendering (same frame at all angles)");
+            ImGui::Checkbox("Grounded##sub", &sub.grounded);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
+            ImGui::Checkbox("Hidden (effect)##sub", &sub.hidden);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible (and hidden here so it doesn't clutter the view). A Cast Effect node shows it, plays its anim once, then auto-hides it. Set the anim to Once.");
+            // Effect: draw an Effects-tab INSTANCE at this sub-sprite instead of the sprite graphic.
+            // The effect rides the sub-sprite's live position + scale (so Charge Shot's Min/Max Scale
+            // still grows it). effectKind stores instance index + 1 (0 = none / draw the sprite).
+            { int cur = sub.effectKind;
+              const char* prev = (cur > 0 && cur-1 < (int)sFxInstances.size()) ? sFxInstances[cur-1].name : "None (sprite)";
+              ImGui::SetNextItemWidth(Scaled(150));
+              if (ImGui::BeginCombo("Effect##sub", prev)) {
+                  if (ImGui::Selectable("None (sprite)##efxnone", cur == 0)) { sub.effectKind = 0; sProjectDirty = true; }
+                  for (int fi = 0; fi < (int)sFxInstances.size(); fi++) {
+                      std::string lbl = std::string(sFxInstances[fi].name) + "##efx" + std::to_string(fi);
+                      if (ImGui::Selectable(lbl.c_str(), cur == fi+1)) { sub.effectKind = fi+1; sProjectDirty = true; }
+                  }
+                  ImGui::EndCombo();
+              }
+              if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw an Effects-tab instance here instead of the sprite graphic.\nThe effect follows this sub-sprite's live position + scale (so a\ncharging Focus Blast still grows it). Build the effect in the\nEffects tab; None = draw the normal sprite."); }
+            // Bone attach (player rig): pin this sub-sprite to a rig bone so it
+            // rides the animated joint; X/Y/Z become offsets relative to the bone.
+            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
+                && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
+                const auto& bn = sRiggedMeshAssets[sp.riggedMeshIdx].boneNames;
+                const char* bonePrev = (sub.boneIdx >= 0 && sub.boneIdx < (int)bn.size())
+                    ? bn[sub.boneIdx].c_str() : "(none - anchor to origin)";
+                if (ImGui::BeginCombo("Bone##sub", bonePrev)) {
+                    if (ImGui::Selectable("(none - anchor to origin)##sbnone", sub.boneIdx < 0)) sub.boneIdx = -1;
+                    for (int bi = 0; bi < (int)bn.size(); bi++) {
+                        std::string lbl = bn[bi] + "##sb";
+                        if (ImGui::Selectable(lbl.c_str(), sub.boneIdx == bi)) sub.boneIdx = bi;
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the sprite rides that joint as it animates (e.g. a hand). X/Y/Z become offsets from the bone. Player rig only for now.");
+            }
+            // Drive through element: keep this sub-sprite's own graphic + exact 3D
+            // (bone) position, but run a HUD element's keyframe animation
+            // (rotation/scale) on it — e.g. a spin authored as r0->r360 keyframes.
+            if (ImGui::Checkbox("Drive through element##sub", &sub.driveThroughElement)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run a HUD element's keyframe animation (rotation/scale) on this sub-sprite, keeping its own graphic and exact 3D/bone position. Author the spin as element rotation keyframes (e.g. r0 -> r360, Loop).");
+            if (sub.driveThroughElement) {
+                const char* elPrev = (sub.driveElementIdx >= 0 && sub.driveElementIdx < (int)sHudElements.size())
+                    ? sHudElements[sub.driveElementIdx].name : "(pick element)";
+                if (ImGui::BeginCombo("Element##subdrive", elPrev)) {
+                    if (ImGui::Selectable("(none)##sdrvnone", sub.driveElementIdx < 0)) { sub.driveElementIdx = -1; sProjectDirty = true; }
+                    for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                        std::string lbl = std::string(sHudElements[ei].name) + "##sdrv";
+                        if (ImGui::Selectable(lbl.c_str(), sub.driveElementIdx == ei)) { sub.driveElementIdx = ei; sProjectDirty = true; }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("The element whose first animation layer (rotation/scale keyframes) drives this sub-sprite. The element itself need not be shown — only its animation is used.");
+            }
+            // Animation selector for sub-sprite
+            if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
+                SpriteAsset& subAsset = sSpriteAssets[sub.assetIdx];
+                for (int ai = 0; ai < (int)subAsset.anims.size(); ai++) {
+                    ImGui::PushID(ai + 8000);
+                    bool sel = (sub.animEnabled && sub.animIdx == ai);
+                    char slotLabel[64];
+                    snprintf(slotLabel, sizeof(slotLabel), "%s (frames %d)##sub", subAsset.anims[ai].name.c_str(), subAsset.anims[ai].endFrame);
+                    if (ImGui::Selectable(slotLabel, sel, 0, ImVec2(ImGui::GetContentRegionAvail().x - Scaled(30), 0))) {
+                        sub.animIdx = ai;
+                        sub.animEnabled = true;
+                    }
+                    ImGui::SameLine();
+                    bool rowEnabled = (sub.animEnabled && sub.animIdx == ai);
+                    if (ImGui::Checkbox("##subanimrow", &rowEnabled)) {
+                        if (rowEnabled) { sub.animIdx = ai; sub.animEnabled = true; }
+                        else sub.animEnabled = false;
+                    }
+                    ImGui::PopID();
+                }
+            }
+            if (ImGui::SmallButton("Remove##sub")) {
+                for (int j = si; j < sp.subSpriteCount - 1; j++)
+                    sp.subSprites[j] = sp.subSprites[j + 1];
+                sp.subSpriteCount--;
+                si--;
+            }
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (sp.subSpriteCount < FloorSprite::kMaxSubSprites) {
+            if (ImGui::Button("+ Add Sprite##addsub"))
+                sp.subSpriteCount++;
+        }
+
+        // --- Attached Models (3D mesh layers riding the object, e.g. a charge aura) ---
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Attached Models");
+        for (int mi = 0; mi < sp.subModelCount; mi++) {
+            auto& sm = sp.subModels[mi];
+            ImGui::PushID(mi + 9000);
+            const char* mPrev = (sm.meshIdx >= 0 && sm.meshIdx < (int)sMeshAssets.size())
+                ? sMeshAssets[sm.meshIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Mesh##sm", mPrev)) {
+                if (ImGui::Selectable("(none)##smnone", sm.meshIdx < 0)) sm.meshIdx = -1;
+                for (int ai = 0; ai < (int)sMeshAssets.size(); ai++)
+                    if (ImGui::Selectable(sMeshAssets[ai].name.c_str(), sm.meshIdx == ai)) sm.meshIdx = ai;
+                ImGui::EndCombo();
+            }
+#ifdef _WIN32
+            if (ImGui::Button("Import Model (OBJ)...##sm")) {
+                std::string objPath = OpenFileDialog("OBJ Files\0*.obj\0All Files\0*.*\0", "obj");
+                if (!objPath.empty()) {
+                    MeshAsset ma;
+                    if (LoadOBJ(objPath, ma)) {
+                        ma.psvColors = 128; ma.useSoftAlpha = true; ma.lit = false;  // glow aura: unlit, soft alpha
+                        if (ma.textured && !ma.texturePath.empty())  // re-process map_Kd as soft alpha
+                            LoadModelTextureSoft(ma, ma.texturePath);
+                        sm.meshIdx = (int)sMeshAssets.size();
+                        sMeshAssets.push_back(std::move(ma));
+                        sProjectDirty = true;
+                    }
+                }
+            }
+            if (sm.meshIdx >= 0 && sm.meshIdx < (int)sMeshAssets.size()) {
+                MeshAsset& mm = sMeshAssets[sm.meshIdx];
+                ImGui::SameLine();
+                if (ImGui::Button("Texture (PNG)...##sm")) {
+                    std::string tex = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                    if (!tex.empty()) { if (mm.psvColors <= 0) mm.psvColors = 128; LoadModelTextureSoft(mm, tex); sProjectDirty = true; }
+                }
+                int colVals[] = { 16, 32, 64, 128 }; const char* colNames[] = { "16", "32", "64", "128" };
+                int curCol = 3; for (int k = 0; k < 4; k++) if (colVals[k] == mm.psvColors) curCol = k;
+                if (ImGui::Combo("Colors##sm", &curCol, colNames, 4)) {
+                    mm.psvColors = colVals[curCol];
+                    if (!mm.texturePath.empty()) LoadModelTextureSoft(mm, mm.texturePath);
+                    sProjectDirty = true;
+                }
+                if (ImGui::Checkbox("Use Alpha (blended)##sm", &mm.useSoftAlpha)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend the texture's per-pixel alpha (soft/feathered edges) instead of a 1-bit cutout.");
+                if (ImGui::Checkbox("Ignore Vertex Colors##sm", &mm.ignoreVertexColor)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drop the mesh's per-vertex colors and modulate the texture with white.\nUse this when an imported OBJ renders BLACK - some exporters (Blender)\nwrite a black vertex-color layer that multiplies the texture to black.");
+            }
+#endif
+            ImGui::DragFloat("X##sm", &sm.offsetX, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Y##sm", &sm.offsetY, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Z##sm", &sm.offsetZ, 0.5f, -200.0f, 200.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Local placement offset. When a Bone is set below, X/Y/Z move the model RELATIVE to that bone (it rides the joint + this offset).");
+            ImGui::DragFloat("Scale##sm", &sm.scale, 0.25f, 0.05f, 400.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World-size of the model (not tied to the object's authored scale). A rigged player needs a fairly large value to match its visible size.");
+            ImGui::DragFloat("Yaw##sm", &sm.yaw, 1.0f, -180.0f, 180.0f, "%.0f");
+            ImGui::Checkbox("Grounded##sm", &sm.grounded);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
+            ImGui::Checkbox("Hidden (effect)##sm", &sm.hidden);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible IN-GAME; a Cast Effect node reveals it (for a charge aura, etc.)");
+            ImGui::Checkbox("Hide in editor##sm", &sm.editorHide);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hide this model in the EDITOR preview only (declutter while authoring). Still shows in-game.");
+            // Bone attach (player rig): ride a rig joint; X/Y/Z become bone-relative.
+            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
+                && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
+                const auto& bn = sRiggedMeshAssets[sp.riggedMeshIdx].boneNames;
+                const char* bonePrev = (sm.boneIdx >= 0 && sm.boneIdx < (int)bn.size())
+                    ? bn[sm.boneIdx].c_str() : "(none - anchor to origin)";
+                if (ImGui::BeginCombo("Bone##sm", bonePrev)) {
+                    if (ImGui::Selectable("(none - anchor to origin)##smbnone", sm.boneIdx < 0)) sm.boneIdx = -1;
+                    for (int bi = 0; bi < (int)bn.size(); bi++) {
+                        std::string lbl = bn[bi] + "##smb";
+                        if (ImGui::Selectable(lbl.c_str(), sm.boneIdx == bi)) sm.boneIdx = bi;
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the model rides that joint. X/Y/Z become offsets from the bone. Player rig only for now.");
+            }
+            if (ImGui::SmallButton("Remove##sm")) {
+                for (int j = mi; j < sp.subModelCount - 1; j++) sp.subModels[j] = sp.subModels[j + 1];
+                sp.subModelCount--; mi--;
+            }
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (sp.subModelCount < FloorSprite::kMaxSubModels) {
+            if (ImGui::Button("+ Add Model##addsm")) sp.subModelCount++;
+        }
+}
+
 static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
 {
     ImGui::SetNextWindowPos(pos);
@@ -17919,207 +18138,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             }
         }
 
-        // Attached sub-sprites
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.7f, 1.0f), "Attached Sprites");
-        for (int si = 0; si < sp.subSpriteCount; si++) {
-            auto& sub = sp.subSprites[si];
-            ImGui::PushID(si + 7000);
-            const char* subPreview = (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
-                ? sSpriteAssets[sub.assetIdx].name.c_str() : "(none)";
-            if (ImGui::BeginCombo("Asset##sub", subPreview)) {
-                if (ImGui::Selectable("(none)##subnone", sub.assetIdx < 0))
-                    sub.assetIdx = -1;
-                for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
-                    bool sel = (sub.assetIdx == ai);
-                    if (ImGui::Selectable(sSpriteAssets[ai].name.c_str(), sel))
-                        sub.assetIdx = ai;
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::DragFloat("X##sub", &sub.offsetX, 0.5f, -200.0f, 200.0f);
-            ImGui::DragFloat("Y##sub", &sub.offsetY, 0.5f, -200.0f, 200.0f);
-            ImGui::DragFloat("Z##sub", &sub.offsetZ, 0.5f, -200.0f, 200.0f);
-            ImGui::DragFloat("Scale##sub", &sub.scale, 0.05f, 0.1f, 10.0f, "%.2f");
-            const char* orderNames[] = { "Behind", "In Front" };
-            ImGui::Combo("Draw##sub", &sub.drawOrder, orderNames, 2);
-            ImGui::Checkbox("Static##sub", &sub.forceStatic);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force static rendering (same frame at all angles)");
-            ImGui::Checkbox("Grounded##sub", &sub.grounded);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
-            ImGui::Checkbox("Hidden (effect)##sub", &sub.hidden);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible (and hidden here so it doesn't clutter the view). A Cast Effect node shows it, plays its anim once, then auto-hides it. Set the anim to Once.");
-            // Effect: draw an Effects-tab INSTANCE at this sub-sprite instead of the sprite graphic.
-            // The effect rides the sub-sprite's live position + scale (so Charge Shot's Min/Max Scale
-            // still grows it). effectKind stores instance index + 1 (0 = none / draw the sprite).
-            { int cur = sub.effectKind;
-              const char* prev = (cur > 0 && cur-1 < (int)sFxInstances.size()) ? sFxInstances[cur-1].name : "None (sprite)";
-              ImGui::SetNextItemWidth(Scaled(150));
-              if (ImGui::BeginCombo("Effect##sub", prev)) {
-                  if (ImGui::Selectable("None (sprite)##efxnone", cur == 0)) { sub.effectKind = 0; sProjectDirty = true; }
-                  for (int fi = 0; fi < (int)sFxInstances.size(); fi++) {
-                      std::string lbl = std::string(sFxInstances[fi].name) + "##efx" + std::to_string(fi);
-                      if (ImGui::Selectable(lbl.c_str(), cur == fi+1)) { sub.effectKind = fi+1; sProjectDirty = true; }
-                  }
-                  ImGui::EndCombo();
-              }
-              if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw an Effects-tab instance here instead of the sprite graphic.\nThe effect follows this sub-sprite's live position + scale (so a\ncharging Focus Blast still grows it). Build the effect in the\nEffects tab; None = draw the normal sprite."); }
-            // Bone attach (player rig): pin this sub-sprite to a rig bone so it
-            // rides the animated joint; X/Y/Z become offsets relative to the bone.
-            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
-                && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
-                const auto& bn = sRiggedMeshAssets[sp.riggedMeshIdx].boneNames;
-                const char* bonePrev = (sub.boneIdx >= 0 && sub.boneIdx < (int)bn.size())
-                    ? bn[sub.boneIdx].c_str() : "(none - anchor to origin)";
-                if (ImGui::BeginCombo("Bone##sub", bonePrev)) {
-                    if (ImGui::Selectable("(none - anchor to origin)##sbnone", sub.boneIdx < 0)) sub.boneIdx = -1;
-                    for (int bi = 0; bi < (int)bn.size(); bi++) {
-                        std::string lbl = bn[bi] + "##sb";
-                        if (ImGui::Selectable(lbl.c_str(), sub.boneIdx == bi)) sub.boneIdx = bi;
-                    }
-                    ImGui::EndCombo();
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the sprite rides that joint as it animates (e.g. a hand). X/Y/Z become offsets from the bone. Player rig only for now.");
-            }
-            // Drive through element: keep this sub-sprite's own graphic + exact 3D
-            // (bone) position, but run a HUD element's keyframe animation
-            // (rotation/scale) on it — e.g. a spin authored as r0->r360 keyframes.
-            if (ImGui::Checkbox("Drive through element##sub", &sub.driveThroughElement)) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run a HUD element's keyframe animation (rotation/scale) on this sub-sprite, keeping its own graphic and exact 3D/bone position. Author the spin as element rotation keyframes (e.g. r0 -> r360, Loop).");
-            if (sub.driveThroughElement) {
-                const char* elPrev = (sub.driveElementIdx >= 0 && sub.driveElementIdx < (int)sHudElements.size())
-                    ? sHudElements[sub.driveElementIdx].name : "(pick element)";
-                if (ImGui::BeginCombo("Element##subdrive", elPrev)) {
-                    if (ImGui::Selectable("(none)##sdrvnone", sub.driveElementIdx < 0)) { sub.driveElementIdx = -1; sProjectDirty = true; }
-                    for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
-                        std::string lbl = std::string(sHudElements[ei].name) + "##sdrv";
-                        if (ImGui::Selectable(lbl.c_str(), sub.driveElementIdx == ei)) { sub.driveElementIdx = ei; sProjectDirty = true; }
-                    }
-                    ImGui::EndCombo();
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("The element whose first animation layer (rotation/scale keyframes) drives this sub-sprite. The element itself need not be shown — only its animation is used.");
-            }
-            // Animation selector for sub-sprite
-            if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
-                SpriteAsset& subAsset = sSpriteAssets[sub.assetIdx];
-                for (int ai = 0; ai < (int)subAsset.anims.size(); ai++) {
-                    ImGui::PushID(ai + 8000);
-                    bool sel = (sub.animEnabled && sub.animIdx == ai);
-                    char slotLabel[64];
-                    snprintf(slotLabel, sizeof(slotLabel), "%s (frames %d)##sub", subAsset.anims[ai].name.c_str(), subAsset.anims[ai].endFrame);
-                    if (ImGui::Selectable(slotLabel, sel, 0, ImVec2(ImGui::GetContentRegionAvail().x - Scaled(30), 0))) {
-                        sub.animIdx = ai;
-                        sub.animEnabled = true;
-                    }
-                    ImGui::SameLine();
-                    bool rowEnabled = (sub.animEnabled && sub.animIdx == ai);
-                    if (ImGui::Checkbox("##subanimrow", &rowEnabled)) {
-                        if (rowEnabled) { sub.animIdx = ai; sub.animEnabled = true; }
-                        else sub.animEnabled = false;
-                    }
-                    ImGui::PopID();
-                }
-            }
-            if (ImGui::SmallButton("Remove##sub")) {
-                for (int j = si; j < sp.subSpriteCount - 1; j++)
-                    sp.subSprites[j] = sp.subSprites[j + 1];
-                sp.subSpriteCount--;
-                si--;
-            }
-            ImGui::Separator();
-            ImGui::PopID();
-        }
-        if (sp.subSpriteCount < FloorSprite::kMaxSubSprites) {
-            if (ImGui::Button("+ Add Sprite##addsub"))
-                sp.subSpriteCount++;
-        }
-
-        // --- Attached Models (3D mesh layers riding the object, e.g. a charge aura) ---
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Attached Models");
-        for (int mi = 0; mi < sp.subModelCount; mi++) {
-            auto& sm = sp.subModels[mi];
-            ImGui::PushID(mi + 9000);
-            const char* mPrev = (sm.meshIdx >= 0 && sm.meshIdx < (int)sMeshAssets.size())
-                ? sMeshAssets[sm.meshIdx].name.c_str() : "(none)";
-            if (ImGui::BeginCombo("Mesh##sm", mPrev)) {
-                if (ImGui::Selectable("(none)##smnone", sm.meshIdx < 0)) sm.meshIdx = -1;
-                for (int ai = 0; ai < (int)sMeshAssets.size(); ai++)
-                    if (ImGui::Selectable(sMeshAssets[ai].name.c_str(), sm.meshIdx == ai)) sm.meshIdx = ai;
-                ImGui::EndCombo();
-            }
-#ifdef _WIN32
-            if (ImGui::Button("Import Model (OBJ)...##sm")) {
-                std::string objPath = OpenFileDialog("OBJ Files\0*.obj\0All Files\0*.*\0", "obj");
-                if (!objPath.empty()) {
-                    MeshAsset ma;
-                    if (LoadOBJ(objPath, ma)) {
-                        ma.psvColors = 128; ma.useSoftAlpha = true; ma.lit = false;  // glow aura: unlit, soft alpha
-                        if (ma.textured && !ma.texturePath.empty())  // re-process map_Kd as soft alpha
-                            LoadModelTextureSoft(ma, ma.texturePath);
-                        sm.meshIdx = (int)sMeshAssets.size();
-                        sMeshAssets.push_back(std::move(ma));
-                        sProjectDirty = true;
-                    }
-                }
-            }
-            if (sm.meshIdx >= 0 && sm.meshIdx < (int)sMeshAssets.size()) {
-                MeshAsset& mm = sMeshAssets[sm.meshIdx];
-                ImGui::SameLine();
-                if (ImGui::Button("Texture (PNG)...##sm")) {
-                    std::string tex = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
-                    if (!tex.empty()) { if (mm.psvColors <= 0) mm.psvColors = 128; LoadModelTextureSoft(mm, tex); sProjectDirty = true; }
-                }
-                int colVals[] = { 16, 32, 64, 128 }; const char* colNames[] = { "16", "32", "64", "128" };
-                int curCol = 3; for (int k = 0; k < 4; k++) if (colVals[k] == mm.psvColors) curCol = k;
-                if (ImGui::Combo("Colors##sm", &curCol, colNames, 4)) {
-                    mm.psvColors = colVals[curCol];
-                    if (!mm.texturePath.empty()) LoadModelTextureSoft(mm, mm.texturePath);
-                    sProjectDirty = true;
-                }
-                if (ImGui::Checkbox("Use Alpha (blended)##sm", &mm.useSoftAlpha)) sProjectDirty = true;
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend the texture's per-pixel alpha (soft/feathered edges) instead of a 1-bit cutout.");
-            }
-#endif
-            ImGui::DragFloat("X##sm", &sm.offsetX, 0.5f, -200.0f, 200.0f);
-            ImGui::DragFloat("Y##sm", &sm.offsetY, 0.5f, -200.0f, 200.0f);
-            ImGui::DragFloat("Z##sm", &sm.offsetZ, 0.5f, -200.0f, 200.0f);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Local placement offset. When a Bone is set below, X/Y/Z move the model RELATIVE to that bone (it rides the joint + this offset).");
-            ImGui::DragFloat("Scale##sm", &sm.scale, 0.25f, 0.05f, 400.0f, "%.2f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("World-size of the model (not tied to the object's authored scale). A rigged player needs a fairly large value to match its visible size.");
-            ImGui::DragFloat("Yaw##sm", &sm.yaw, 1.0f, -180.0f, 180.0f, "%.0f");
-            ImGui::Checkbox("Grounded##sm", &sm.grounded);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
-            ImGui::Checkbox("Hidden (effect)##sm", &sm.hidden);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible IN-GAME; a Cast Effect node reveals it (for a charge aura, etc.)");
-            ImGui::Checkbox("Hide in editor##sm", &sm.editorHide);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hide this model in the EDITOR preview only (declutter while authoring). Still shows in-game.");
-            // Bone attach (player rig): ride a rig joint; X/Y/Z become bone-relative.
-            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
-                && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
-                const auto& bn = sRiggedMeshAssets[sp.riggedMeshIdx].boneNames;
-                const char* bonePrev = (sm.boneIdx >= 0 && sm.boneIdx < (int)bn.size())
-                    ? bn[sm.boneIdx].c_str() : "(none - anchor to origin)";
-                if (ImGui::BeginCombo("Bone##sm", bonePrev)) {
-                    if (ImGui::Selectable("(none - anchor to origin)##smbnone", sm.boneIdx < 0)) sm.boneIdx = -1;
-                    for (int bi = 0; bi < (int)bn.size(); bi++) {
-                        std::string lbl = bn[bi] + "##smb";
-                        if (ImGui::Selectable(lbl.c_str(), sm.boneIdx == bi)) sm.boneIdx = bi;
-                    }
-                    ImGui::EndCombo();
-                }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the model rides that joint. X/Y/Z become offsets from the bone. Player rig only for now.");
-            }
-            if (ImGui::SmallButton("Remove##sm")) {
-                for (int j = mi; j < sp.subModelCount - 1; j++) sp.subModels[j] = sp.subModels[j + 1];
-                sp.subModelCount--; mi--;
-            }
-            ImGui::Separator();
-            ImGui::PopID();
-        }
-        if (sp.subModelCount < FloorSprite::kMaxSubModels) {
-            if (ImGui::Button("+ Add Model##addsm")) sp.subModelCount++;
-        }
+        DrawAttachedChunk(sp);
 
         ImGui::PopItemWidth();
 
@@ -20376,7 +20395,11 @@ void FrameTick(float dt)
                 for (const auto& ma : sMeshAssets)
                 {
                     AfnMeshExport me;
-                    me.hasVertexColor = ma.hasVertexColor ? 1 : 0;
+                    // "Ignore Vertex Colors" toggle: treat the mesh as having none,
+                    // so the exporter modulates the texture with white (or the flat
+                    // colorRGB15 when untextured) instead of a black/placeholder layer.
+                    bool useVertColor = ma.hasVertexColor && !ma.ignoreVertexColor;
+                    me.hasVertexColor = useVertColor ? 1 : 0;
                     // OBJ 2.0 light rig -> IR (energy folds in the editor's Light
                     // Intensity multiplier; PSV exporter world-places per instance).
                     for (const auto& L : ma.lights)
@@ -20472,7 +20495,7 @@ void FrameTick(float dt)
                             me.vertexColors.push_back(to8(lr));
                             me.vertexColors.push_back(to8(lg));
                             me.vertexColors.push_back(to8(lb));
-                        } else if (ma.hasVertexColor) {
+                        } else if (useVertColor) {
                             me.vertexColors.push_back(to8(v.r));
                             me.vertexColors.push_back(to8(v.g));
                             me.vertexColors.push_back(to8(v.b));
@@ -39392,7 +39415,7 @@ void Render3DViewport()
             // OBJ 2.0 per-vertex colors: when present, drive the color from each
             // vertex (untextured = lit vertex color; textured = modulates the
             // texture, matching the runtime which always emits vertex color).
-            bool vcol = ma.hasVertexColor && !wf && !s3DHideVertexColors;
+            bool vcol = ma.hasVertexColor && !ma.ignoreVertexColor && !wf && !s3DHideVertexColors;
             if (vcol) {
                 glEnable(GL_COLOR_MATERIAL);
                 glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);

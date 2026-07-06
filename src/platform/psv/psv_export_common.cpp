@@ -119,7 +119,15 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             unsigned int col;
             if (m.hasVertexColor && (int)m.vertexColors.size() >= (v + 1) * 3) {
                 unsigned r = m.vertexColors[v*3+0], g = m.vertexColors[v*3+1], b = m.vertexColors[v*3+2];
-                col = 0xFF000000u | (b << 16) | (g << 8) | r;
+                // A pure-BLACK vertex color on a TEXTURED mesh modulates the
+                // texture to black (invisible) — never intentional. Blender's OBJ
+                // export writes "0 0 0" as a placeholder when a mesh has a color
+                // attribute but no real paint (e.g. the pokeball prop). Fall back
+                // to white so the texture shows unchanged.
+                if (hasTex && r == 0 && g == 0 && b == 0)
+                    col = 0xFFFFFFFFu;
+                else
+                    col = 0xFF000000u | (b << 16) | (g << 8) | r;
             } else if (hasTex) {
                 col = 0xFFFFFFFFu;   // modulate texture unchanged
             } else {

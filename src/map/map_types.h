@@ -315,6 +315,9 @@ struct MeshAsset
     std::vector<uint8_t> texAlpha;            // per-pixel alpha plane (texW*texH) when useSoftAlpha
     int  psvColors = 0;                       // 0 = legacy 16/256 path (texture256); >0 = quantize to N
                                               // colors sprite-style (attached models default to 128)
+    bool ignoreVertexColor = false;           // export/preview: drop the mesh's per-vertex colors and
+                                              // modulate the texture with white. Rescues OBJs whose
+                                              // color layer is black (Blender placeholder) -> black mesh.
     unsigned int glTexID = 0;                 // OpenGL texture for editor preview
     bool texFiltered = false;                 // true = GL_LINEAR, false = GL_NEAREST
     bool texInIwram = false;                  // true = copy this texture into the IWRAM cache at boot (faster ldrb, shared 4KB budget)
