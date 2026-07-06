@@ -843,6 +843,9 @@ static bool GenerateSharedRigData(const std::string& runtimeDir, const char* hdr
     f << "static const unsigned char afn_rig_clip_loop[" << cc << "] = {";
     for (int c = 0; c < cc; c++) f << (rig.clips[c].loop ? 1 : 0) << ",";
     f << "};\n";
+    f << "static const float afn_rig_clip_speed[" << cc << "] = {";
+    for (int c = 0; c < cc; c++) f << Flt(rig.clips[c].speed) << ",";
+    f << "};\n";
 
     // ---- NPC instances ----
     // Rigged sprites that aren't the player and reuse THIS rig asset. Columns:

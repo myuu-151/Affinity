@@ -1,8 +1,9 @@
 // glTF / GLB skinned-mesh loader. See rigged_gltf.h.
 //
-// Port of dsma-library/tools/gltf_to_dsma.py into C++ using cgltf. DSMA does
-// RIGID skinning (one bone per vertex, bone matrix in the DS matrix stack), so
-// multi-weight vertices are collapsed to their dominant bone. Vertex positions
+// Port of dsma-library/tools/gltf_to_dsma.py into C++ using cgltf. Does RIGID
+// skinning (one bone per vertex), so multi-weight vertices are collapsed to
+// their dominant bone. The PSV/PSP runtime CPU-skins (no DS matrix stack); bone
+// count is limited only by the 8-bit per-vertex index (<=255). Vertex positions
 // are stored in their bone's LOCAL space (IBM * pos); bind pose and per-frame
 // bone transforms are ABSOLUTE (hierarchy composed) — matching the converter so
 // the editor preview and the on-device DSMA render agree.
@@ -244,7 +245,9 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
     cgltf_skin* skin = meshNode->skin;
     cgltf_mesh* mesh = meshNode->mesh;
     int boneCount = (int)skin->joints_count;
-    if (boneCount > 29) { cgltf_free(data); return fail("Skin exceeds 29-bone DS matrix-stack limit"); }
+    // The PSV/PSP runtime CPU-skins (no DS matrix stack), so the only real
+    // limit is the per-vertex bone index being an unsigned char (<=255).
+    if (boneCount > 255) { cgltf_free(data); return fail("Skin exceeds 255-bone limit (bone index is 8-bit)"); }
     if (boneCount == 0) { cgltf_free(data); return fail("Skin has no joints"); }
 
     out = RiggedMeshAsset();

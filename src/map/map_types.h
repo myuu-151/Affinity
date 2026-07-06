@@ -351,10 +351,11 @@ static constexpr int kMaxMeshAssets = 32;
 
 // ---------------------------------------------------------------------------
 // Rigged (skinned) mesh — DSMA skeletal animation imported from glTF/GLB.
-// DSMA uses RIGID skinning: each vertex is bound to a single bone and the bone
-// matrix lives in the DS matrix stack (<=29 bones). Vertex positions are stored
-// in their bone's local space; bone transforms (bind pose + per-frame) are
-// absolute (hierarchy already composed), matching tools/gltf_to_dsma.py.
+// RIGID skinning: each vertex is bound to a single bone. The PSV/PSP runtime
+// CPU-skins per instance, so bone count is only capped by the 8-bit per-vertex
+// bone index (<=255) — the old <=29 DS matrix-stack limit is retired. Vertex
+// positions are stored in their bone's local space; bone transforms (bind pose
+// + per-frame) are absolute (hierarchy already composed), per tools/gltf_to_dsma.py.
 // ---------------------------------------------------------------------------
 
 // A bone transform: translation + unit quaternion (no scale — DSMA has none).
@@ -372,6 +373,7 @@ struct RigAnimClip
     int frameCount = 0;
     std::vector<BonePose> frames;
     bool loop = true;   // true = loop, false = play once then hold last frame
+    float speed = 1.0f; // playback rate multiplier (0..2, 1 = authored fps) — driven at runtime
 };
 
 struct RiggedMeshAsset

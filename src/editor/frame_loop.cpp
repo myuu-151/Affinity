@@ -8063,7 +8063,8 @@ static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
     float colC[3] = { rm.colCenter[0], rm.colCenter[1], rm.colCenter[2] };
     float colE[3] = { rm.colExtents[0], rm.colExtents[1], rm.colExtents[2] };
     std::map<std::string, bool> clipLoop;            // by clip name
-    for (const auto& c : rm.clips) clipLoop[c.name] = c.loop;
+    std::map<std::string, float> clipSpeed;          // by clip name
+    for (const auto& c : rm.clips) { clipLoop[c.name] = c.loop; clipSpeed[c.name] = c.speed; }
     std::vector<std::string> oldClipNames;           // by OLD index (for sprite clip-slot remap)
     for (const auto& c : rm.clips) oldClipNames.push_back(c.name);
     int rigIdx = (int)(&rm - sRiggedMeshAssets.data());   // this rig's slot index
@@ -8098,8 +8099,11 @@ static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
     tmp.cullMode = cullMode; tmp.lightX = lightX; tmp.lightY = lightY; tmp.yawOffset = yawOffset;
     tmp.collisionType = colType;
     for (int i = 0; i < 3; i++) { tmp.colCenter[i] = colC[i]; tmp.colExtents[i] = colE[i]; }
-    // restore per-clip loop (by name; new clips keep the glTF default)
-    for (auto& c : tmp.clips) { auto it = clipLoop.find(c.name); if (it != clipLoop.end()) c.loop = it->second; }
+    // restore per-clip loop + speed (by name; new clips keep the glTF default)
+    for (auto& c : tmp.clips) {
+        auto it = clipLoop.find(c.name); if (it != clipLoop.end()) c.loop = it->second;
+        auto is = clipSpeed.find(c.name); if (is != clipSpeed.end()) c.speed = is->second;
+    }
     // restore per-material wrap + manually-assigned textures (by name)
     for (int s = 0; s < tmp.matCount(); s++) {
         auto it = matByName.find(tmp.matName(s));
@@ -8540,6 +8544,13 @@ static bool SaveProject(const std::string& path)
                 loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY,
                 rmA.collisionType, rmA.colCenter[0], rmA.colCenter[1], rmA.colCenter[2],
                 rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2], rmA.yawOffset);
+        // Per-clip playback speed (comma list) — clips re-import on load, so like
+        // loopBits this user setting is serialized and re-applied by clip name.
+        {
+            std::string spds;
+            for (const auto& cl : rmA.clips) { char b[16]; snprintf(b, sizeof(b), "%.2f,", cl.speed); spds += b; }
+            if (!spds.empty()) fprintf(f, "rigClipSpeed=%d|%s\n", ri, spds.c_str());
+        }
         // Per-slot manual textures for material slots 1+ (slot 0 is field 4 above).
         // Clips/materials are re-imported from the glTF, so only manual PNG paths
         // need serializing. Format: rigMatTex=<rigIdx>|<slot>|<path>
@@ -10153,6 +10164,24 @@ static bool LoadProject(const std::string& path)
                 if (mwRig >= 0 && mwRig < (int)sRiggedMeshAssets.size() &&
                     mwSlot >= 0 && mwSlot < sRiggedMeshAssets[mwRig].matCount())
                     sRiggedMeshAssets[mwRig].setMatWrap(mwSlot, mwMode);
+                continue;
+            }
+            // Per-clip playback speed (rig already pushed above); comma list by clip index.
+            int csRig = -1; char csList[512] = {};
+            if (sscanf(line, "rigClipSpeed=%d|%511[^\n]", &csRig, csList) == 2) {
+                if (csRig >= 0 && csRig < (int)sRiggedMeshAssets.size()) {
+                    auto& csClips = sRiggedMeshAssets[csRig].clips;
+                    const char* p = csList; size_t ci = 0;
+                    while (*p && ci < csClips.size()) {
+                        float sv = 1.0f;
+                        if (sscanf(p, "%f", &sv) == 1) {
+                            if (sv < 0.0f) sv = 0.0f; if (sv > 2.0f) sv = 2.0f;
+                            csClips[ci].speed = sv;
+                        }
+                        ci++;
+                        const char* comma = strchr(p, ','); if (!comma) break; p = comma + 1;
+                    }
+                }
                 continue;
             }
             // count= is informational; rig= lines load sequentially. A failed
@@ -17859,11 +17888,23 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                             sProjectDirty = true;
                         }
                         ImGui::SameLine();
-                        if (ImGui::Selectable(lbl, sel)) {
+                        // Clip name (fixed width so the speed slider fits to its right).
+                        float rowAvail = ImGui::GetContentRegionAvail().x;
+                        float spdW = 110.0f;
+                        float selW = rowAvail - spdW - 8.0f; if (selW < 70.0f) selW = 70.0f;
+                        if (ImGui::Selectable(lbl, sel, 0, ImVec2(selW, 0))) {
                             sp.rigAnimIdx = ci;
                             sp.rigAnimClock = 0.0f;
                             sProjectDirty = true;
                         }
+                        // Per-clip playback SPEED (0..2, 1 = authored fps) — exported and
+                        // applied at runtime so each clip plays faster/slower/frozen.
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(spdW);
+                        if (ImGui::SliderFloat("##rigspeed", &rm.clips[ci].speed, 0.0f, 2.0f, "x%.2f"))
+                            sProjectDirty = true;
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Playback speed for this clip (0 = frozen, 1 = normal, 2 = double). Drives the runtime.");
                         ImGui::PopID();
                     }
                     RigAnimClip& clip = rm.clips[sp.rigAnimIdx];
@@ -21764,7 +21805,7 @@ void FrameTick(float dt)
                     }
                     for (const auto& c : rm.clips) {
                         Affinity::AfnRigClip pc;
-                        pc.name = c.name; pc.frameCount = c.frameCount; pc.loop = c.loop;
+                        pc.name = c.name; pc.frameCount = c.frameCount; pc.loop = c.loop; pc.speed = c.speed;
                         pc.frames.resize(c.frames.size());
                         for (size_t i = 0; i < c.frames.size(); i++) {
                             const auto& bp = c.frames[i];
@@ -23441,7 +23482,7 @@ void FrameTick(float dt)
             const RigAnimClip& clip = rm.clips[rsp.rigAnimIdx];
             int fc = clip.frameCount;
             if (fc <= 1) continue;
-            rsp.rigAnimClock += dt * 24.0f;
+            rsp.rigAnimClock += dt * 24.0f * clip.speed;   // per-clip speed slider
             if (clip.loop) {
                 while (rsp.rigAnimClock >= (float)fc) rsp.rigAnimClock -= (float)fc;
             } else if (rsp.rigAnimClock > (float)(fc - 1)) {

@@ -14,6 +14,7 @@
 
 #ifndef AFN_HAS_SOUND
 // Project has no audio — keep the entry points defined so main.c / script link.
+int  afn_sfx_protect_voice = -1;   // main.c references this unconditionally
 void afn_audio_init(void) {}
 void afn_audio_tick(void) {}
 void afn_play_sound(int id, int link) { (void)id; (void)link; }

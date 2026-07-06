@@ -431,6 +431,12 @@ int afn_clash_ai_jit = 1, afn_clash_fumble_pct = 1, afn_clash_fumble_len = 6;
 int afn_clash_punish_pct = 0, afn_clash_punish_len = 4;
 static int s_clashPunishLeft = 0;   // fast-press presses remaining in the current burst
 void afn_clash_suppress_beams(void);     // fwd (defined below) — node SuppressBeams / ClashBegin
+// The real body is guarded by AFN_HAS_HUD && AFN_HAS_PLAYER_RIG && AFN_HAS_SPRITE_IDX,
+// but it's called under just AFN_HAS_PLAYER_RIG — provide a no-op when the combat
+// clash HUD isn't compiled in (no beams to suppress).
+#if !(defined(AFN_HAS_HUD) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX))
+void afn_clash_suppress_beams(void) {}
+#endif
 void afn_clash_begin(void);              // fwd — node ClashBegin
 void afn_clash_ai_step(void);            // fwd — node ClashAiStep
 static float s_enemyBoneW[AFN_RIG_MAX_BONES][3] = {{0}};   // enemy NPC bones in WORLD (orb muzzle anchor)
@@ -522,7 +528,9 @@ static void rig_init(void) {
 }
 // Advance an animation frame for rig R's clip.
 static float rig_advance(const AfnRig* R, int clip, float frame) {
-    frame += 0.4f;
+    // Per-clip speed multiplier (editor slider, 0..2): scales the base advance.
+    float spd = R->clipspeed ? R->clipspeed[clip] : 1.0f;
+    frame += 0.4f * spd;
     int nf = R->clipframes[clip];
     if (nf > 1) {
         if (R->cliploop[clip]) { while (frame >= (float)nf) frame -= (float)nf; }
@@ -2052,7 +2060,11 @@ typedef struct { int tex; float x, y, w, h, tox, toy, tow, toh; } AfnXfadePiece;
 #define AFN_XFADE_MAX 12
 AfnXfadePiece afn_xfade[AFN_XFADE_MAX];
 int afn_xfade_count = 0, afn_xfade_counter = 0, afn_xfade_frames = 0;
+#ifdef AFN_HAS_HUD
 static int afn_snapshot_xfade(void);   // defined below (needs HUD globals)
+#else
+static int afn_snapshot_xfade(void) { return 0; }   // no HUD -> no crossfade pieces
+#endif
 
 void afn_scene_start_transition(int scene, int mode, int frames) {
     afn_scene_pending = scene; afn_scene_pending_mode = mode;
@@ -2382,8 +2394,13 @@ static void afn_particles_render(const float* view) {
         unsigned int b = p->b0 + (int)((p->b1 - p->b0) * age), a = p->a0 + (int)((p->a1 - p->a0) * age);
         unsigned int col = (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16) | ((a & 0xFF) << 24);
         if (p->blend != curBlend) { glBlendFunc(GL_SRC_ALPHA, p->blend ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA); curBlend = p->blend; }
+#ifdef AFN_HAS_SPRITES
         if (p->frame >= 0) { if (texOn != 1) { glEnable(GL_TEXTURE_2D); texOn = 1; } GLuint tx = s_sprTex[p->frame]; if (tx != curTex) { glBindTexture(GL_TEXTURE_2D, tx); curTex = tx; } }
         else if (texOn != 0) { glDisable(GL_TEXTURE_2D); texOn = 0; }
+#else
+        // no sprite atlas in this build -> particles are always untextured
+        if (texOn != 0) { glDisable(GL_TEXTURE_2D); texOn = 0; }
+#endif
         float cx = p->x, cy = p->y, cz = p->z;
         AfnVertex q[4] = {
             { 0,0, col, cx - Rwx*hw + Uwx*hh, cy - Rwy*hw + Uwy*hh, cz - Rwz*hw + Uwz*hh },

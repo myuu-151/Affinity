@@ -224,6 +224,9 @@ static void EmitRigArrays(std::ofstream& f, int ru, const AfnRigExport& rig) {
     f << "};\n";
     f << "static const unsigned char " << S << "clip_loop[" << cc << "] = {";
     for (int c = 0; c < cc; c++) f << (rig.clips[c].loop ? 1 : 0) << ",";
+    f << "};\n";
+    f << "static const float " << S << "clip_speed[" << cc << "] = {";
+    for (int c = 0; c < cc; c++) f << PFlt(rig.clips[c].speed) << ",";
     f << "};\n\n";
 }
 
@@ -301,7 +304,7 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
           << PFlt(rig.yawOffset * 3.14159265f / 180.0f) << ", "   // model yaw correction (rad)
           << S << "vpos, " << S << "vnorm, " << S << "vuv, " << S << "vbone, "
           << S << "idx_ptrs, " << S << "idx_counts, " << S << "tex_ptrs, " << S << "tex_w, " << S << "tex_h, "
-          << S << "clip_ptrs, " << S << "clip_frames, " << S << "clip_loop },\n";
+          << S << "clip_ptrs, " << S << "clip_frames, " << S << "clip_loop, " << S << "clip_speed },\n";
     }
     f << "};\n\n";
 

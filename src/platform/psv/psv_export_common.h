@@ -29,6 +29,7 @@ struct AfnRigClip {
     std::string name;
     int  frameCount = 0;
     bool loop = true;
+    float speed = 1.0f;                    // playback rate multiplier (0..2), runtime-applied
     std::vector<AfnRigBonePose> frames;   // flattened [frame*boneCount + bone]
 };
 struct AfnRigMaterial {

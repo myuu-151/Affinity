@@ -43,6 +43,7 @@ typedef struct {
     const float*          const* clip;       // [clips] flattened {px,py,pz,qw,qx,qy,qz}
     const int*                   clipframes; // [clips]
     const unsigned char*         cliploop;   // [clips]
+    const float*                 clipspeed;  // [clips] playback rate multiplier (0..2, 1 = normal)
 } AfnRig;
 
 // A static scene mesh (level chunk, prop). One draw per referencing instance.
