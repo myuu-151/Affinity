@@ -7720,6 +7720,59 @@ int main(void)
         sky_render(camAngle);   // far panorama behind everything (no depth write)
 #endif
 
+        // ---- Sky pass ----
+        // Imported sky spheres/domes are often far bigger than the scene far plane
+        // (far=1500 above). Their far wall gets FRUSTUM-CLIPPED into a black void
+        // (dark clear color) dead-ahead, with only the shallower-depth edges left
+        // blue. Fix: draw any mesh whose world bounding radius exceeds the far plane
+        // FIRST, with a huge far plane and depth-write OFF, so it never clips and the
+        // normal-far scene below paints right over it (classic skybox pass).
+        static float* s_meshLocalRad = 0;
+        if (!s_meshLocalRad && afn_mesh_count > 0) {
+            s_meshLocalRad = (float*)malloc(sizeof(float) * afn_mesh_count);
+            for (int m = 0; m < afn_mesh_count; m++) {
+                const AfnMesh* M = &afn_meshes[m];
+                float r2 = 0.0f;
+                for (int vi = 0; vi < M->vertCount; vi++) {
+                    const AfnVertex* vv = &M->verts[vi];
+                    float d = vv->x*vv->x + vv->y*vv->y + vv->z*vv->z;
+                    if (d > r2) r2 = d;
+                }
+                s_meshLocalRad[m] = sqrtf(r2);
+            }
+        }
+        {
+            const float snear = 1.0f, stop = snear*0.767f, sasp = SCR_W/SCR_H, sright = stop*sasp;
+            int anySky = 0;
+            if (s_meshLocalRad) for (int si = 0; si < afn_sprite_count; si++) {
+                int mi = afn_sprites[si].meshIdx;
+                if (mi >= 0 && mi < afn_mesh_count && s_meshLocalRad[mi]*afn_sprites[si].scale > 1500.0f) { anySky = 1; break; }
+            }
+            if (anySky) {
+                glMatrixMode(GL_PROJECTION); glLoadIdentity();
+                glFrustum(-sright, sright, -stop, stop, snear, 60000.0f);
+                glMatrixMode(GL_MODELVIEW);
+                glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
+                for (int si = 0; si < afn_sprite_count; si++) {
+                    int mi = afn_sprites[si].meshIdx;
+                    if (mi < 0 || mi >= afn_mesh_count) continue;
+                    if (s_meshLocalRad[mi]*afn_sprites[si].scale <= 1500.0f) continue;
+                    const AfnSpriteInst* sp = &afn_sprites[si];
+                    glLoadMatrixf(view);
+                    glTranslatef(sp->x, sp->y, sp->z);
+                    if (sp->rotZ != 0.0f) glRotatef(sp->rotZ, 0,0,1);
+                    if (sp->rotX != 0.0f) glRotatef(sp->rotX, 1,0,0);
+                    if (sp->rotY != 0.0f) glRotatef(sp->rotY, 0,1,0);
+                    glScalef(sp->scale, sp->scale, sp->scale);
+                    draw_mesh(mi);
+                }
+                glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
+                glMatrixMode(GL_PROJECTION); glLoadIdentity();
+                glFrustum(-sright, sright, -stop, stop, snear, 1500.0f);   // restore scene far
+                glMatrixMode(GL_MODELVIEW);
+            }
+        }
+
         // Intersecting/coplanar level meshes (floor vs slope) shimmer on PSV
         // but not NDS/PSP: those consoles' coarse fixed-point depth quantizes
         // two faces in the same plane to EQUAL values, so LEQUAL resolves to a
@@ -7738,6 +7791,7 @@ int main(void)
         for (int si = 0; si < afn_sprite_count; si++) {
             int mi = afn_sprites[si].meshIdx;
             if (mi < 0 || mi >= afn_mesh_count) continue;
+            if (s_meshLocalRad && s_meshLocalRad[mi]*afn_sprites[si].scale > 1500.0f) continue;  // sky mesh — drawn in the sky pass above
 #ifdef AFN_HAS_SPRITE_IDX
             int eidx = afn_mesh_inst_sprite[si];
             if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed

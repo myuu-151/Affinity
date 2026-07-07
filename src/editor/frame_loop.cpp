@@ -9406,8 +9406,22 @@ static bool SaveProject(const std::string& path)
     // right before serializing. Paint tools update sPackedAssets themselves, but
     // this guarantees WYSIWYG saving even for any path that edits the mesh in
     // place without persisting — so a fresh paint always survives reload.
-    for (size_t mi = 0; mi < sMeshAssets.size(); mi++)
+    for (size_t mi = 0; mi < sMeshAssets.size(); mi++) {
+        const MeshAsset& m = sMeshAssets[mi];
+        // Skip (and clear) meshes whose vertex colors are ALL (near) black: that's
+        // the "Blender baked a black vcol layer" artifact the exporter auto-whitens,
+        // NOT intentional paint. Persisting it would force the mesh black on reload
+        // (e.g. a textured Poké Ball turning into a black sphere in the editor).
+        bool allBlack = m.hasVertexColor && !m.vertices.empty();
+        for (const MeshVertex& v : m.vertices)
+            if (v.r > 0.02f || v.g > 0.02f || v.b > 0.02f) { allBlack = false; break; }
+        if (allBlack) {
+            char vk[64]; snprintf(vk, sizeof(vk), "(vcol:%d)", (int)mi);
+            sPackedAssets.erase(vk);
+            continue;
+        }
         PersistMeshVertexColors(sMeshAssets[mi], (int)mi);
+    }
 
     // ---- Packed assets (chunked base64 to stay under LoadProject's line buffer) ----
     if (!sPackedAssets.empty()) {
