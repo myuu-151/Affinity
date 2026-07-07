@@ -101,6 +101,10 @@ typedef struct {
     const unsigned char* const*  lmgAo;       // [lmgCount] grayscale AO (0 = none)
     const int*                   lmgAoW;
     const int*                   lmgAoH;
+    // Editor "Collision" checkbox. 1 = this mesh contributes floor/wall collision
+    // faces; 0 = walk-through (grass, flowers, decorative props). Read by
+    // collide_build(): a 0 mesh is skipped entirely.
+    int                          collision;
 } AfnMesh;
 
 // A static scene light (OBJ 2.0 "#light"/"#sun" lines, exporter-placed in world

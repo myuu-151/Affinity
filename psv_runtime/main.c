@@ -1066,8 +1066,24 @@ static void draw_mesh(int mi)
     // exporter's cullMode (back/front/none) is intentionally ignored here.
     glDisable(GL_CULL_FACE);
 
-    if (m->texHasAlpha || m->blend) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
-    else glDisable(GL_BLEND);
+    // Alpha handling:
+    //  - soft-alpha meshes (attached models, m->blend): plain translucent blend.
+    //  - cutout textures (foliage, m->texHasAlpha): ALPHA-TEST discard so the
+    //    see-through texels never write depth. Without this, the transparent part
+    //    of a near grass card still writes the depth buffer, and any grass/geometry
+    //    behind those pixels fails the depth test and vanishes ("alpha cutting into
+    //    geometry beyond it"). Blend stays on for soft edges; depth-write stays on
+    //    so no back-to-front sort is needed.
+    if (m->blend) {
+        glDisable(GL_ALPHA_TEST);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else if (m->texHasAlpha) {
+        glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        glDisable(GL_ALPHA_TEST);
+        glDisable(GL_BLEND);
+    }
 
 #ifdef AFN_HAS_LIGHTS
     // Scene lights: real vitaGL GL_LIGHTING. lights_setup() already loaded the
@@ -1202,6 +1218,7 @@ static void draw_mesh(int mi)
         }
     }
 
+    glDisable(GL_ALPHA_TEST);   // don't leak the cutout test into sprite/rig/effect draws
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
@@ -1523,6 +1540,7 @@ static void collide_build(void) {
     for (int si = 0; si < afn_sprite_count; si++) {
         int mi = afn_sprites[si].meshIdx;
         if (mi < 0 || mi >= afn_mesh_count) continue;
+        if (!afn_meshes[mi].collision) continue;   // "Collision" off -> no collision faces
         total += afn_meshes[mi].indexCount / 3;
     }
     if (total <= 0) return;
@@ -1533,6 +1551,7 @@ static void collide_build(void) {
         const AfnSpriteInst* sp = &afn_sprites[si];
         int mi = sp->meshIdx;
         if (mi < 0 || mi >= afn_mesh_count) continue;
+        if (!afn_meshes[mi].collision) continue;   // "Collision" off -> walk-through
         const AfnMesh* m = &afn_meshes[mi];
         const AfnVertex* V = m->verts;
         const unsigned short* I = m->indices;
@@ -4280,6 +4299,48 @@ void afn_reticle_render(const float* view, float px, float py, float pz, float y
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
+// ============================================================================
+// HARDCODED PROTOTYPE — "throw a pokeball" (aim an arc + floor reticle, play the
+// pitch anim, the ball leaves the hand mid-throw, flies the arc, and despawns on
+// the floor). Reuses the bone-attached sub-model (the hand pokeball), the reticle
+// node renderer (afn_reticle_*), and the player clip-hold path (s_playerClipHold).
+// Migrate to nodes later (feedback_hardcode_first). Controls:
+//   hold R  = aim   (L-stick X = turn aim, L-stick Y = throw distance)
+//   release = throw
+// Gated so a scene without an attached model / player rig is unaffected.
+// ============================================================================
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
+#define AFN_PB_AIM_KEY      KEY_R        // hold to aim, release to throw
+#define AFN_PB_PITCH_CLIP   2            // "pitch" (rig clips alphabetical: hurl0 idle1 pitch2 pokeball_idle3 run4 tpos5 walk6)
+#define AFN_PB_RELEASE_FRAC 0.42f        // ball leaves the hand at this fraction of the pitch clip
+#define AFN_PB_DIST_MIN     18.0f
+#define AFN_PB_DIST_MAX     150.0f
+#define AFN_PB_DIST_DEF     70.0f
+#define AFN_PB_YAW_RATE     2.4f         // deg/frame aim turn (L-stick X)
+#define AFN_PB_DIST_RATE    2.0f         // units/frame aim distance (L-stick Y)
+#define AFN_PB_SPEED        3.4f         // ball ground units advanced per frame
+#define AFN_PB_ARC_K        0.42f        // arc peak height = K * ground distance
+#define AFN_PB_COOLDOWN     30           // frames the hand stays empty after a landing
+
+enum { PB_IDLE = 0, PB_AIM, PB_WINDUP, PB_FLY, PB_COOL };
+static int   s_pb_state = PB_IDLE;
+static int   s_pb_init  = 0;
+static int   s_pb_si = -1, s_pb_bone = -1, s_pb_eidx = -1, s_pb_mi = -1;
+static float s_pb_scale = 1.0f;
+static float s_pb_yaw = 0.0f, s_pb_dist = AFN_PB_DIST_DEF;
+static float s_pb_p0[3] = {0}, s_pb_land[3] = {0}, s_pb_arcH = 0.0f;
+static float s_pb_t = 0.0f, s_pb_flightLen = 1.0f, s_pb_spin = 0.0f;
+static int   s_pb_cool = 0;
+
+// Parabolic arc point p0 -> land, peak height h, param t in [0,1]. The SAME curve
+// drives the aim preview and the ball in flight, so they match exactly.
+static void afn_pb_arc(const float* p0, const float* land, float h, float t, float* out) {
+    out[0] = p0[0] + (land[0] - p0[0]) * t;
+    out[2] = p0[2] + (land[2] - p0[2]) * t;
+    out[1] = p0[1] + (land[1] - p0[1]) * t + h * 4.0f * t * (1.0f - t);
+}
+#endif
+
 #ifdef AFN_HAS_FX
 // Spawn one authored effect LAYER at the player. kind 0 = particle burst (its emitter
 // params), kind 1 = lightning bolt that follows the layer's authored spline
@@ -6036,6 +6097,79 @@ int main(void)
         afn_charging_up = 0;   // ChargeUp node re-asserts this each frame it runs (held)
         afn_lock_functions = 0;   // Lock Player Functions node re-asserts each frame it runs (the held-mask above already consumed last frame's value)
         script_tick();   // runs even while paused (HUD upkeep); AI + projectiles self-gate on afn_paused, freeze block (below) zeros player actions
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
+        // HARDCODED pokeball throw — state machine (see the block near afn_reticle_render).
+        // Runs before the freeze block so aiming/throwing can freeze player translation.
+        {
+            if (!s_pb_init) {   // one-time: locate the hand-attached ball mesh instance
+                s_pb_init = 1;
+                for (int i = 0; i < afn_sprite_count; i++)
+                    if (afn_mesh_inst_bone[i] >= 0) {
+                        s_pb_si = i; s_pb_bone = afn_mesh_inst_bone[i];
+                        s_pb_eidx = afn_mesh_inst_sprite[i]; s_pb_mi = afn_sprites[i].meshIdx;
+                        s_pb_scale = afn_sprites[i].scale; break;
+                    }
+                s_pb_yaw = playerYaw;
+            }
+            if (s_pb_si >= 0 && !afn_paused && !afn_lock_functions) {
+                const AfnRig* PBR = &afn_rigs[AFN_PLAYER_RIG_SLOT];
+                float pitchLast = (AFN_PB_PITCH_CLIP < PBR->clips) ? (float)(PBR->clipframes[AFN_PB_PITCH_CLIP] - 1) : 1.0f;
+                int aimHeld = key_is_down(AFN_PB_AIM_KEY);
+
+                if (s_pb_state == PB_IDLE && key_hit(AFN_PB_AIM_KEY)) {
+                    s_pb_state = PB_AIM; s_pb_yaw = playerYaw; s_pb_dist = AFN_PB_DIST_DEF;
+                }
+                if (s_pb_state == PB_AIM) {
+                    if (key_is_down(KEY_LSTICK_LEFT))  s_pb_yaw  += AFN_PB_YAW_RATE;  // inverted L/R
+                    if (key_is_down(KEY_LSTICK_RIGHT)) s_pb_yaw  -= AFN_PB_YAW_RATE;
+                    if (key_is_down(KEY_LSTICK_UP))    s_pb_dist += AFN_PB_DIST_RATE;
+                    if (key_is_down(KEY_LSTICK_DOWN))  s_pb_dist -= AFN_PB_DIST_RATE;
+                    if (s_pb_dist < AFN_PB_DIST_MIN) s_pb_dist = AFN_PB_DIST_MIN;
+                    if (s_pb_dist > AFN_PB_DIST_MAX) s_pb_dist = AFN_PB_DIST_MAX;
+                    playerYaw = s_pb_yaw;                                   // face the aim
+                    afn_reticle_show = 1; afn_reticle_dist = (int)s_pb_dist; // floor reticle at the landing spot (reticle node renderer)
+                    afn_reticle_size = 4.5f; afn_reticle_col = 0x00FFFFFFu;  // white
+                    if (!aimHeld) {                                          // released -> throw
+                        s_pb_state = PB_WINDUP;
+                        s_playerClipHold = 1; s_playerHoldClip = AFN_PB_PITCH_CLIP; s_pframe = 0.0f;
+                    }
+                }
+                if (s_pb_state == PB_WINDUP) {
+                    playerYaw = s_pb_yaw;
+                    if (s_pframe >= pitchLast * AFN_PB_RELEASE_FRAC) {
+                        // Launch: origin = hand joint (cached last frame), landing = player + aim*dist on the floor.
+                        float yr = s_pb_yaw * (3.14159265f/180.0f);
+                        s_pb_p0[0] = s_player_bone_world[s_pb_bone][0];
+                        s_pb_p0[1] = s_player_bone_world[s_pb_bone][1];
+                        s_pb_p0[2] = s_player_bone_world[s_pb_bone][2];
+                        s_pb_land[0] = playerX + sinf(yr) * s_pb_dist;
+                        s_pb_land[1] = playerY;
+                        s_pb_land[2] = playerZ + cosf(yr) * s_pb_dist;
+                        float ddx = s_pb_land[0] - s_pb_p0[0], ddz = s_pb_land[2] - s_pb_p0[2];
+                        float gd = sqrtf(ddx*ddx + ddz*ddz); if (gd < 1.0f) gd = 1.0f;
+                        s_pb_arcH = gd * AFN_PB_ARC_K; s_pb_flightLen = gd; s_pb_t = 0.0f;
+                        afn_sprite_visible[s_pb_eidx] = 0;                   // ball leaves the hand
+                        s_pb_state = PB_FLY;
+                    }
+                }
+                if (s_pb_state == PB_FLY) {
+                    if (s_pframe >= pitchLast - 0.01f) s_playerClipHold = 0; // throw anim done -> let idle resume
+                    else playerYaw = s_pb_yaw;
+                    s_pb_t += AFN_PB_SPEED / s_pb_flightLen;
+                    s_pb_spin += 0.6f;
+                    if (s_pb_t >= 1.0f) {                                    // hit the floor -> despawn
+                        s_pb_t = 1.0f; s_pb_state = PB_COOL; s_pb_cool = AFN_PB_COOLDOWN;
+                    }
+                }
+                if (s_pb_state == PB_COOL) {
+                    if (--s_pb_cool <= 0) { afn_sprite_visible[s_pb_eidx] = 1; s_pb_state = PB_IDLE; } // ball back in hand
+                }
+                if (s_pb_state == PB_AIM || s_pb_state == PB_WINDUP ||
+                    (s_pb_state == PB_FLY && s_playerClipHold))
+                    afn_player_frozen = 1;                                   // no translation while aiming / mid-throw
+            }
+        }
+#endif
         // Lock Player Functions: clear every per-frame ability trigger the graph queued, so
         // pressed/released abilities (Dodge, Quick Attack, Focus Blast fire, Block) and the
         // charge aura don't fire on a menu screen. The HELD mask above stops the energy fill
@@ -7711,6 +7845,59 @@ int main(void)
         }
         glPolygonOffset(0.0f, 0.0f);
         glDisable(GL_POLYGON_OFFSET_FILL);
+#endif
+
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
+        // HARDCODED pokeball throw — draw the aim arc (dotted trajectory) and, in
+        // flight, the ball itself following that same arc.
+        if (s_pb_si >= 0 && (s_pb_state == PB_AIM || s_pb_state == PB_FLY)) {
+            if (s_pb_state == PB_AIM) {
+                // Dotted parabola from the hand to the landing spot, additive.
+                float yr = s_pb_yaw * (3.14159265f/180.0f);
+                float p0[3]   = { s_player_bone_world[s_pb_bone][0], s_player_bone_world[s_pb_bone][1], s_player_bone_world[s_pb_bone][2] };
+                float land[3] = { playerX + sinf(yr)*s_pb_dist, playerY, playerZ + cosf(yr)*s_pb_dist };
+                float ddx = land[0]-p0[0], ddz = land[2]-p0[2];
+                float gd = sqrtf(ddx*ddx + ddz*ddz); if (gd < 1.0f) gd = 1.0f;
+                float h = gd * AFN_PB_ARC_K;
+                float Rwx=view[0],Rwy=view[4],Rwz=view[8], Uwx=view[1],Uwy=view[5],Uwz=view[9];
+                const int NDOT = 16;
+                AfnVertex dots[NDOT*6];
+                int vc = 0;
+                for (int s = 1; s <= NDOT; s++) {
+                    float t = (float)s / (float)(NDOT+1);
+                    float c[3]; afn_pb_arc(p0, land, h, t, c);
+                    float r = 0.35f + 0.35f*(1.0f - t);          // dots taper toward the target
+                    unsigned a = 150u + (unsigned)(80.0f*(1.0f-t));
+                    unsigned col = (a<<24) | 0x00FFFFFFu;         // 0xAABBGGRR white
+                    float qx[4] = { -r,  r,  r, -r }, qy[4] = { -r, -r,  r,  r };
+                    AfnVertex q[4];
+                    for (int k = 0; k < 4; k++) {
+                        q[k].u = 0; q[k].v = 0; q[k].color = col;
+                        q[k].x = c[0] + Rwx*qx[k] + Uwx*qy[k];
+                        q[k].y = c[1] + Rwy*qx[k] + Uwy*qy[k];
+                        q[k].z = c[2] + Rwz*qx[k] + Uwz*qy[k];
+                    }
+                    dots[vc++]=q[0]; dots[vc++]=q[1]; dots[vc++]=q[2];
+                    dots[vc++]=q[0]; dots[vc++]=q[2]; dots[vc++]=q[3];
+                }
+                glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+                glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+                glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+                glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &dots->color);
+                glVertexPointer(3, GL_FLOAT, sizeof(AfnVertex), &dots->x);
+                glDrawArrays(GL_TRIANGLES, 0, vc);
+                glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+                glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+            } else {   // PB_FLY: the ball mesh riding the arc, depth-tested like any prop.
+                float c[3]; afn_pb_arc(s_pb_p0, s_pb_land, s_pb_arcH, s_pb_t, c);
+                glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+                glTranslatef(c[0], c[1], c[2]);
+                glRotatef(s_pb_spin * 22.0f, 0.35f, 1.0f, 0.0f);
+                glScalef(s_pb_scale, s_pb_scale, s_pb_scale);
+                draw_mesh(s_pb_mi);
+            }
+        }
 #endif
 
 #ifdef AFN_HAS_SPRITES

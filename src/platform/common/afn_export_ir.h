@@ -262,6 +262,7 @@ struct AfnMeshExport
     int texW = 0, texH = 0;      // texture dimensions
     std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH), 0..255
     uint16_t texPalette[256] = {}; // RGB15 palette (16 or 256 entries used)
+    std::vector<uint32_t> texRGBA;    // PSV "512 Colors": full RGBA8888 (bypasses the palette); empty = palette
     int texture256 = 0;           // 1 = 256-colour (GL_RGB256, 8bpp), 0 = 16-colour (GL_RGB16, 4bpp)
     int textureHasAlpha = 0;      // 1 = palette[0] is transparent (NDS COLOR0_TRANSPARENT)
     int softAlpha = 0;            // 1 = attached-model blended alpha: emit per-pixel alpha (texAlpha)

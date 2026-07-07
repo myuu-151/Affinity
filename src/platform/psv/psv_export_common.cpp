@@ -290,14 +290,19 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
         if (textured) {
             int n = m.texW * m.texH;
             bool soft = m.softAlpha && (int)m.texAlpha.size() == n;  // attached-model blended alpha
+            bool full = (int)m.texRGBA.size() == n;                  // "512 Colors": truecolor RGBA (already 0xAABBGGRR)
             f << "static const unsigned int __attribute__((aligned(16))) afn_mesh" << mi << "_tex[" << n << "] = {";
             for (int p = 0; p < n; p++) {
                 if (p % 8 == 0) f << "\n  ";
-                unsigned char pi = (p < (int)m.texPixels.size()) ? m.texPixels[p] : 0;
-                bool opaque = opaqueTex || pi != 0;        // index 0 transparent when alpha on
-                unsigned short pal = m.texPalette[pi];
-                unsigned int abgr = Rgb15ToAbgr(pal, opaque);
-                if (soft) abgr = (abgr & 0x00FFFFFFu) | ((unsigned int)m.texAlpha[p] << 24);  // per-pixel A
+                unsigned int abgr;
+                if (full) {
+                    abgr = m.texRGBA[p];                   // full 24-bit colour, alpha from the source
+                } else {
+                    unsigned char pi = (p < (int)m.texPixels.size()) ? m.texPixels[p] : 0;
+                    bool opaque = opaqueTex || pi != 0;    // index 0 transparent when alpha on
+                    abgr = Rgb15ToAbgr(m.texPalette[pi], opaque);
+                    if (soft) abgr = (abgr & 0x00FFFFFFu) | ((unsigned int)m.texAlpha[p] << 24);  // per-pixel A
+                }
                 f << "0x" << std::hex << abgr << std::dec << "u,";
             }
             f << "\n};\n";
@@ -413,10 +418,11 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             } else {
                 f << ", 0, 0, 0, 0, 0, 0, 0, 0, 0";
             }
+            f << ", " << (m.collision ? 1 : 0);   // per-mesh collision toggle (last AfnMesh field, PSV only)
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----

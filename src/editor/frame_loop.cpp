@@ -6271,6 +6271,29 @@ static int   s3DVtxDirtMesh = -1;          // mesh the baseline + dirt cache bel
 static std::vector<float> s3DVtxDirtBase;  // baseline rgb per vertex captured when the popup opened
 static std::vector<float> s3DVtxDirtVals;  // cached per-vertex cavity factor 0..1 (computed on open)
 static std::string s3DVtxXferMsg;          // Copy/Paste Colors status line (clipboard transfer feedback)
+// Box Ramp tool (paint tool 3): drag a rectangle to lay a smooth directional
+// shadow gradient onto the vertices inside it — darkest at the drag start,
+// fading to none at the drag end. Live-previews from a baseline while dragging.
+static bool  s3DVtxRampActive = false;                        // a ramp box drag is in progress
+static float s3DVtxRampStartX = 0.0f, s3DVtxRampStartY = 0.0f;// drag start (screen px, = dark end)
+static float s3DVtxRampCurX   = 0.0f, s3DVtxRampCurY   = 0.0f;// current drag end (screen px, = light end)
+static int   s3DVtxRampMesh   = -1;                           // mesh the baseline belongs to
+static std::vector<float> s3DVtxRampBase;                     // baseline rgb per vertex captured at drag start
+static float s3DVtxRampCurve  = 1.0f;                         // falloff shaping (dark^curve): low = wide, high = tight to the dark end
+static bool  s3DVtxRampBox    = false;                        // clip the ramp to a viewport drag box (off = ramp on the mesh's own bounds)
+static bool  s3DVtxRampBoxShow = false;                       // draw the ramp overlay this frame (GL, in Render3DViewport)
+// Mesh-space ramp (Box Highlight off): a smooth shadow gradient computed on the
+// mesh's own local bounds along an axis — no viewport dragging. Live-preview popup.
+static int   s3DVtxRampAxis   = 1;                            // 0 = X, 1 = Y (height), 2 = Z
+static bool  s3DVtxRampInvert = false;                        // flip which end is dark
+static float s3DVtxRampStart  = 0.0f;                         // gradient band start (0..1 along the axis) — full dark below it
+static float s3DVtxRampEnd    = 1.0f;                         // gradient band end   (0..1 along the axis) — no shadow beyond it
+static bool  s3DVtxRampTintOn = false;                        // color the shadow instead of darkening toward black
+static float s3DVtxRampTint[3]= { 0.10f, 0.14f, 0.30f };      // shadow tint color (cool blue by default)
+static float s3DVtxRampTintAmt= 0.6f;                         // how strongly the tint colors the dark end (0..1)
+static bool  s3DVtxRampOpen   = false;                        // popup open last frame (open/close edge detect)
+static int   s3DVtxRampPopMesh = -1;                          // mesh the baseline belongs to
+static std::vector<float> s3DVtxRampPopBase;                  // baseline rgb captured when the popup opened
 // Live-preview tonal-adjustment popups (Photoshop-style slider sets).
 static float s3DHueShift = 0.0f, s3DHueSat = 0.0f, s3DHueLight = 0.0f;        // deg(-180..180), -100..100, -100..100
 static float s3DExpExposure = 0.0f, s3DExpOffset = 0.0f, s3DExpGamma = 1.0f;  // stops, -0.5..0.5, 0.1..3
@@ -7756,9 +7779,24 @@ static bool LoadMeshTextureSlot(MeshAsset& mesh, int slot, const std::string& pa
     memcpy(sPal, pal, sizeof(pal)); sTex = true;
     if (!is0) em->textureManual = true;
 
-    // Upload GL texture for editor preview (reconstruct RGBA from indexed + palette)
+    // Full-colour path (slot 0 only): keep the FULL 24-bit source RGBA instead of
+    // the 256-colour RGB15 palette — no banding on photographic textures (grass, dirt),
+    // same VRAM on the Vita (textures are RGBA8888 either way). Instant (no quantize).
+    if (is0) {
+        mesh.texRGBA.clear();
+        if (mesh.texture512) {
+            mesh.texRGBA.assign(resized.begin(), resized.end());   // 0xAABBGGRR, keeps source alpha
+            if (useAlpha)
+                for (auto& px : mesh.texRGBA) if ((px >> 24) == 0) px = 0;   // cutout: transparent stays 0
+        }
+    }
+
+    // Upload GL texture for editor preview (512 path uses full RGBA; else palette)
     std::vector<uint32_t> rgba(tw * th);
-    for (int i = 0; i < tw * th; i++) rgba[i] = sPal[sPix[i]];
+    if (is0 && !mesh.texRGBA.empty())
+        for (int i = 0; i < tw * th; i++) rgba[i] = mesh.texRGBA[i];
+    else
+        for (int i = 0; i < tw * th; i++) rgba[i] = sPal[sPix[i]];
     if (sGl) glDeleteTextures(1, &sGl);
     glGenTextures(1, &sGl);
     glBindTexture(GL_TEXTURE_2D, sGl);
@@ -8485,7 +8523,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0, ma.useSoftAlpha ? 1 : 0, ma.psvColors, ma.ignoreVertexColor ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0, ma.useSoftAlpha ? 1 : 0, ma.psvColors, ma.ignoreVertexColor ? 1 : 0, ma.texture512 ? 1 : 0);
         // Light Intensity multiplier for the OBJ 2.0 light rig (the lights
         // themselves re-parse from the source OBJ on load).
         if (ma.lightBake != 1.0f)
@@ -9364,6 +9402,13 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "midi_end\n");
     }
 
+    // Capture every mesh's LIVE painted vertex colors into its (vcol:N) blob
+    // right before serializing. Paint tools update sPackedAssets themselves, but
+    // this guarantees WYSIWYG saving even for any path that edits the mesh in
+    // place without persisting — so a fresh paint always survives reload.
+    for (size_t mi = 0; mi < sMeshAssets.size(); mi++)
+        PersistMeshVertexColors(sMeshAssets[mi], (int)mi);
+
     // ---- Packed assets (chunked base64 to stay under LoadProject's line buffer) ----
     if (!sPackedAssets.empty()) {
         fprintf(f, "\n[PackedAssets]\n");
@@ -10025,10 +10070,10 @@ static bool LoadProject(const std::string& path)
                   continue;
               } }
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0, msoftalpha = 0, mpsvcolors = 0, mignorevcol = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0, msoftalpha = 0, mpsvcolors = 0, mignorevcol = 0, mtexture512 = 0;
             float mdrawdist = 0.0f;
             // Try newest format: ...|texInIwram|textureUseAlpha|texFiltered|removeDoubles
-            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors, &mignorevcol);
+            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors, &mignorevcol, &mtexture512);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -10037,7 +10082,7 @@ static bool LoadProject(const std::string& path)
                 int pipes = 0;
                 while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
                 if (*p == '|') p++; // skip the empty field's trailing pipe
-                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors, &mignorevcol);
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles, &mtex256, &msoftalpha, &mpsvcolors, &mignorevcol, &mtexture512);
                 matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
                 if (m2 > 0) matched++; // account for the texpath slot
             }
@@ -10111,6 +10156,8 @@ static bool LoadProject(const std::string& path)
                     ma.psvColors = mpsvcolors;
                 if (matched >= 28)
                     ma.ignoreVertexColor = (mignorevcol != 0);
+                if (matched >= 29)
+                    ma.texture512 = (mtexture512 != 0);   // before LoadMeshTexture re-decodes
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -12866,6 +12913,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     // button is released — even if the cursor briefly leaves the viewport rect —
     // so a swipe to a different area never cuts out mid-stroke (like orbit latches).
     if (paintActive && hovered && !s3DVtxStrokeActive && !vpEyedrop && !s3DVtxFResizing
+        && s3DVtxPaintTool != 3   // Ramp tool drags a box instead of a brush stroke (handled below)
         && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureKeyboard)
     {
         s3DVtxStrokeActive = true;
@@ -13001,10 +13049,142 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             PersistMeshVertexColors(sMeshAssets[sSelectedMesh], sSelectedMesh);
         s3DVtxStroking = false;
     }
+    // ---- Box Ramp tool: drag a rectangle to lay a smooth shadow gradient ----
+    // Left-drag defines a box; the shadow is darkest at the drag START and fades
+    // to nothing at the drag END (along the drag direction). Live-previews from a
+    // baseline as you drag; Strength = max darkness, Ramp Curve shapes the falloff.
+    s3DVtxRampBoxShow = false;
+    if (paintActive && s3DVtxPaintTool == 3 && s3DVtxRampBox)   // drag-box mode; box-off ramps on mesh bounds (UI popup below)
+    {
+        MeshAsset& rma = sMeshAssets[sSelectedMesh];
+        const float kPIr = 3.14159265f;
+        // Start a ramp drag on LMB-down over the viewport; snapshot the baseline.
+        if (!s3DVtxRampActive && hovered && !vpEyedrop && !s3DVtxFResizing
+            && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureKeyboard)
+        {
+            s3DVtxRampActive = true;
+            s3DVtxRampStartX = mpos.x; s3DVtxRampStartY = mpos.y;
+            s3DVtxRampBase.clear(); s3DVtxRampBase.reserve(rma.vertices.size()*3);
+            for (const MeshVertex& v : rma.vertices) { s3DVtxRampBase.push_back(v.r); s3DVtxRampBase.push_back(v.g); s3DVtxRampBase.push_back(v.b); }
+            s3DVtxRampMesh = sSelectedMesh;
+        }
+        if (s3DVtxRampActive)
+        {
+            s3DVtxRampCurX = mpos.x; s3DVtxRampCurY = mpos.y;
+            s3DVtxRampBoxShow = true;
+            bool haveBase = (s3DVtxRampMesh == sSelectedMesh && s3DVtxRampBase.size() == rma.vertices.size()*3);
+            bool cancel = ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+            // Camera + projection basis (same look-at the renderer / brush uses).
+            float pcx = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+            float pcy = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+            float pcz = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+            float pfx = s3DTargetX - pcx, pfy = s3DTargetY - pcy, pfz = s3DTargetZ - pcz;
+            { float l = sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if (l > 0) { pfx/=l; pfy/=l; pfz/=l; } }
+            float psx = -pfz, psz = pfx;
+            { float l = sqrtf(psx*psx+psz*psz); if (l > 0) { psx/=l; psz/=l; } }
+            float pux = -psz*pfy, puy = psz*pfx - psx*pfz, puz = psx*pfy;
+            float pTanH = tanf(45.0f * kPIr / 360.0f);
+            float pAsp  = vpAreaW / size.y;
+            auto xformR = [&](const FloorSprite& sp, float lx, float ly, float lz,
+                              float& ox, float& oy, float& oz)
+            {
+                float s = (sp.scale > 0.0001f ? sp.scale : 1.0f);
+                float x = lx*s, y = ly*s, z = lz*s;
+                float cZ=cosf(sp.rotationZ*kPIr/180), sZ=sinf(sp.rotationZ*kPIr/180);
+                float cX=cosf(sp.rotationX*kPIr/180), sX=sinf(sp.rotationX*kPIr/180);
+                float cY=cosf(sp.rotation *kPIr/180), sY=sinf(sp.rotation *kPIr/180);
+                float x1 = x*cZ - y*sZ, y1 = x*sZ + y*cZ, z1 = z;
+                float x2 = x1, y2 = y1*cX - z1*sX, z2 = y1*sX + z1*cX;
+                ox = x2*cY + z2*sY; oy = y2; oz = -x2*sY + z2*cY;
+                ox += sp.x; oy += sp.y; oz += sp.z;
+            };
+            // Reset from baseline, then darken every vertex inside the box by a
+            // smooth ramp along the drag direction. Reused for preview + commit.
+            auto applyRamp = [&](float endX, float endY) -> bool {
+                if (!haveBase) return false;
+                for (size_t i = 0; i < rma.vertices.size(); i++) {
+                    rma.vertices[i].r = s3DVtxRampBase[i*3];
+                    rma.vertices[i].g = s3DVtxRampBase[i*3+1];
+                    rma.vertices[i].b = s3DVtxRampBase[i*3+2];
+                }
+                float ax = std::min(s3DVtxRampStartX, endX), bx2 = std::max(s3DVtxRampStartX, endX);
+                float ay = std::min(s3DVtxRampStartY, endY), by2 = std::max(s3DVtxRampStartY, endY);
+                float dxr = endX - s3DVtxRampStartX, dyr = endY - s3DVtxRampStartY;
+                float dlen2 = dxr*dxr + dyr*dyr;
+                if (dlen2 < 16.0f) return false;                      // box too tiny — nothing to ramp
+                bool any = false;
+                for (int i = 0; i < sSpriteCount; i++) {
+                    const FloorSprite& sp = sSprites[i];
+                    if (sp.type != SpriteType::Mesh || sp.meshIdx != sSelectedMesh) continue;
+                    for (size_t vi = 0; vi < rma.vertices.size(); vi++) {
+                        const MeshVertex& v = rma.vertices[vi];
+                        float wx, wy, wz; xformR(sp, v.px, v.py, v.pz, wx, wy, wz);
+                        float ex = wx-pcx, ey = wy-pcy, ez = wz-pcz;
+                        float vz = -(pfx*ex + pfy*ey + pfz*ez);
+                        if (vz >= -0.01f) continue;                  // behind camera
+                        float vx = psx*ex + psz*ez;
+                        float vy = pux*ex + puy*ey + puz*ez;
+                        float ssx = pos.x + ((vx/(-vz))/(pTanH*pAsp) + 1.0f) * 0.5f * vpAreaW;
+                        float ssy = pos.y + (1.0f - (vy/(-vz))/pTanH) * 0.5f * size.y;
+                        // Box Highlight (optional): clip to the drag rectangle. Default
+                        // off — the ramp spans the whole mesh along the drag direction.
+                        if (s3DVtxRampBox && (ssx < ax || ssx > bx2 || ssy < ay || ssy > by2)) continue;
+                        float t = ((ssx-s3DVtxRampStartX)*dxr + (ssy-s3DVtxRampStartY)*dyr) / dlen2;
+                        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+                        float k = 1.0f - t;                          // 1 at the dark end, 0 at the light end
+                        k = k*k*(3.0f - 2.0f*k);                     // smoothstep — no hard banding
+                        if (s3DVtxRampCurve != 1.0f) k = powf(k, s3DVtxRampCurve);
+                        float f = 1.0f - s3DVtxPaintStrength * k;    // darkest = 1 - strength
+                        if (f < 0.0f) f = 0.0f;
+                        rma.vertices[vi].r = s3DVtxRampBase[vi*3]   * f;
+                        rma.vertices[vi].g = s3DVtxRampBase[vi*3+1] * f;
+                        rma.vertices[vi].b = s3DVtxRampBase[vi*3+2] * f;
+                        any = true;
+                    }
+                }
+                return any;
+            };
+            if (cancel) {
+                // Bail out: restore the baseline, drop the drag, no persist / undo.
+                if (haveBase)
+                    for (size_t i = 0; i < rma.vertices.size(); i++) {
+                        rma.vertices[i].r = s3DVtxRampBase[i*3]; rma.vertices[i].g = s3DVtxRampBase[i*3+1]; rma.vertices[i].b = s3DVtxRampBase[i*3+2];
+                    }
+                s3DVtxRampActive = false; s3DVtxRampBoxShow = false;
+                s3DVtxRampBase.clear(); s3DVtxRampMesh = -1;
+                s3DRenderNeeded = true;
+            } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                // Live preview while dragging.
+                if (applyRamp(mpos.x, mpos.y)) { rma.hasVertexColor = true; s3DRenderNeeded = true; }
+            } else {
+                // Release: restore baseline, snapshot undo, bake the final ramp, persist.
+                bool committed = false;
+                if (haveBase) {
+                    for (size_t i = 0; i < rma.vertices.size(); i++) {
+                        rma.vertices[i].r = s3DVtxRampBase[i*3]; rma.vertices[i].g = s3DVtxRampBase[i*3+1]; rma.vertices[i].b = s3DVtxRampBase[i*3+2];
+                    }
+                    VtxPaintPushUndo(rma, sSelectedMesh);
+                    if (applyRamp(mpos.x, mpos.y)) {
+                        rma.hasVertexColor = true;
+                        PersistMeshVertexColors(rma, sSelectedMesh);
+                        sProjectDirty = true;
+                        committed = true;
+                    } else if (!s3DVtxUndoStack.empty()) {
+                        s3DVtxUndoStack.pop_back();   // too-tiny drag — drop the snapshot
+                    }
+                }
+                s3DVtxRampActive = false; s3DVtxRampBoxShow = false;
+                s3DVtxRampBase.clear(); s3DVtxRampMesh = -1;
+                s3DRenderNeeded = true;
+                (void)committed;
+            }
+        }
+    }
+
     // Brush cursor: stash screen position + visibility here; the ring itself is
     // drawn in GL by Render3DViewport (which composites OVER ImGui, so a draw-list
     // ring would be hidden behind the 3D render).
-    s3DVtxBrushShow = paintActive && (hovered || s3DVtxFResizing);
+    s3DVtxBrushShow = paintActive && s3DVtxPaintTool != 3 && (hovered || s3DVtxFResizing);
     if (s3DVtxFResizing) { s3DVtxBrushSX = s3DVtxFStartX; s3DVtxBrushSY = s3DVtxFStartY; } // ring locked in place while F-resizing
     else                 { s3DVtxBrushSX = mpos.x;        s3DVtxBrushSY = mpos.y; }
 
@@ -14381,6 +14561,14 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Export this texture as 256-colour (GL_RGB256, 8bpp) instead of 16-colour (GL_RGB16, 4bpp).\nBetter gradients/detail; 2x the VRAM.");
+                ImGui::SameLine();
+                if (ImGui::Checkbox("512 Colors##meshTex512", &ma.texture512)) {
+                    // Truecolor path: full 24-bit RGBA quantized to 512 colours (PSV only).
+                    if (!ma.texturePath.empty() && ma.texturePath[0] != '(')
+                        LoadMeshTexture(ma.texturePath, ma);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("PSV: store the FULL 24-bit RGBA (up to 512 colours) instead of the\n256-colour RGB15 palette. Finer gradients / less banding on the Vita.\nSame VRAM (textures are RGBA8888 either way). Supersedes 256 Colors.");
             }
 
             // MAP GROUPS: one OBJ carrying several lightmap/AO pairs — display
@@ -14538,6 +14726,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ImGui::SameLine();
             ImGui::RadioButton("Smooth##vptool", &s3DVtxPaintTool, 2);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Smooth brush: blends the colors under the cursor toward their average.");
+            ImGui::SameLine();
+            ImGui::RadioButton("Ramp##vptool", &s3DVtxPaintTool, 3);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Box Ramp: drag a rectangle to lay a smooth shadow gradient.\n"
+                                                          "Darkest at the drag start, fading to none at the drag end.\n"
+                                                          "Strength = max darkness   Esc / RMB = cancel the drag");
             ImGui::ColorEdit3("Color##vpcol", s3DVtxPaintColor, ImGuiColorEditFlags_NoInputs);
             ImGui::SameLine();
             // Vertical brightness slider — darkens the paint color toward black.
@@ -14559,6 +14752,113 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ImGui::SliderFloat("Radius##vprad", &s3DVtxPaintRadius, 4.0f, 200.0f, "%.0f px");
             ImGui::SetNextItemWidth(Scaled(130));
             ImGui::SliderFloat("Strength##vpstr", &s3DVtxPaintStrength, 0.02f, 1.0f, "%.2f");
+            if (s3DVtxPaintTool == 3) {
+                ImGui::SetNextItemWidth(Scaled(130));
+                ImGui::SliderFloat("Ramp Curve##vprampcv", &s3DVtxRampCurve, 0.25f, 4.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shapes the shadow falloff:\nlow = the dark spreads wide\nhigh = the dark stays tight to the dark end");
+                ImGui::Checkbox("Box Highlight##vprampbox", &s3DVtxRampBox);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("On: drag a rectangle in the viewport; the ramp is clipped to it (screen-space).\nOff (default): the ramp is computed on the mesh's own bounds — no dragging.");
+                if (s3DVtxRampBox) {
+                    ImGui::TextDisabled("Drag a box: dark end = where you press, light end = where you release.");
+                } else {
+                    // --- Mesh-space ramp: computed on the mesh's own local bounds ---
+                    if (ImGui::SmallButton("Ramp Shadow##vpramp")) ImGui::OpenPopup("vpRampPopup");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lay a smooth shadow gradient computed on the mesh itself\n(along its own X/Y/Z bounds). Live-preview sliders + Apply.");
+                    {
+                        // Open/close edge detect: snapshot baseline on open, revert on close-without-Apply.
+                        bool rOpen = ImGui::IsPopupOpen("vpRampPopup");
+                        if (rOpen && !s3DVtxRampOpen) {
+                            s3DVtxRampPopBase.clear(); s3DVtxRampPopBase.reserve(ma.vertices.size()*3);
+                            for (const MeshVertex& v : ma.vertices) { s3DVtxRampPopBase.push_back(v.r); s3DVtxRampPopBase.push_back(v.g); s3DVtxRampPopBase.push_back(v.b); }
+                            s3DVtxRampPopMesh = sSelectedMesh;
+                        } else if (!rOpen && s3DVtxRampOpen) {
+                            if (s3DVtxRampPopMesh == sSelectedMesh && s3DVtxRampPopBase.size() == ma.vertices.size()*3) {
+                                for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DVtxRampPopBase[i*3]; ma.vertices[i].g = s3DVtxRampPopBase[i*3+1]; ma.vertices[i].b = s3DVtxRampPopBase[i*3+2]; }
+                                s3DRenderNeeded = true;
+                            }
+                            s3DVtxRampPopBase.clear(); s3DVtxRampPopMesh = -1;
+                        }
+                        s3DVtxRampOpen = rOpen;
+                    }
+                    if (ImGui::BeginPopup("vpRampPopup")) {
+                        ImGui::TextUnformatted("Ramp Shadow (on mesh bounds)");
+                        const char* axes[] = { "X", "Y (height)", "Z" };
+                        ImGui::SetNextItemWidth(Scaled(110)); ImGui::Combo("Axis##vpra", &s3DVtxRampAxis, axes, 3);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Which local axis the shadow runs along (Y = bottom-to-top, the usual ground shadow).");
+                        ImGui::SameLine(); ImGui::Checkbox("Invert##vprinv", &s3DVtxRampInvert);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flip which end of the axis is dark.");
+                        ImGui::SetNextItemWidth(Scaled(150)); ImGui::SliderFloat("Strength##vprs", &s3DVtxPaintStrength, 0.02f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Max darkness at the dark end.");
+                        ImGui::SetNextItemWidth(Scaled(150)); ImGui::SliderFloat("Curve##vprc", &s3DVtxRampCurve, 0.25f, 4.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Falloff shape: low = wide/soft, high = tight to the dark end.");
+                        // Gradient band: where along the axis the ramp starts and ends (0..1).
+                        // Full dark before Start, no shadow after End; smooth between.
+                        ImGui::SetNextItemWidth(Scaled(150)); ImGui::SliderFloat("Start##vprst", &s3DVtxRampStart, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Where the shadow band begins along the axis (0 = far end, 1 = near end).\nEverything before this is full dark.");
+                        ImGui::SetNextItemWidth(Scaled(150)); ImGui::SliderFloat("End##vpren", &s3DVtxRampEnd, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Where the shadow fades out to nothing. Move Start/End together to slide a thin band.");
+                        ImGui::Checkbox("Tint##vprtint", &s3DVtxRampTintOn);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Color the shadow toward a tint instead of pure black (e.g. cool blue).");
+                        if (s3DVtxRampTintOn) {
+                            ImGui::SameLine(); ImGui::ColorEdit3("##vprtintcol", s3DVtxRampTint, ImGuiColorEditFlags_NoInputs);
+                            ImGui::SetNextItemWidth(Scaled(150)); ImGui::SliderFloat("Tint Amt##vprta", &s3DVtxRampTintAmt, 0.0f, 1.0f, "%.2f");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How strongly the dark end is colored by the tint.");
+                        }
+                        // Mesh bounds along the chosen axis (recomputed each frame; cheap for editor use).
+                        int axis = s3DVtxRampAxis;
+                        float mn = 1e30f, mx = -1e30f;
+                        for (const MeshVertex& v : ma.vertices) { float c = (axis==0?v.px:axis==1?v.py:v.pz); if (c<mn) mn=c; if (c>mx) mx=c; }
+                        float ext = mx - mn; if (ext < 1e-6f) ext = 1.0f;
+                        // Maps a vertex's baseline color -> its ramped color (band remap,
+                        // smoothstep+curve falloff, darken toward black or toward the tint).
+                        auto rampColor = [&](const MeshVertex& v, float br, float bg, float bb,
+                                             float& orr, float& ogg, float& obb)
+                        {
+                            float c = (axis==0?v.px:axis==1?v.py:v.pz);
+                            float t = (c - mn) / ext;                     // 0 at min end, 1 at max end
+                            float lo = s3DVtxRampStart, hi = s3DVtxRampEnd;
+                            float denom = hi - lo; if (fabsf(denom) < 1e-4f) denom = (denom < 0 ? -1e-4f : 1e-4f);
+                            float u = (t - lo) / denom;                   // 0 at Start, 1 at End
+                            if (u < 0.0f) u = 0.0f; else if (u > 1.0f) u = 1.0f;
+                            float k = s3DVtxRampInvert ? u : (1.0f - u);  // 1 = dark, 0 = lit
+                            k = k*k*(3.0f - 2.0f*k);                      // smoothstep
+                            if (s3DVtxRampCurve != 1.0f) k = powf(k, s3DVtxRampCurve);
+                            float f = 1.0f - s3DVtxPaintStrength * k; if (f < 0.0f) f = 0.0f;
+                            float rr = br*f, rg = bg*f, rb = bb*f;        // darkened base
+                            if (s3DVtxRampTintOn) {
+                                float a = k * s3DVtxRampTintAmt;          // tint strongest at the dark end
+                                rr += (s3DVtxRampTint[0] - rr) * a;
+                                rg += (s3DVtxRampTint[1] - rg) * a;
+                                rb += (s3DVtxRampTint[2] - rb) * a;
+                            }
+                            orr = rr; ogg = rg; obb = rb;
+                        };
+                        bool haveBase = (s3DVtxRampPopMesh == sSelectedMesh && s3DVtxRampPopBase.size() == ma.vertices.size()*3);
+                        if (haveBase) {
+                            for (size_t i = 0; i < ma.vertices.size(); i++)
+                                rampColor(ma.vertices[i], s3DVtxRampPopBase[i*3], s3DVtxRampPopBase[i*3+1], s3DVtxRampPopBase[i*3+2],
+                                          ma.vertices[i].r, ma.vertices[i].g, ma.vertices[i].b);
+                            ma.hasVertexColor = true;
+                            s3DRenderNeeded = true;
+                        }
+                        if (ImGui::Button("Apply##vprapply") && haveBase) {
+                            for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DVtxRampPopBase[i*3]; ma.vertices[i].g = s3DVtxRampPopBase[i*3+1]; ma.vertices[i].b = s3DVtxRampPopBase[i*3+2]; }
+                            VtxPaintPushUndo(ma, sSelectedMesh);
+                            for (size_t i = 0; i < ma.vertices.size(); i++) {
+                                float rr, rg, rb;
+                                rampColor(ma.vertices[i], s3DVtxRampPopBase[i*3], s3DVtxRampPopBase[i*3+1], s3DVtxRampPopBase[i*3+2], rr, rg, rb);
+                                ma.vertices[i].r = rr; ma.vertices[i].g = rg; ma.vertices[i].b = rb;
+                                s3DVtxRampPopBase[i*3] = rr; s3DVtxRampPopBase[i*3+1] = rg; s3DVtxRampPopBase[i*3+2] = rb;
+                            }
+                            ma.hasVertexColor = true;
+                            PersistMeshVertexColors(ma, sSelectedMesh);
+                            sProjectDirty = true; s3DRenderNeeded = true;
+                        }
+                        ImGui::SameLine(); ImGui::TextDisabled("(live preview)");
+                        ImGui::EndPopup();
+                    }
+                }
+            }
             int placedCount = 0;
             for (int i = 0; i < sSpriteCount; i++)
                 if (sSprites[i].type == SpriteType::Mesh && sSprites[i].meshIdx == sSelectedMesh) placedCount++;
@@ -20605,6 +20905,7 @@ void FrameTick(float dt)
                     me.texW = ma.texW;
                     me.texH = ma.texH;
                     me.texPixels = ma.texturePixels;
+                    me.texRGBA = ma.texRGBA;   // "512 Colors": full RGBA8888 (empty unless texture512)
                     me.texture256 = ma.texture256 ? 1 : 0;
                     // Convert texture palette RGBA8 -> RGB15 (256 entries; only the
                     // first 16 matter for a 16-colour texture).
@@ -39403,6 +39704,13 @@ void Render3DViewport()
                 glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matDif);
             }
 
+            // Use Alpha (cutout): discard transparent (palette[0], alpha=0) texels so
+            // foliage/grass quads show the blade shape instead of a black square. Only
+            // the base pass needs it — the lightmap/AO multiply passes use depth EQUAL,
+            // so they auto-skip texels the base cut out. (Static-mesh path was missing
+            // this; only the rig path had it.)
+            bool meshCutout = ma.textured && ma.glTexID != 0 && ma.textureUseAlpha;
+            if (meshCutout) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
             // Wireframe view: draw mesh edges only, unlit/untextured in a flat
             // bright color so the topology reads clearly.
             bool wf = s3DWireframe;
@@ -39687,6 +39995,7 @@ void Render3DViewport()
                 if (any) teardownPrevGlLights();
             }
 
+            if (meshCutout) glDisable(GL_ALPHA_TEST);
             if (vcol) glDisable(GL_COLOR_MATERIAL);
             if (wf) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore fill for next mesh
 
@@ -40427,6 +40736,64 @@ void Render3DViewport()
         }
         glLineWidth(1.0f);
         glColor3f(1.0f, 1.0f, 1.0f);
+    }
+
+    // Box Ramp overlay — the drag rectangle plus a shaded fill hinting the
+    // gradient (opaque-ish at the dark drag-start end, fading toward the light
+    // release end). Drawn in GL for the same reason as the brush ring above.
+    if (s3DVtxRampBoxShow)
+    {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_SCISSOR_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glViewport(0, 0, (int)disp.x, (int)disp.y);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glOrtho(0.0, disp.x, disp.y, 0.0, -1.0, 1.0);
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        float sx = s3DVtxRampStartX, sy = s3DVtxRampStartY;   // dark end
+        float ex = s3DVtxRampCurX,   ey = s3DVtxRampCurY;     // light end
+        float ax = sx < ex ? sx : ex, bx = sx < ex ? ex : sx;
+        float ay = sy < ey ? sy : ey, by = sy < ey ? ey : sy;
+        // Fill: per-corner alpha from its projection along the drag axis, so the
+        // shaded box previews the same dark->light ramp being baked into the mesh.
+        float dxr = ex - sx, dyr = ey - sy;
+        float dlen2 = dxr*dxr + dyr*dyr; if (dlen2 < 1.0f) dlen2 = 1.0f;
+        // Box Highlight on: draw the shaded rectangle previewing the clipped ramp.
+        if (s3DVtxRampBox)
+        {
+            auto cornerA = [&](float cx, float cy) -> float {
+                float t = ((cx-sx)*dxr + (cy-sy)*dyr) / dlen2;
+                if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+                return 0.45f * (1.0f - t);   // dark end most opaque, light end clear
+            };
+            glBegin(GL_QUADS);
+            glColor4f(0.0f, 0.0f, 0.0f, cornerA(ax, ay)); glVertex2f(ax, ay);
+            glColor4f(0.0f, 0.0f, 0.0f, cornerA(bx, ay)); glVertex2f(bx, ay);
+            glColor4f(0.0f, 0.0f, 0.0f, cornerA(bx, by)); glVertex2f(bx, by);
+            glColor4f(0.0f, 0.0f, 0.0f, cornerA(ax, by)); glVertex2f(ax, by);
+            glEnd();
+            // Border.
+            glLineWidth(1.5f);
+            glColor4f(0.3f, 0.75f, 1.0f, 0.9f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(ax, ay); glVertex2f(bx, ay); glVertex2f(bx, by); glVertex2f(ax, by);
+            glEnd();
+        }
+        // Direction line from the dark end to the light end, capped by a dot at
+        // the dark (start) end so the ramp direction is unambiguous.
+        glColor4f(1.0f, 1.0f, 1.0f, 0.85f);
+        glBegin(GL_LINES); glVertex2f(sx, sy); glVertex2f(ex, ey); glEnd();
+        glPointSize(7.0f);
+        glColor4f(0.1f, 0.1f, 0.1f, 1.0f);
+        glBegin(GL_POINTS); glVertex2f(sx, sy); glEnd();
+        glPointSize(1.0f);
+        glLineWidth(1.0f);
+        glDisable(GL_BLEND);
+        glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
     }
 
     glDisable(GL_DEPTH_TEST);

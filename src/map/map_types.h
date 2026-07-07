@@ -302,6 +302,10 @@ struct MeshAsset
     std::vector<uint8_t> texturePixels;       // quantized indexed pixels (texW * texH), 0..255
     uint32_t texturePalette[256] = {};        // RGBA8 palette (16 or 256 entries used)
     bool texture256 = false;                  // false = 16-colour (GL_RGB16), true = 256 (GL_RGB256)
+    bool texture512 = false;                  // PSV: store the FULL 24-bit RGBA (quantized to 512
+                                              // colours) in texRGBA instead of the 256-colour RGB15
+                                              // palette — finer gradients on the Vita (truecolor).
+    std::vector<uint32_t> texRGBA;            // full RGBA8888 texture when texture512 (else empty)
     int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 512)
     bool textureUseAlpha = false;             // true = treat alpha=0 as transparent (NDS reserves
                                               // palette[0] and sets GL_TEXTURE_COLOR0_TRANSPARENT).
