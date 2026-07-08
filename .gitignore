@@ -43,3 +43,15 @@ psv_runtime/include/psv_mapdata.h
 psv_runtime/include/psv_rig.h
 psv_runtime/include/psv_sprites.h
 psv_runtime/include/psv_script.h
+switch_runtime/include/psv_hud.h
+switch_runtime/include/psv_sound.h
+switch_runtime/include/psv_mapdata.h
+switch_runtime/include/psv_rig.h
+switch_runtime/include/psv_sprites.h
+switch_runtime/include/psv_script.h
+switch_runtime/build/
+switch_runtime/affinity_switch.elf
+switch_runtime/affinity_switch.nro
+switch_runtime/affinity_switch.nacp
+switch_runtime/affinity_switch.map
+switch_runtime/affinity_switch.lst

@@ -1603,7 +1603,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 }
 
                 if (nFaces > 512) { delete[] pSort; delete[] pFaceDepth; }
-                if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pDepth; delete[] pVis; }
+                // ALL six heap spills must be freed — pVX/pVY were missing here, leaking
+                // ~8 bytes/vert/frame on every >256-vert mesh (~90 MB/s on a 60k-vert
+                // field: the "editor lags after a while in the Meshes tab" 5 GB leak).
+                if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pDepth; delete[] pVis; delete[] pVX; delete[] pVY; }
                 drewSprite = true;
             }
         }

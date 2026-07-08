@@ -418,11 +418,12 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             } else {
                 f << ", 0, 0, 0, 0, 0, 0, 0, 0, 0";
             }
-            f << ", " << (m.collision ? 1 : 0);   // per-mesh collision toggle (last AfnMesh field, PSV only)
+            f << ", " << (m.collision ? 1 : 0);   // per-mesh collision toggle (PSV only)
+            f << ", " << (m.texFiltered ? 1 : 0);  // Filtered checkbox -> GL_LINEAR sampling (PSV/Switch only)
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----

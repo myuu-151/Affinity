@@ -958,6 +958,8 @@ enum class VsNodeType : int {
     ThunderStrike,   // action: release the Thunder strike at the aim — drive On Key Released
     AimStick,        // action: left stick slides the floor reticle + auto-orbits the camera (drive On Key Held)
     AiOrbScale,      // action (enemy AI): set the enemy focus-orb charge Min/Max Scale%
+    ThrowBall,       // action (drive from On Key RELEASED): throw the aimed pokeball (pitch anim + arc flight)
+    AimBall,         // action (drive from On Key HELD): aim the pokeball throw (arc + reticle; L-stick steers)
     COUNT
 };
 
@@ -1381,6 +1383,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Thunder Strike",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
     { "Aim Stick",        0xFF44AACC, 1, 1, 0, 0, {}, {}, {} },
     { "Ai Orb Scale",     0xFFAA4422, 1, 1, 2, 0, {"Min Scale% (int)","Max Scale% (int)"}, {}, {} },
+    { "Throw Ball",       0xFF7744CC, 1, 1, 4, 0, {"Pitch Clip (int)","Release % (int)","Speed x10 (int)","Cooldown (int)"}, {}, {} },
+    { "Aim Ball",         0xFF7744CC, 1, 1, 7, 0, {"Dist Min (int)","Dist Max (int)","Dist Default (int)","Turn Rate x10 (int)","Dist Rate x10 (int)","Arc % (int)","Freeze Aim (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1466,6 +1470,8 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
     case VsNodeType::DoOnce:        desc = "Only passes execution through once. Subsequent triggers are ignored."; break;
     case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
+    case VsNodeType::ThrowBall:     desc = "Throws the aimed pokeball — drive from On Key RELEASED (same key as the Aim Ball On Key Held). The pitch clip plays, the hand ball detaches at Release % of the clip, flies the aimed arc, and despawns on landing; after Cooldown frames it respawns in the hand. Any aim freeze is released the moment the ball detaches. Pitch Clip unwired = name-resolves 'pitch'. Pair with Aim Ball; needs a bone-attached hand model + player rig."; break;
+    case VsNodeType::AimBall:       desc = "Aims the pokeball throw — drive from On Key HELD. While held: a dotted arc + white floor reticle preview the shot, L-stick X turns the aim, L-stick Y sets the distance (Dist Min..Max, starting at Dist Default). Freeze Aim (default 1) locks player movement while aiming. Release the key into an On Key Released -> Throw Ball to fire; letting go with no Throw Ball wired just cancels the aim. Without these nodes the system is fully dormant."; break;
     case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
     case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
     case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
@@ -5685,13 +5691,16 @@ static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
 
-enum class BuildTarget { GBA = 0, NDS = 1, PSP = 2, PSV = 3 };
-static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
+enum class BuildTarget { GBA = 0, NDS = 1, PSP = 2, PSV = 3, Switch = 4 };
+static BuildTarget sBuildTarget = BuildTarget::PSV; // default target (Switch selectable in the Build menu)
 
 // PSV build target relabels the scene modes in the UI: Mode 0 -> "2D Scene",
 // Mode 4 -> "3D Scene". Other targets keep the GBA-era "Mode N" names.
-static const char* Mode0Label() { return sBuildTarget == BuildTarget::PSV ? "2D Scene" : "Mode 0"; }
-static const char* Mode4Label() { return sBuildTarget == BuildTarget::PSV ? "3D Scene" : "Mode 4"; }
+// PSV and Switch share the engine (the Switch runtime is a PSV fork consuming
+// the same headers) — every "modern UI" gate treats them identically.
+static bool TargetPsvFamily() { return sBuildTarget == BuildTarget::PSV || sBuildTarget == BuildTarget::Switch; }
+static const char* Mode0Label() { return TargetPsvFamily() ? "2D Scene" : "Mode 0"; }
+static const char* Mode4Label() { return TargetPsvFamily() ? "3D Scene" : "Mode 4"; }
 static bool sNdsAntialiasing = false; // NDS-only — adds smooth mesh edges but fringes textures
 static bool sBuildRequested = false; // set by toolbar Build button
 
@@ -7695,13 +7704,15 @@ static bool LoadMeshTextureSlot(MeshAsset& mesh, int slot, const std::string& pa
     }
     if (!img) return false;
 
-    // Resize to nearest power-of-2, max 512 per side (DS supports up to 1024;
-    // 512 keeps the VRAM hit reasonable — shares banks A+D with sky/rig tex).
+    // Resize to nearest power-of-2, max 1024 per side. PSV/Switch are truecolor
+    // targets with plenty of texture memory; the old 512 cap was an NDS-era
+    // VRAM-budget limit (a 1024 import on an NDS export still gets downscaled
+    // by that exporter's own budget).
     int tw = 1, th = 1;
-    while (tw < w && tw < 512) tw <<= 1;
-    while (th < h && th < 512) th <<= 1;
-    if (tw > 512) tw = 512;
-    if (th > 512) th = 512;
+    while (tw < w && tw < 1024) tw <<= 1;
+    while (th < h && th < 1024) th <<= 1;
+    if (tw > 1024) tw = 1024;
+    if (th > 1024) th = 1024;
 
     // Simple nearest-neighbor resize
     std::vector<uint32_t> resized(tw * th);
@@ -15797,14 +15808,14 @@ static void DrawTabBar()
     };
 
     TabButton(Mode4Label(), EditorTab::Map);
-    if (sBuildTarget != BuildTarget::PSV)
+    if (!TargetPsvFamily())
         TabButton("Mode 1",  EditorTab::Mode7);
     else if (sActiveTab == EditorTab::Mode7)
         sActiveTab = EditorTab::Map;   // Mode 1 is hidden on PSV — fall back to the 3D Scene tab
     TabButton(Mode0Label(), EditorTab::Tilemap);
-    TabButton(sBuildTarget == BuildTarget::PSV ? "Graphics" : "Sprites", EditorTab::Sprites);
+    TabButton(TargetPsvFamily() ? "Graphics" : "Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
-    TabButton(sBuildTarget == BuildTarget::PSV ? "Meshes" : "3D", EditorTab::ThreeD);
+    TabButton(TargetPsvFamily() ? "Meshes" : "3D", EditorTab::ThreeD);
     TabButton("Nodes",    EditorTab::Events);
     TabButton("Elements", EditorTab::Elements);
     TabButton("Sound",    EditorTab::Sound);
@@ -16492,7 +16503,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 sFrameEditRgba.resize((size_t)fw * fh);
                 // PSV >16-color preview: show the re-quantized psv frame/palette
                 // (updates live as the Colors toggle changes); else the 16-color frame.
-                bool usePsv = (sBuildTarget == BuildTarget::PSV && asset.psvColors > 16
+                bool usePsv = (TargetPsvFamily() && asset.psvColors > 16
                                && sSelectedFrame < (int)asset.psvFrames.size());
                 const SpriteFrame& dispFrame = usePsv ? asset.psvFrames[sSelectedFrame] : frame;
                 const uint32_t* editPal = usePsv ? asset.psvPalette : asset.palette;
@@ -16890,7 +16901,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         SpriteAsset& asset = sSpriteAssets[sSelectedAsset];
 
         // ---- Colors (PSV) / LOD Tiers ----
-        if (sBuildTarget == BuildTarget::PSV)
+        if (TargetPsvFamily())
         {
             // PSV higher-color graphics: re-quantize the source PNG to N colors
             // (16 = the normal 4bpp path). Replaces the LOD tiers on PSV.
@@ -17482,7 +17493,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 static void DrawCameraPresetsChunk(FloorSprite& sp)
 {
     ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), sBuildTarget == BuildTarget::PSV ? "Camera Presets (3D Scene)" : "Camera Presets (Mode 4)");
+    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), TargetPsvFamily() ? "Camera Presets (3D Scene)" : "Camera Presets (Mode 4)");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slot 0 is always the scene default camera. These are extra angles a SetCamera node blends to on an event (SetCamera Slot = 1, 2, ...). The camera keeps orbit-following the player.");
     for (int ci = 0; ci < (int)sp.cameraSlots.size(); ci++) {
         CameraSlot& cs = sp.cameraSlots[ci];
@@ -20367,10 +20378,15 @@ void FrameTick(float dt)
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        // PSV-only engine: GBA/NDS/PSP targets retired (see ASSET_PIPELINE_ROADMAP /
-        // PSV consolidation). The build always targets the Vita.
-        sBuildTarget = BuildTarget::PSV;
-        ImGui::TextDisabled("Target: PSV");
+        // GBA/NDS/PSP targets retired (see ASSET_PIPELINE_ROADMAP / PSV
+        // consolidation). Selectable: PSV (vpk) or Switch (nro) - the Switch
+        // runtime is a fork of the PSV one consuming the same psv_*.h headers.
+        if (sBuildTarget != BuildTarget::PSV && sBuildTarget != BuildTarget::Switch)
+            sBuildTarget = BuildTarget::PSV;
+        if (ImGui::MenuItem("Target: PSV (vpk)", nullptr, sBuildTarget == BuildTarget::PSV))
+            sBuildTarget = BuildTarget::PSV;
+        if (ImGui::MenuItem("Target: Switch (nro)", nullptr, sBuildTarget == BuildTarget::Switch))
+            sBuildTarget = BuildTarget::Switch;
         bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
         {
@@ -20393,10 +20409,12 @@ void FrameTick(float dt)
 
             const char* rtName = (sBuildTarget == BuildTarget::NDS) ? "nds_runtime"
                                : (sBuildTarget == BuildTarget::PSP) ? "psp_runtime"
-                               : (sBuildTarget == BuildTarget::PSV) ? "psv_runtime" : "gba_runtime";
+                               : (sBuildTarget == BuildTarget::PSV) ? "psv_runtime"
+                               : (sBuildTarget == BuildTarget::Switch) ? "switch_runtime" : "gba_runtime";
             const char* rtExt  = (sBuildTarget == BuildTarget::NDS) ? "affinity.nds"
                                : (sBuildTarget == BuildTarget::PSP) ? "EBOOT.PBP"
-                               : (sBuildTarget == BuildTarget::PSV) ? "build\\affinity_psv.vpk" : "affinity.gba";
+                               : (sBuildTarget == BuildTarget::PSV) ? "build\\affinity_psv.vpk"
+                               : (sBuildTarget == BuildTarget::Switch) ? "affinity_switch.nro" : "affinity.gba";
             // PSV is CMake-based (no Makefile); every other target has a Makefile.
             const char* rtMarker = (sBuildTarget == BuildTarget::PSV) ? "CMakeLists.txt" : "Makefile";
 
@@ -22164,14 +22182,14 @@ void FrameTick(float dt)
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
                              exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa, exportRigs, exportPspRigs, playerPspRigIdx]() {
                     std::string err;
-                    (void)target;   // PSV-only engine
                     bool ok = PackagePSV(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist,
                                         exportSoundSamples, exportSoundInstances,
                                         exportSkyFrames,
                                         exportScript, exportBlueprints, exportBpInstances,
                                         exportHudElements, exportTmScenes, exportStartMode,
-                                        0.0f, exportRigs, exportPspRigs, playerPspRigIdx, err);
+                                        0.0f, exportRigs, exportPspRigs, playerPspRigIdx, err,
+                                        target == BuildTarget::Switch);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -24249,7 +24267,7 @@ void FrameTick(float dt)
             }
 
             if (showM4 && !sMapScenes.empty()) {
-                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), sBuildTarget == BuildTarget::PSV ? "3D Scenes" : "Mode 4 Scenes");
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), TargetPsvFamily() ? "3D Scenes" : "Mode 4 Scenes");
                 for (int si = 0; si < (int)sMapScenes.size(); si++) {
                     char label[64];
                     snprintf(label, sizeof(label), "%s##m4sky%d", sMapScenes[si].name, si);
@@ -27607,6 +27625,34 @@ void FrameTick(float dt)
                         "    // afn_ai_charge_begin(): s_efbScale = afn_ai_orb_min;\n"
                         "    // afn_ai_charge_step():  s_efbScale = afn_ai_orb_min + (afn_ai_orb_max - afn_ai_orb_min)*frac;\n"
                         "    // afn_ai_fire_beam():    s_efbScale = afn_ai_orb_max; (charge shot in-flight)");
+                    break;
+                }
+                case VsNodeType::ThrowBall: {
+                    editorCode = "// Throw the aimed pokeball — drive from On Key RELEASED (pair with Aim Ball)";
+                    setActionFunc(infoNode, "_throw_ball",
+                        "    afn_pbt_on = 1;\n"
+                        "    afn_pbt_throw_req = 1;                           // throw THIS frame (On Key Released)\n"
+                        "    afn_pbt_clip = <Pitch Clip (int)>;               // unwired = name-resolved \"pitch\"\n"
+                        "    afn_pbt_release_pct = <Release % (int)>; afn_pbt_speed_x10 = <Speed x10 (int)>; afn_pbt_cooldown = <Cooldown (int)>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // PB_AIM + throw_req -> WINDUP: pitch clip held; at Release%% the hand ball\n"
+                        "    //   hides, arc flight starts, clip hold clears AND afn_player_frozen = 0.\n"
+                        "    // FLY->COOL: ball rides afn_pb_arc, despawns on the floor; after Cooldown\n"
+                        "    //   frames it respawns in the (idle-posed) hand. Both req flags clear each frame.");
+                    break;
+                }
+                case VsNodeType::AimBall: {
+                    editorCode = "// Aim the pokeball throw — drive from On Key HELD (pair with Throw Ball)";
+                    setActionFunc(infoNode, "_aim_ball",
+                        "    afn_pbt_on = 1;\n"
+                        "    afn_pbt_aim_req = 1;                             // keep aiming THIS frame (On Key Held)\n"
+                        "    afn_pbt_dist_min = <Dist Min (int)>; afn_pbt_dist_max = <Dist Max (int)>; afn_pbt_dist_def = <Dist Default (int)>;\n"
+                        "    afn_pbt_turn_x10 = <Turn Rate x10 (int)>; afn_pbt_drate_x10 = <Dist Rate x10 (int)>;\n"
+                        "    afn_pbt_arc_pct = <Arc % (int)>; afn_pbt_freeze = <Freeze Aim (int)>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // PB_IDLE + aim_req -> PB_AIM: playerYaw follows the aim; dotted arc + white\n"
+                        "    //   reticle at the landing spot; L-stick X turns, Y sets distance; freeze if\n"
+                        "    //   afn_pbt_freeze. aim_req dropped with no throw_req -> aim cancels to IDLE.");
                     break;
                 }
                 case VsNodeType::AiChargeStep: {
@@ -35983,8 +36029,8 @@ void FrameTick(float dt)
 
             // Canvas = target screen: GBA-native 240x160, or PSV's native 960x544
             // when building for PSV (menus authored at the real Vita resolution).
-            int baseW = sBuildTarget == BuildTarget::PSV ? 960 : 240;
-            int baseH = sBuildTarget == BuildTarget::PSV ? 544 : 160;
+            int baseW = TargetPsvFamily() ? 960 : 240;
+            int baseH = TargetPsvFamily() ? 544 : 160;
             // Auto-fit when the target (hence base resolution) changes.
             static BuildTarget sHudLastTarget = (BuildTarget)-1;
             if (sHudLastTarget != sBuildTarget) {
@@ -36700,7 +36746,7 @@ void FrameTick(float dt)
 
             // Zoom with scroll
             if (canvasHovered && ImGui::GetIO().MouseWheel != 0) {
-                float zMin = sBuildTarget == BuildTarget::PSV ? 0.2f : 1.0f;
+                float zMin = TargetPsvFamily() ? 0.2f : 1.0f;
                 sHudCanvasZoom = std::clamp(sHudCanvasZoom + ImGui::GetIO().MouseWheel * 0.25f, zMin, 8.0f);
             }
 
@@ -37138,7 +37184,7 @@ void FrameTick(float dt)
                     int enabledCount = 0;
                     for (int si = 0; si < count; si++) if (el.mode0SceneMask & (1u << si)) enabledCount++;
                     char label0[64];
-                    const char* m0Pfx = sBuildTarget == BuildTarget::PSV ? "2D" : "Mode 0";
+                    const char* m0Pfx = TargetPsvFamily() ? "2D" : "Mode 0";
                     if (allOn || enabledCount == count) snprintf(label0, sizeof(label0), "%s Scenes: All", m0Pfx);
                     else snprintf(label0, sizeof(label0), "%s Scenes: %d/%d", m0Pfx, enabledCount, count);
                     if (ImGui::TreeNode(label0)) {
@@ -37165,7 +37211,7 @@ void FrameTick(float dt)
                     int enabledCount4 = 0;
                     for (int si = 0; si < count4; si++) if (el.mode4SceneMask & (1u << si)) enabledCount4++;
                     char label4[64];
-                    const char* m4Pfx = sBuildTarget == BuildTarget::PSV ? "3D" : "Mode 4";
+                    const char* m4Pfx = TargetPsvFamily() ? "3D" : "Mode 4";
                     if (allOn4 || enabledCount4 == count4) snprintf(label4, sizeof(label4), "%s Scenes: All", m4Pfx);
                     else snprintf(label4, sizeof(label4), "%s Scenes: %d/%d", m4Pfx, enabledCount4, count4);
                     if (ImGui::TreeNode(label4)) {
@@ -39165,7 +39211,7 @@ void FrameTick(float dt)
     // ---- Package status popup ----
     if (sPackaging || sPackageDone)
     {
-        bool psvPkg = (sBuildTarget == BuildTarget::PSV);
+        bool psvPkg = TargetPsvFamily();   // Switch shares the live compile terminal
         // PSV gets a resizable window so the live compile terminal can be dragged
         // bigger; other targets keep the compact auto-sized popup.
         if (psvPkg) ImGui::SetNextWindowSize(ImVec2(840, 600), ImGuiCond_Appearing);
@@ -39174,7 +39220,8 @@ void FrameTick(float dt)
             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
         const char* pkgTitle = sBuildTarget == BuildTarget::NDS ? "NDS Package"
                              : sBuildTarget == BuildTarget::PSP ? "PSP Package"
-                             : sBuildTarget == BuildTarget::PSV ? "PS Vita Package" : "GBA Package";
+                             : sBuildTarget == BuildTarget::PSV ? "PS Vita Package"
+                             : sBuildTarget == BuildTarget::Switch ? "Switch Package" : "GBA Package";
         ImGuiWindowFlags pkgFlags = ImGuiWindowFlags_NoCollapse;
         if (!psvPkg) pkgFlags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize;
         ImGui::Begin(pkgTitle, nullptr, pkgFlags);
@@ -39183,7 +39230,8 @@ void FrameTick(float dt)
         {
             ImGui::Text(sBuildTarget == BuildTarget::NDS ? "Building NDS ROM..."
                       : sBuildTarget == BuildTarget::PSP ? "Building PSP EBOOT..."
-                      : sBuildTarget == BuildTarget::PSV ? "Building PS Vita VPK (vitaGL)..." : "Building GBA ROM...");
+                      : sBuildTarget == BuildTarget::PSV ? "Building PS Vita VPK (vitaGL)..."
+                      : sBuildTarget == BuildTarget::Switch ? "Building Switch NRO (GLES1)..." : "Building GBA ROM...");
             // Simple spinner
             const char* spinner = "|/-\\";
             static int frame = 0;
@@ -39192,7 +39240,7 @@ void FrameTick(float dt)
 
             // Live compile terminal (PSV): stream the toolchain output so you can
             // watch which file the build is sitting on (the long pole stalls there).
-            if (sBuildTarget == BuildTarget::PSV)
+            if (TargetPsvFamily())
             {
                 std::string snapshot;
                 { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); snapshot = g_psvBuildLog; }
@@ -39246,6 +39294,7 @@ void FrameTick(float dt)
                 const char* openLabel = (sBuildTarget == BuildTarget::NDS) ? "  Open ROM  "
                                       : (sBuildTarget == BuildTarget::PSP) ? "  Open in PPSSPP  "
                                       : (sBuildTarget == BuildTarget::PSV) ? "  Open in Vita3K  "
+                                      : (sBuildTarget == BuildTarget::Switch) ? "  Open Folder  "
                                       : "  Open in mGBA  ";
                 float mgbaW = std::max(140.0f * sUiScale, ImGui::CalcTextSize(openLabel).x + 20.0f);
                 if (ImGui::Button(openLabel, ImVec2(mgbaW, btnH)))
@@ -39284,6 +39333,13 @@ void FrameTick(float dt)
                         }
                         if (!launched)
                             ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                    else if (sBuildTarget == BuildTarget::Switch)
+                    {
+                        // Reveal the built .nro in Explorer — copy it to the SD
+                        // card's /switch/ folder (or FTP it) from there.
+                        std::string args = "/select,\"" + sPackageOutputPath + "\"";
+                        ShellExecuteA(nullptr, "open", "explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
                     }
                     else if (sBuildTarget == BuildTarget::GBA && sMgbaPath[0])
                     {

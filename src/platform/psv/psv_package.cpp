@@ -832,7 +832,8 @@ bool PackagePSV(const std::string& runtimeDir,
                 const std::vector<AfnRiggedMeshExport>& /*rigs*/,
                 const std::vector<AfnRigExport>& pspRigs,
                 int playerRigIdx,
-                std::string& errorMsg) {
+                std::string& errorMsg,
+                bool switchNro) {
     { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); g_psvBuildLog.clear(); }   // reset the compile terminal
     // 1) Regenerate the shared headers (mapdata/sky/sprites/sound/player), but
     //    SKIP the single-rig generator (emitRig=false) — PSV emits its own
@@ -878,31 +879,44 @@ bool PackagePSV(const std::string& runtimeDir,
         sf << "#define AFN_START_SCENE 0\n";
     }
 
-    PsvBuildLog("Compiling (cmake + make)...\n");
-    // 2) Build affinity_psv.vpk via the VitaSDK CMake toolchain. cmake re-runs
-    //    are cheap on an already-configured build dir, and CMake tracks header
-    //    deps, so a regenerated psv_mapdata.h forces main.c to recompile.
+    // 2) Build. PSV: affinity_psv.vpk via the VitaSDK CMake toolchain (cmake
+    //    re-runs are cheap on a configured build dir, and CMake tracks header
+    //    deps, so a regenerated psv_mapdata.h forces main.c to recompile).
+    //    Switch: affinity_switch.nro via devkitPro make — the switch_runtime is
+    //    a fork of the PSV runtime that consumes the SAME psv_*.h headers, so
+    //    only the compiler invocation differs.
     std::string msysDir = ToMsysPath(runtimeDir);
-    std::string buildCmd =
-        "export VITASDK=/c/vitasdk; export PATH=\\\"$VITASDK/bin:$PATH\\\"; "
-        "cd '" + msysDir + "' && mkdir -p build && cd build && "
-        "cmake .. && make -j$(nproc) 2>&1";
+    std::string buildCmd, builtArtifact;
+    if (switchNro) {
+        PsvBuildLog("Compiling (devkitPro make -> .nro)...\n");
+        buildCmd = "export DEVKITPRO=/opt/devkitpro; "
+                   "cd '" + msysDir + "' && make -j$(nproc) 2>&1";
+        builtArtifact = msysDir + "/affinity_switch.nro";
+    } else {
+        PsvBuildLog("Compiling (cmake + make)...\n");
+        buildCmd = "export VITASDK=/c/vitasdk; export PATH=\\\"$VITASDK/bin:$PATH\\\"; "
+                   "cd '" + msysDir + "' && mkdir -p build && cd build && "
+                   "cmake .. && make -j$(nproc) 2>&1";
+        builtArtifact = msysDir + "/build/affinity_psv.vpk";
+    }
     std::string out;
     int rc = RunMsysBash(buildCmd, out);
     if (rc != 0) {
-        errorMsg = "psv_*.h headers generated, but the Vita build failed (rc="
+        errorMsg = std::string("psv_*.h headers generated, but the ")
+                 + (switchNro ? "Switch" : "Vita") + " build failed (rc="
                  + std::to_string(rc) + "):\n" + out
-                 + "\n\nIf VitaSDK isn't set up, the headers are still written — build manually with cmake/make in psv_runtime.";
+                 + (switchNro
+                    ? "\n\nIf devkitPro/switch-mesa isn't set up, the headers are still written — build manually with make in switch_runtime."
+                    : "\n\nIf VitaSDK isn't set up, the headers are still written — build manually with cmake/make in psv_runtime.");
         return false;
     }
 
-    // 3) Copy the vpk to the requested output path if it differs from where the
-    //    build wrote it (build/affinity_psv.vpk).
-    std::string builtVpk = msysDir + "/build/affinity_psv.vpk";
+    // 3) Copy the artifact to the requested output path if it differs from
+    //    where the build wrote it.
     if (!outputPath.empty()) {
         std::string dst = ToMsysPath(outputPath);
-        if (dst != builtVpk) {
-            std::string cp = "cp '" + builtVpk + "' '" + dst + "' 2>&1";
+        if (dst != builtArtifact) {
+            std::string cp = "cp '" + builtArtifact + "' '" + dst + "' 2>&1";
             std::string cpout;
             RunMsysBash(cp, cpout);   // best-effort
         }

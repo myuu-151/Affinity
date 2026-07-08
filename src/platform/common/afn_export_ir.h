@@ -645,6 +645,8 @@ enum class AfnScriptNodeType : int {
     ThunderStrike,   // action: release the Thunder strike at the aim
     AimStick,        // action: left stick moves the floor reticle + auto-orbits the camera
     AiOrbScale,      // action (enemy AI): set the enemy focus-orb charge Min/Max Scale%
+    ThrowBall,       // action (On Key Released): throw the aimed pokeball
+    AimBall,         // action (On Key Held): aim the pokeball throw
     COUNT
 };
 

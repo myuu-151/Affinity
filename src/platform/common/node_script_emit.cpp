@@ -1180,6 +1180,34 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_ai_orb_min = " << (d0?resolveInt(d0):5) << " * 0.01f; afn_ai_orb_max = " << (d1?resolveInt(d1):55) << " * 0.01f;\n";
                 break;
             }
+            case AfnScriptNodeType::ThrowBall: {
+                // Throw the aimed pokeball (drive On Key Released). The clip pin
+                // name-resolves "pitch" like AiClips so a glTF re-sort can't drift it.
+                auto* d0=findDataIn(a->id,0);  auto* d1=findDataIn(a->id,1);
+                auto* d2=findDataIn(a->id,2);  auto* d3=findDataIn(a->id,3);
+                int clipDef = -1;
+                for (size_t ci = 0; ci < clipNames.size(); ci++) {
+                    std::string n = clipNames[ci];
+                    for (auto& ch : n) ch = (char)tolower((unsigned char)ch);
+                    if (n == "pitch") { clipDef = (int)ci; break; }
+                }
+                f << "    afn_pbt_on = 1; afn_pbt_throw_req = 1;\n";
+                f << "    afn_pbt_clip = " << (d0?resolveInt(d0):clipDef) << "; afn_pbt_release_pct = " << (d1?resolveInt(d1):42)
+                  << "; afn_pbt_speed_x10 = " << (d2?resolveInt(d2):34) << "; afn_pbt_cooldown = " << (d3?resolveInt(d3):30) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::AimBall: {
+                // Aim the pokeball throw (drive On Key Held).
+                auto* d0=findDataIn(a->id,0);  auto* d1=findDataIn(a->id,1);  auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3);  auto* d4=findDataIn(a->id,4);  auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6);
+                f << "    afn_pbt_on = 1; afn_pbt_aim_req = 1;\n";
+                f << "    afn_pbt_dist_min = " << (d0?resolveInt(d0):18) << "; afn_pbt_dist_max = " << (d1?resolveInt(d1):150)
+                  << "; afn_pbt_dist_def = " << (d2?resolveInt(d2):70) << ";\n";
+                f << "    afn_pbt_turn_x10 = " << (d3?resolveInt(d3):24) << "; afn_pbt_drate_x10 = " << (d4?resolveInt(d4):20)
+                  << "; afn_pbt_arc_pct = " << (d5?resolveInt(d5):42) << "; afn_pbt_freeze = " << (d6?resolveInt(d6):1) << ";\n";
+                break;
+            }
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
             case AfnScriptNodeType::AiFireBeam: {
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Charged / Tap SFX (5 / 6)

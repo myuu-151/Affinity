@@ -42,6 +42,10 @@ bool PackagePSV(const std::string& runtimeDir,
                 const std::vector<AfnRiggedMeshExport>& rigs,
                 const std::vector<AfnRigExport>& pspRigs,
                 int playerRigIdx,
-                std::string& errorMsg);
+                std::string& errorMsg,
+                bool switchNro = false);   // true: runtimeDir is switch_runtime/ — emit the
+                                           // same psv_*.h headers there, then build
+                                           // affinity_switch.nro via devkitPro make instead
+                                           // of the VitaSDK cmake/vpk step.
 
 } // namespace Affinity

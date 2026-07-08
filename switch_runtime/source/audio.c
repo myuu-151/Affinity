@@ -8,8 +8,7 @@
 // psp_sound.h.
 #include "psv_sound.h"
 
-#include <psp2/kernel/threadmgr.h>
-#include <psp2/audioout.h>
+#include <switch.h>
 #include <string.h>
 
 #ifndef AFN_HAS_SOUND
@@ -35,8 +34,10 @@ int  afn_sfx_active(int s) { (void)s; return 0; }
 #else
 
 // ---- Output config --------------------------------------------------------
-#define OUT_RATE     44100          // a Vita-supported sceAudioOut rate
-#define AUDIO_FRAMES 1024           // stereo frames per output buffer (64-aligned)
+#define OUT_RATE     48000          // libnx audout is fixed at 48 kHz; the mixer's
+                                    // hz_to_inc derives all voice stepping from this,
+                                    // so every pitch stays correct.
+#define AUDIO_FRAMES 1024           // stereo frames per buffer (4096 B = audout-aligned)
 #define SND_MAX_VOICES 16
 
 // ---- Software voice -------------------------------------------------------
@@ -71,14 +72,16 @@ static int afn_persist_link = 0;       // link group of the currently-held music
 static int afn_persist_inst = -1;      // sound-instance id of the held music, -1 = none
 static int snd_pitch_bend[16];
 
-static SceUID s_mutex = -1;
-static int    s_port  = -1;
+static Mutex  s_mutex;             // zero-init is a valid unlocked libnx Mutex
 static volatile int s_running = 0;
-static short  s_outbuf[2][AUDIO_FRAMES * 2] __attribute__((aligned(64)));
+static short  s_outbuf[2][AUDIO_FRAMES * 2] __attribute__((aligned(0x1000)));
+static AudioOutBuffer s_audioBuf[2];
+static Thread s_audioThread;
+static int    s_audioOk = 0;
 static int    s_acc[AUDIO_FRAMES * 2];
 
-static inline void lock(void)   { if (s_mutex >= 0) sceKernelWaitSema(s_mutex, 1, 0); }
-static inline void unlock(void) { if (s_mutex >= 0) sceKernelSignalSema(s_mutex, 1); }
+static inline void lock(void)   { mutexLock(&s_mutex); }
+static inline void unlock(void) { mutexUnlock(&s_mutex); }
 
 static const unsigned int k_semi_2_16[12] = {
     65536, 69433, 73562, 77937, 82570, 87480,
@@ -554,30 +557,41 @@ static void mix_buffer(short* out, int frames) {
     }
 }
 
-static int audio_thread(SceSize args, void* argp) {
-    (void)args; (void)argp;
-    int cur = 0;
+static void audio_thread(void* argp) {
+    (void)argp;
     while (s_running) {
-        short* buf = s_outbuf[cur];
+        AudioOutBuffer* released = NULL;
+        u32 count = 0;
+        // Blocks until a submitted buffer finishes playing, then refill + resubmit.
+        if (R_FAILED(audoutWaitPlayFinish(&released, &count, UINT64_MAX)) || !released)
+            continue;
         lock();
-        mix_buffer(buf, AUDIO_FRAMES);
+        mix_buffer((short*)released->buffer, AUDIO_FRAMES);
         unlock();
-        sceAudioOutOutput(s_port, buf);   // blocks until a buffer slot frees
-        cur ^= 1;
+        audoutAppendAudioOutBuffer(released);
     }
-    return 0;
 }
 
 void afn_audio_init(void) {
     for (int i = 0; i < SND_MAX_VOICES; i++) snd_voices[i].playing = 0;
-    s_mutex = sceKernelCreateSema("afn_snd", 0, 1, 1, 0);
-    s_port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, AUDIO_FRAMES, OUT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
-    if (s_port < 0) return;   // no output port — stay silent
-    int vol[2] = { SCE_AUDIO_VOLUME_0DB, SCE_AUDIO_VOLUME_0DB };
-    sceAudioOutSetVolume(s_port, SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH, vol);
+    mutexInit(&s_mutex);
+    if (R_FAILED(audoutInitialize())) return;      // no audio service — stay silent
+    if (R_FAILED(audoutStartAudioOut())) { audoutExit(); return; }
+    // Prime both buffers with silence so the thread's wait/refill loop can spin.
+    for (int i = 0; i < 2; i++) {
+        memset(s_outbuf[i], 0, sizeof(s_outbuf[i]));
+        s_audioBuf[i].next        = NULL;
+        s_audioBuf[i].buffer      = s_outbuf[i];
+        s_audioBuf[i].buffer_size = sizeof(s_outbuf[i]);
+        s_audioBuf[i].data_size   = sizeof(s_outbuf[i]);
+        s_audioBuf[i].data_offset = 0;
+        audoutAppendAudioOutBuffer(&s_audioBuf[i]);
+    }
     s_running = 1;
-    SceUID th = sceKernelCreateThread("afn_audio", audio_thread, 0x10000100, 0x4000, 0, 0, 0);
-    if (th >= 0) sceKernelStartThread(th, 0, 0);
+    if (R_SUCCEEDED(threadCreate(&s_audioThread, audio_thread, NULL, NULL, 0x4000, 0x2C, -2))) {
+        threadStart(&s_audioThread);
+        s_audioOk = 1;
+    }
 }
 
 #endif // AFN_HAS_SOUND

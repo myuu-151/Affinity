@@ -4,10 +4,7 @@
 // culling / bucketing and no texture swizzling (just upload GL textures and
 // draw each mesh's full index buffer). Free-orbit camera so the level can be
 // inspected on-device. Rig / sprites / sky / audio / collision come next.
-#include <vitaGL.h>
-#include <psp2/ctrl.h>
-#include <psp2/kernel/processmgr.h>
-#include <psp2/power.h>
+#include "switch_port.h"   // libnx + EGL/GLES1.1 + Vita-shaped input shim
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -907,7 +904,7 @@ static void look_at(float m[16],
 // would fail silently on the default heap and drop the AO pass on hardware.
 // The expand buffer is freed right after glTexImage2D, so this is peak, not
 // resident.
-int _newlib_heap_size_user = 96 * 1024 * 1024;
+// (vita newlib heap directive removed - libnx heap covers it)
 
 static GLuint s_meshLmTex[256];   // lightmap texture per mesh (0 = none)
 static GLuint s_meshAoTex[256];   // AO-map texture per mesh (0 = none)
@@ -6043,7 +6040,7 @@ int main(void)
 #endif
     script_start();   // OnStart + blueprint start hooks
 
-    while (1) {
+    while (appletMainLoop()) {
         sceCtrlPeekBufferPositiveExt2(0, &pad, 1);   // Ext2 = includes L2/R2/L3/R3 (rear touch)
         // No hardcoded quit: Start is a normal node-readable key (KEY_START).
         // Exit the app via the PS/home menu. (Previously Start broke the loop,
