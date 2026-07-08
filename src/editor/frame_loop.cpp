@@ -960,6 +960,7 @@ enum class VsNodeType : int {
     AiOrbScale,      // action (enemy AI): set the enemy focus-orb charge Min/Max Scale%
     ThrowBall,       // action (drive from On Key RELEASED): throw the aimed pokeball (pitch anim + arc flight)
     AimBall,         // action (drive from On Key HELD): aim the pokeball throw (arc + reticle; L-stick steers)
+    PhysicalClash,   // action (config, wire On Start): arm the dash-vs-dash QTE struggle (prompts + pressure meter)
     COUNT
 };
 
@@ -1385,6 +1386,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Ai Orb Scale",     0xFFAA4422, 1, 1, 2, 0, {"Min Scale% (int)","Max Scale% (int)"}, {}, {} },
     { "Throw Ball",       0xFF7744CC, 1, 1, 4, 0, {"Pitch Clip (int)","Release % (int)","Speed x10 (int)","Cooldown (int)"}, {}, {} },
     { "Aim Ball",         0xFF7744CC, 1, 1, 7, 0, {"Dist Min (int)","Dist Max (int)","Dist Default (int)","Turn Rate x10 (int)","Dist Rate x10 (int)","Arc % (int)","Freeze Aim (int)"}, {}, {} },
+    { "Physical Clash",   0xFFCC5533, 1, 1, 10, 0, {"Meet Radius (int)","Push x1000 (int)","Miss x1000 (int)","Ai Push x1000 (int)","Enemy Dmg (int)","Player Dmg (int)","Cooldown (int)","Window (int)","Ai Wait (int)","Knockback (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1472,6 +1474,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
     case VsNodeType::ThrowBall:     desc = "Throws the aimed pokeball — drive from On Key RELEASED (same key as the Aim Ball On Key Held). The pitch clip plays, the hand ball detaches at Release % of the clip, flies the aimed arc, and despawns on landing; after Cooldown frames it respawns in the hand. Any aim freeze is released the moment the ball detaches. Pitch Clip unwired = name-resolves 'pitch'. Pair with Aim Ball; needs a bone-attached hand model + player rig."; break;
     case VsNodeType::AimBall:       desc = "Aims the pokeball throw — drive from On Key HELD. While held: a dotted arc + white floor reticle preview the shot, L-stick X turns the aim, L-stick Y sets the distance (Dist Min..Max, starting at Dist Default). Freeze Aim (default 1) locks player movement while aiming. Release the key into an On Key Released -> Throw Ball to fire; letting go with no Throw Ball wired just cancels the aim. Without these nodes the system is fully dormant."; break;
+    case VsNodeType::PhysicalClash: desc = "Arms the PHYSICAL clash (wire from On Start): when the player's Quick Attack dash and the enemy's dash meet head-on within Meet Radius, both fighters lock nose-to-nose and a pressure QTE begins — random face-button prompts shove the meter toward the enemy (Push), wrong buttons bleed it back (Miss), and the AI shoves on its own cadence (Ai Push / Ai Wait). Prompts and AI both quicken as the meter nears either edge (base Window frames). Overflow a side to resolve: winner deals Enemy/Player Dmg + launches the loser with Knockback frames of shove. Cooldown frames before it can re-trigger. Without this node the system is fully dormant. x1000 pins: 60 = 0.060 meter shove."; break;
     case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
     case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
     case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
@@ -27639,6 +27642,23 @@ void FrameTick(float dt)
                         "    //   hides, arc flight starts, clip hold clears AND afn_player_frozen = 0.\n"
                         "    // FLY->COOL: ball rides afn_pb_arc, despawns on the floor; after Cooldown\n"
                         "    //   frames it respawns in the (idle-posed) hand. Both req flags clear each frame.");
+                    break;
+                }
+                case VsNodeType::PhysicalClash: {
+                    editorCode = "// Arm the dash-vs-dash pressure QTE (wire from On Start)";
+                    setActionFunc(infoNode, "_physical_clash",
+                        "    afn_pc_on = 1;                                   // arm the physical clash\n"
+                        "    afn_pc_meet_r = <Meet Radius (int)>;             // dash-vs-dash contact radius\n"
+                        "    afn_pc_push_m = <Push x1000 (int)>; afn_pc_miss_m = <Miss x1000 (int)>; afn_pc_ai_push_m = <Ai Push x1000 (int)>;\n"
+                        "    afn_pc_dmg_e = <Enemy Dmg (int)>; afn_pc_dmg_p = <Player Dmg (int)>;\n"
+                        "    afn_pc_cd_frames = <Cooldown (int)>; afn_pc_window = <Window (int)>; afn_pc_ai_wait = <Ai Wait (int)>;\n"
+                        "    afn_pc_knock = <Knockback (int)>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Trigger: QA dash grace + enemy dash grace + dist <= afn_pc_meet_r -> lock both,\n"
+                        "    //   cancel dashes, suppress beams, play AFN_SND_CLASH, pressure = 0.5.\n"
+                        "    // QTE: correct prompt += push, wrong -= miss, AI -= ai_push on its cadence;\n"
+                        "    //   pc_window()/pc_ai_wait() tighten from Window/Ai Wait toward the edges.\n"
+                        "    // Resolve at 0/1: dmg + knockback launch, cooldown afn_pc_cd_frames.");
                     break;
                 }
                 case VsNodeType::AimBall: {

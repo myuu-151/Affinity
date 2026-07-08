@@ -444,6 +444,16 @@ int afn_clash_ai_jit = 1, afn_clash_fumble_pct = 1, afn_clash_fumble_len = 6;
 // hammers your balance — punish % = chance per press to start one, punish len =
 // how many fast presses it lasts. 0 % = off. (Beam Clash node tunables.)
 int afn_clash_punish_pct = 0, afn_clash_punish_len = 4;
+// Physical Clash node (afn_pc_*): dash-vs-dash QTE tunables. afn_pc_on gates the
+// whole system — with no Physical Clash node wired it is fully dormant (no
+// trigger sensing, no QTE, no render), so it can't leak into other projects.
+int afn_pc_on = 0;
+int afn_pc_meet_r = 24;                       // dash-vs-dash contact radius
+int afn_pc_push_m = 60, afn_pc_miss_m = 25, afn_pc_ai_push_m = 48;   // meter shoves x1000
+int afn_pc_dmg_e = 12, afn_pc_dmg_p = 10;     // resolve damage
+int afn_pc_cd_frames = 150;                   // re-trigger cooldown
+int afn_pc_window = 55, afn_pc_ai_wait = 50;  // base prompt window / AI cadence (frames)
+int afn_pc_knock = 14;                        // knockback shove frames
 static int s_clashPunishLeft = 0;   // fast-press presses remaining in the current burst
 void afn_clash_suppress_beams(void);     // fwd (defined below) — node SuppressBeams / ClashBegin
 // The real body is guarded by AFN_HAS_HUD && AFN_HAS_PLAYER_RIG && AFN_HAS_SPRITE_IDX,
@@ -2985,13 +2995,14 @@ static void afn_flamewheel_render(const float* view, float px, float py, float p
 }
 
 // ---------------------------------------------------------------------------
-// PHYSICAL CLASH — HARDCODED prototype. When the player's Quick Attack and the
+// PHYSICAL CLASH — NODE-DRIVEN (Physical Clash node; afn_pc_* tunables).
+// When the player's Quick Attack and the
 // enemy's dash-in meet head-on, both lock into a PRESSURE STRUGGLE: a button
 // prompt (Cross/Circle/Square/Triangle) floats over the fighters — hit the
 // matching button to shove the meter toward the enemy; the AI shoves back on
 // its own cadence. Prompts start SLOW near the middle and come faster and
 // faster as the meter is pushed toward either side. Overflow a side to win:
-// the loser eats damage + knockback. Migrate to nodes once the feel is right.
+// the loser eats damage + knockback. Armed by the Physical Clash node (afn_pc_on).
 // ---------------------------------------------------------------------------
 static int   s_pc_active=0, s_pc_cd=0, s_pc_t=0;
 static float s_pc_pressure=0.5f;                 // 0 = player overwhelmed (loss) .. 1 = enemy overwhelmed (win)
@@ -3003,19 +3014,16 @@ static int   s_pc_pG=0, s_pc_eG=0;               // dash GRACE — frames since 
                                                  // (forgiving trigger: a bump right as a dash ends still clashes)
 static unsigned s_pc_rng=0x51u;
 static float pc_rand(void){ s_pc_rng=s_pc_rng*1664525u+1013904223u; return (float)((s_pc_rng>>8)&0xFFFF)/65535.0f; }
-#define PC_MEET_R    24.0f    // dash-vs-dash contact radius that triggers the clash (roomy)
-#define PC_PUSH      0.060f   // player shove per correct prompt
-#define PC_MISS      0.025f   // bleed-back for hitting the WRONG face button
-#define PC_AI_PUSH   0.048f   // AI shove per cadence tick
-#define PC_DMG_E     12       // damage to the enemy on a win
-#define PC_DMG_P     10       // damage to the player on a loss
-#define PC_CD        150      // frames before another clash can trigger
+// (Tunables live on the Physical Clash node pins -> afn_pc_* globals.)
 // Cadence: slow near the centre, quickening toward the edges — BOTH the player's prompt
 // window and the AI's shove interval tighten as the meter leaves the middle. The floor is
 // kept humane (was 55->18 / 50->20 — too fast to read near the end).
 // Past the 80% mark of either side (d>0.6), an EXTRA kick makes the final stretch noticeably quicker.
-static int pc_window(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float w=55.0f - d*30.0f; if(d>0.6f) w-=(d-0.6f)*6.0f; return (int)w; }
-static int pc_ai_wait(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float w=50.0f - d*27.0f; if(d>0.6f) w-=(d-0.6f)*5.0f; return (int)(w*(0.8f+pc_rand()*0.5f)); }
+extern int afn_pc_window, afn_pc_ai_wait;   // Physical Clash node tunables (defined with afn_pc_on below)
+// Cadence keeps the prototype's SHAPE (tighten toward the edges, extra kick past
+// 80%) but scales it from the node's base Window / Ai Wait instead of 55/50.
+static int pc_window(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float W=(float)afn_pc_window; float w=W - d*(W*0.5455f); if(d>0.6f) w-=(d-0.6f)*6.0f; if(w<6.0f)w=6.0f; return (int)w; }
+static int pc_ai_wait(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float W=(float)afn_pc_ai_wait; float w=W - d*(W*0.54f); if(d>0.6f) w-=(d-0.6f)*5.0f; if(w<6.0f)w=6.0f; return (int)(w*(0.8f+pc_rand()*0.5f)); }
 static int pc_enemy_npc(void){ for(int i=0;i<AFN_NPC_COUNT;i++) if((int)afn_npc_inst[i][7]==AFN_ENEMY_EIDX) return i; return -1; }
 // (The struggle UI is drawn as a fullscreen 2D cut-in — physclash_render_2d, defined with the
 //  other HUD-space renderers next to clash_render_2d — matching the beam clash's presentation.)
@@ -4186,10 +4194,6 @@ static void afn_thunder_step(const float* view, float px, float py, float pz, fl
 #endif
     // Node-driven: the Thunder Charge node sets afn_thunder_charge_req each frame it runs
     // (drive On Key Held); the Thunder Strike node sets afn_thunder_strike_req on release.
-#if 0   // dev test: Select also charges/strikes Thunder — DISABLED so Select casts Meteor Mash.
-    if (afn_keys_held & KEY_SELECT) afn_thunder_charge_req = 1;
-    if (afn_keys_released & KEY_SELECT) afn_thunder_strike_req = 1;
-#endif
     int charge = afn_thunder_charge_req; afn_thunder_charge_req = 0;
     int strike = afn_thunder_strike_req; afn_thunder_strike_req = 0;
     float yr = yawDeg * (3.14159265f/180.0f);
@@ -4307,27 +4311,20 @@ void afn_reticle_render(const float* view, float px, float py, float pz, float y
 }
 
 // ============================================================================
-// HARDCODED PROTOTYPE — "throw a pokeball" (aim an arc + floor reticle, play the
+// POKEBALL THROW — NODE-DRIVEN (Aim Ball / Throw Ball nodes; see afn_pbt_*).
+// Runtime primitives for the throw (aim an arc + floor reticle, play the
 // pitch anim, the ball leaves the hand mid-throw, flies the arc, and despawns on
 // the floor). Reuses the bone-attached sub-model (the hand pokeball), the reticle
 // node renderer (afn_reticle_*), and the player clip-hold path (s_playerClipHold).
-// Migrate to nodes later (feedback_hardcode_first). Controls:
-//   hold R  = aim   (L-stick X = turn aim, L-stick Y = throw distance)
-//   release = throw
+// Armed by Aim Ball (On Key Held) + Throw Ball (On Key Released); afn_pbt_on
+// gates everything, so a project without the nodes never runs any of this.
 // Gated so a scene without an attached model / player rig is unaffected.
 // ============================================================================
 #if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
-#define AFN_PB_AIM_KEY      KEY_R        // hold to aim, release to throw
-#define AFN_PB_PITCH_CLIP   2            // "pitch" (rig clips alphabetical: hurl0 idle1 pitch2 pokeball_idle3 run4 tpos5 walk6)
-#define AFN_PB_RELEASE_FRAC 0.42f        // ball leaves the hand at this fraction of the pitch clip
-#define AFN_PB_DIST_MIN     18.0f
-#define AFN_PB_DIST_MAX     150.0f
-#define AFN_PB_DIST_DEF     70.0f
-#define AFN_PB_YAW_RATE     2.4f         // deg/frame aim turn (L-stick X)
-#define AFN_PB_DIST_RATE    2.0f         // units/frame aim distance (L-stick Y)
-#define AFN_PB_SPEED        3.4f         // ball ground units advanced per frame
-#define AFN_PB_ARC_K        0.42f        // arc peak height = K * ground distance
-#define AFN_PB_COOLDOWN     30           // frames the hand stays empty after a landing
+// Tunables live on the Aim Ball / Throw Ball node pins (afn_pbt_*). Only the
+// fallbacks the runtime still needs are kept:
+#define AFN_PB_PITCH_CLIP   2            // clip fallback when the node pin is unresolved
+#define AFN_PB_DIST_DEF     70.0f        // s_pb_dist boot value (node overwrites on aim)
 
 enum { PB_IDLE = 0, PB_AIM, PB_WINDUP, PB_FLY, PB_COOL };
 static int   s_pb_state = PB_IDLE;
@@ -5375,7 +5372,7 @@ static void hud_ring2d(float cx,float cy,float r,float hw,unsigned col){
         float nx=cx+cosf(a)*r, ny=cy+sinf(a)*r;
         hud_seg(px2,py2,nx,ny,hw,col); px2=nx; py2=ny; }
 }
-// PHYSICAL CLASH 2D cut-in (HARDCODED prototype): the beam clash's presentation language —
+// PHYSICAL CLASH 2D cut-in (node-armed): the beam clash's presentation language —
 // fullscreen speed-line backdrop — but tinted RED, with impact flashes popping here and there
 // in the background, and the pressure bar + button prompt drawn on top.
 static void physclash_render_2d(void){
@@ -5479,7 +5476,7 @@ static void hud_render(void) {
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
-    // PHYSICAL CLASH (HARDCODED prototype): fullscreen RED cut-in (speed-line backdrop +
+    // PHYSICAL CLASH (node-armed): fullscreen RED cut-in (speed-line backdrop +
     // background impact flashes + pressure bar/prompt) UNDER the normal HUD elements.
     if (s_pc_active) physclash_render_2d();
 
@@ -6105,7 +6102,7 @@ int main(void)
         afn_lock_functions = 0;   // Lock Player Functions node re-asserts each frame it runs (the held-mask above already consumed last frame's value)
         script_tick();   // runs even while paused (HUD upkeep); AI + projectiles self-gate on afn_paused, freeze block (below) zeros player actions
 #if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
-        // HARDCODED pokeball throw — state machine (see the block near afn_reticle_render).
+        // Pokeball throw (node-armed) — state machine (see the block near afn_reticle_render).
         // Runs before the freeze block so aiming/throwing can freeze player translation.
         {
             if (!s_pb_init) {   // one-time: locate the hand-attached ball mesh instance
@@ -7115,16 +7112,17 @@ int main(void)
             playerYaw = s_fw_yaw;
         }
 #ifdef AFN_HAS_PLAYER_RIG
-        // PHYSICAL CLASH (HARDCODED prototype): sense the player's Quick Attack meeting the enemy's
+        // PHYSICAL CLASH (node-armed, afn_pc_on): sense the player's Quick Attack meeting the enemy's
         // dash-in head-on; lock both in place and run the pressure struggle (prompts + AI cadence).
         if (s_pc_cd > 0) s_pc_cd--;
         if (afn_qa_phase == 1) s_pc_pG = 12; else if (s_pc_pG > 0) s_pc_pG--;   // refresh/bleed the grace windows
         if (s_eqaPhase == 1)   s_pc_eG = 12; else if (s_pc_eG > 0) s_pc_eG--;
-        if (!s_pc_active && s_pc_cd == 0 && s_pc_pG > 0 && s_pc_eG > 0 && afn_hp[AFN_ENEMY_EIDX] > 0) {
+        if (afn_pc_on && !s_pc_active && s_pc_cd == 0 && s_pc_pG > 0 && s_pc_eG > 0 && afn_hp[AFN_ENEMY_EIDX] > 0) {
             int eN = pc_enemy_npc();
             if (eN >= 0) {
                 float dx = s_npcX[eN]-playerX, dz = s_npcZ[eN]-playerZ;
-                if (dx*dx + dz*dz <= PC_MEET_R*PC_MEET_R) {
+                float pcMeetR = (float)afn_pc_meet_r;
+                if (dx*dx + dz*dz <= pcMeetR*pcMeetR) {
                     float d = sqrtf(dx*dx + dz*dz); if (d < 1e-3f) d = 1.0f;
                     s_pc_dirx = dx/d; s_pc_dirz = dz/d;
                     afn_qa_phase = 0; afn_qa_active = 0; afn_qa_trigger = 0; afn_qa_frames = 0;   // cancel both dashes
@@ -7159,24 +7157,24 @@ int main(void)
                 // player prompt: correct button shoves toward the enemy; wrong one bleeds back
                 static const unsigned pcKeys[4] = { KEY_A, KEY_B, KEY_X, KEY_Y };   // Cross/Circle/Square/Triangle
                 if (key_hit(pcKeys[s_pc_cmd])) {
-                    s_pc_pressure += PC_PUSH; s_pc_flash = 8;
+                    s_pc_pressure += afn_pc_push_m * 0.001f; s_pc_flash = 8;
                     s_pc_cmd = (int)(pc_rand()*3.999f); s_pc_cmdT = pc_window();
                 } else {
-                    for (int k2=0;k2<4;k2++) if (k2!=s_pc_cmd && key_hit(pcKeys[k2])) { s_pc_pressure -= PC_MISS; break; }
+                    for (int k2=0;k2<4;k2++) if (k2!=s_pc_cmd && key_hit(pcKeys[k2])) { s_pc_pressure -= afn_pc_miss_m * 0.001f; break; }
                 }
                 if (--s_pc_cmdT <= 0) { s_pc_cmd = (int)(pc_rand()*3.999f); s_pc_cmdT = pc_window(); }   // window missed -> new prompt
                 // AI shove cadence (also tightens as the meter leaves the middle)
-                if (--s_pc_aiT <= 0) { s_pc_pressure -= PC_AI_PUSH*(0.8f+pc_rand()*0.4f); s_pc_aiT = pc_ai_wait(); }
+                if (--s_pc_aiT <= 0) { s_pc_pressure -= (afn_pc_ai_push_m*0.001f)*(0.8f+pc_rand()*0.4f); s_pc_aiT = pc_ai_wait(); }
                 // resolve: NO timeout — the struggle runs until one side's meter overflows
                 int done=0, won=0;
                 if      (s_pc_pressure >= 1.0f) { done=1; won=1; }
                 else if (s_pc_pressure <= 0.0f) { done=1; won=0; }
                 if (done) {
-                    s_pc_active = 0; s_pc_cd = PC_CD; s_pc_won = won; s_pc_knock = 14;
+                    s_pc_active = 0; s_pc_cd = afn_pc_cd_frames; s_pc_won = won; s_pc_knock = afn_pc_knock;
                     afn_player_frozen = 0;
-                    if (won) { afn_hp[AFN_ENEMY_EIDX] -= PC_DMG_E; if (afn_hp[AFN_ENEMY_EIDX] < 0) afn_hp[AFN_ENEMY_EIDX] = 0;
+                    if (won) { afn_hp[AFN_ENEMY_EIDX] -= afn_pc_dmg_e; if (afn_hp[AFN_ENEMY_EIDX] < 0) afn_hp[AFN_ENEMY_EIDX] = 0;
                                if (eN >= 0) { s_npcVY[eN] = 1.1f; s_npcGround[eN] = 0; } }
-                    else     { afn_health -= PC_DMG_P; if (afn_health < 0) afn_health = 0; playerVY = 1.1f; }
+                    else     { afn_health -= afn_pc_dmg_p; if (afn_health < 0) afn_health = 0; playerVY = 1.1f; }
 #ifdef AFN_SND_WIN_CLASH
                     afn_play_sfx_inst_gain(AFN_SND_WIN_CLASH, 256);
 #endif
@@ -7185,7 +7183,7 @@ int main(void)
         }
         if (s_pc_knock > 0) {                                                    // loser is shoved back
             s_pc_knock--;
-            float sp = 1.7f * ((float)s_pc_knock/14.0f);
+            float sp = 1.7f * ((float)s_pc_knock/(float)(afn_pc_knock > 0 ? afn_pc_knock : 14));
             if (s_pc_won) { int eN = pc_enemy_npc();
                 if (eN >= 0) { s_npcX[eN] += s_pc_dirx*sp; s_npcZ[eN] += s_pc_dirz*sp; collide_walls(&s_npcX[eN], &s_npcZ[eN], s_npcY[eN]); } }
             else { playerX -= s_pc_dirx*sp; playerZ -= s_pc_dirz*sp; }
@@ -7917,7 +7915,7 @@ int main(void)
 #endif
 
 #if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
-        // HARDCODED pokeball throw — draw the aim arc (dotted trajectory) and, in
+        // Pokeball throw (node-armed) — draw the aim arc (dotted trajectory) and, in
         // flight, the ball itself following that same arc.
         if (s_pb_si >= 0 && (s_pb_state == PB_AIM || s_pb_state == PB_FLY)) {
             if (s_pb_state == PB_AIM) {
@@ -7987,30 +7985,8 @@ int main(void)
         afn_particles_render(view);
         // Beam/lightning ribbons: tick life, cast any queued bolt, draw the strips.
         afn_beam_update();
-        // BACKUP (UNHOOKED): the original hardcoded Pikachu-jolt cast — these are now the
-        // Effects-tab lightning DEFAULTS, so the layer/Play Effect node reproduces it. Kept
-        // here as a reference; flip `#if 0` to `#if 1` to re-bind it to the Select button.
-#if 0
-        if (key_hit(KEY_SELECT)) {
-            afn_beam_bounces = 12;          // parabolic arches across the floor
-            afn_beam_range   = 156;         // total reach (~13 units / bounce)
-            afn_beam_bow     = 7.0f;        // arch height off the floor
-            afn_beam_width   = 0.55f;       // filament thickness
-            afn_beam_jitter  = 1.3f;        // bundle spread + crackle (world units)
-            afn_beam_decay   = 0.97f;       // each bounce slightly lower
-            afn_beam_pulse   = 0.0f;
-            afn_beam_life    = 150;         // frames to crawl across
-            afn_beam_segs    = 14;
-            afn_beam_travel  = 1;           // crawl a head across, bundle trailing
-            afn_beam_travel_persist = 0.55f;
-            afn_beam_travel_fade    = 0.30f;
-            afn_beam_col     = 0xFFFFB060u; // light blue (0xAABBGGRR: B=FF,G=B0,R=60)
-            afn_beam_filaments = 5;         // bundled crackling strands
-            afn_beam_orb     = 1.0f;        // head-orb radius multiplier
-            afn_beam_spline  = 0; afn_beam_spline_n = 0;   // parametric bounce (no authored spline)
-            afn_beam_spawn   = 1;
-        }
-#endif
+        // (The original hardcoded Pikachu-jolt Select cast was removed — it lives on
+        // as the Effects-tab lightning defaults, reproduced by the Play Effect node.)
 #ifdef AFN_HAS_FX
         // Play Effect node queued an authored effect instance this frame.
         if (afn_fx_play_req > 0) { afn_fx_play(afn_fx_play_req - 1, playerX, playerY, playerZ, playerYaw); afn_fx_play_req = 0; }

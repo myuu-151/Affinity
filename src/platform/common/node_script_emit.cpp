@@ -1208,6 +1208,21 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << "; afn_pbt_arc_pct = " << (d5?resolveInt(d5):42) << "; afn_pbt_freeze = " << (d6?resolveInt(d6):1) << ";\n";
                 break;
             }
+            case AfnScriptNodeType::PhysicalClash: {
+                // Physical clash config (migrated hardcode) — defaults = prototype feel.
+                auto* d0=findDataIn(a->id,0);  auto* d1=findDataIn(a->id,1);  auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3);  auto* d4=findDataIn(a->id,4);  auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6);  auto* d7=findDataIn(a->id,7);  auto* d8=findDataIn(a->id,8);
+                auto* d9=findDataIn(a->id,9);
+                f << "    afn_pc_on = 1;\n";
+                f << "    afn_pc_meet_r = " << (d0?resolveInt(d0):24) << "; afn_pc_push_m = " << (d1?resolveInt(d1):60)
+                  << "; afn_pc_miss_m = " << (d2?resolveInt(d2):25) << "; afn_pc_ai_push_m = " << (d3?resolveInt(d3):48) << ";\n";
+                f << "    afn_pc_dmg_e = " << (d4?resolveInt(d4):12) << "; afn_pc_dmg_p = " << (d5?resolveInt(d5):10)
+                  << "; afn_pc_cd_frames = " << (d6?resolveInt(d6):150) << ";\n";
+                f << "    afn_pc_window = " << (d7?resolveInt(d7):55) << "; afn_pc_ai_wait = " << (d8?resolveInt(d8):50)
+                  << "; afn_pc_knock = " << (d9?resolveInt(d9):14) << ";\n";
+                break;
+            }
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
             case AfnScriptNodeType::AiFireBeam: {
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Charged / Tap SFX (5 / 6)

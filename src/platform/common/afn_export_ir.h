@@ -647,6 +647,7 @@ enum class AfnScriptNodeType : int {
     AiOrbScale,      // action (enemy AI): set the enemy focus-orb charge Min/Max Scale%
     ThrowBall,       // action (On Key Released): throw the aimed pokeball
     AimBall,         // action (On Key Held): aim the pokeball throw
+    PhysicalClash,   // action (config): arm the dash-vs-dash QTE struggle
     COUNT
 };
 
