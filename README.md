@@ -5,7 +5,7 @@
 <h1 align="center">Affinity Engine</h1>
 
 <p align="center">
-   PS Vita 3D engine with a Windows desktop editor.
+   PS Vita &amp; Nintendo Switch 3D engine with a Windows desktop editor.
 </p>
 
 <p align="center">
@@ -23,7 +23,8 @@
 - **CMake 3.16+**
 - **Visual C++ Redistributable** *(required to run pre-built releases — [download](https://aka.ms/vs/17/release/vc_redist.x64.exe))*
 
-> Building for PS Vita needs the VitaSDK toolchain — see **[Build for PS Vita](#build-for-ps-vita)** below.
+> Building for PS Vita needs the VitaSDK toolchain — see **[Build for PS Vita](#build-for-ps-vita)**.
+> Building for Nintendo Switch needs devkitPro — see **[Build for Nintendo Switch](#build-for-nintendo-switch)**.
 
 ### Build the Editor
 
@@ -83,6 +84,55 @@ export VITASDK=/c/vitasdk
 export PATH="$VITASDK/bin:$PATH"
 cd psv_runtime && mkdir -p build && cd build
 cmake .. && make
+```
+
+</details>
+
+</details>
+
+---
+
+## Build for Nintendo Switch
+
+<details>
+<summary><b>Click to expand</b> — devkitPro toolchain, export → build, and running on a modded Switch.</summary>
+
+<br>
+
+The Switch runtime (`switch_runtime/`) is a fork of the PS Vita runtime on **libnx + EGL + OpenGL ES 1.1** (fixed-function, via mesa/nouveau). It consumes the **same exported data headers** as the Vita build — one export feeds both consoles.
+
+**Toolchain** — install **[devkitPro](https://devkitpro.org/wiki/Getting_Started)** with the Switch packages, then add the GL stack:
+
+```bash
+# devkitPro MSYS2 shell
+dkp-pacman -S switch-dev switch-mesa switch-glad
+```
+
+**Build** — in the editor's **Build** menu, set **Target: Switch (nro)** and click **Build**. It exports the data headers into `switch_runtime/include/` and runs `make` through devkitPro, with the live compile terminal. Output:
+
+```
+switch_runtime/affinity_switch.nro
+```
+
+**Success dialog ▸ Open Folder** reveals the nro.
+
+### Run on hardware (modded Switch)
+
+1. Copy `affinity_switch.nro` to the SD card at `sdmc:/switch/` (any subfolder works; FTP via **ftpd** or a card reader).
+2. Boot CFW and open the **Homebrew Menu in application mode** — hold **R** while launching any installed game. (The Album icon opens hbmenu in *applet mode* with limited memory; GL homebrew can fail there.)
+3. Launch **Affinity (Switch)**.
+
+It also runs in **Ryujinx** (drag the `.nro` onto the window) — on Intel iGPUs prefer the OpenGL backend.
+
+**Controls** map positionally from the Vita layout: B/A/Y/X = Cross/Circle/Square/Triangle, L/R = L1/R1, ZL/ZR = L2/R2, Plus = Start, Minus = Select.
+
+<details>
+<summary><b>Manual build</b></summary>
+
+```bash
+# devkitPro MSYS2 shell, after exporting the data headers from the editor
+export DEVKITPRO=/opt/devkitpro
+cd switch_runtime && make -j$(nproc)
 ```
 
 </details>
@@ -221,6 +271,9 @@ src/
 psv_runtime/
   main.c, audio.c  — PS Vita runtime (Mode 4 / 3D, vitaGL)
   include/         — Generated PSV data headers
+switch_runtime/
+  source/          — Nintendo Switch runtime (libnx + GLES1.1 fork of psv_runtime)
+  include/         — switch_port.h platform shim + the same generated data headers
 thirdparty/
   glfw/            — Windowing
   imgui/           — UI framework
