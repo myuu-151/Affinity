@@ -22298,8 +22298,12 @@ void FrameTick(float dt)
     }
     llm::RenderPanel(&sShowAssistant);
 
-    // ---- Camera Controls (only when no ImGui widget has focus) ----
-    if (!ImGui::GetIO().WantCaptureKeyboard)
+    // ---- Camera Controls ----
+    // Gate on TEXT input only: WantCaptureKeyboard also goes true whenever any
+    // panel widget merely HOLDS keyboard focus (a clicked slider/selectable),
+    // which left WASD randomly dead until focus cleared. Camera keys should
+    // only stop while the user is actually typing in a field.
+    if (!ImGui::GetIO().WantTextInput)
     {
         // Escape deselects sprite/object in Edit mode (Mode 4 / 3D tab / Mode 7)
         if (sEditorMode == EditorMode::Edit && ImGui::IsKeyPressed(ImGuiKey_Escape) &&
@@ -39967,6 +39971,85 @@ void RenderScenePreviewGL()
             glDisable(GL_ALPHA_TEST);
             glDisable(GL_CULL_FACE);
             glPopMatrix();
+        }
+
+        // ---- attached models (SubModel: hand pokeball, auras) ----
+        // Bone snap mirrors the software preview + runtime: bone TRANSLATION only
+        // (rig-rotated, object-scaled), then the WORLD-axis offset — so X/Y/Z move
+        // the mesh off the joint identically in editor + game.
+        if (fs.subModelCount > 0)
+        {
+            for (int smi = 0; smi < fs.subModelCount; smi++)
+            {
+                const auto& sm = fs.subModels[smi];
+                if (sm.editorHide || sm.meshIdx < 0 || sm.meshIdx >= (int)sMeshAssets.size()) continue;
+                const MeshAsset& am = sMeshAssets[sm.meshIdx];
+                if (am.vertices.empty()) continue;
+                float bX, bY, bZ; bool snapped = false;
+                float rigYaw = fs.rotation;   // rig's FULL visual yaw (bone snap must match the drawn rig)
+                if (sm.boneIdx >= 0 && fs.riggedMeshIdx >= 0 && fs.riggedMeshIdx < (int)sRiggedMeshAssets.size()) {
+                    const RiggedMeshAsset& prm = sRiggedMeshAssets[fs.riggedMeshIdx];
+                    rigYaw = fs.rotation + prm.yawOffset + fs.modelYaw;   // same total the GL rig draw rotates by
+                    int nb = prm.boneCount;
+                    if (sm.boneIdx < nb && (int)prm.bindPose.size() == nb) {
+                        BonePose P = prm.bindPose[sm.boneIdx];
+                        if (fs.rigAnimIdx >= 0 && fs.rigAnimIdx < (int)prm.clips.size() && prm.clips[fs.rigAnimIdx].frameCount > 0) {
+                            const RigAnimClip& clip = prm.clips[fs.rigAnimIdx];
+                            int fc = clip.frameCount;
+                            float ff = fs.rigAnimClock < 0 ? 0 : fs.rigAnimClock;
+                            int f0 = (int)floorf(ff) % fc, f1 = (f0 + 1) % fc; float u = ff - floorf(ff);
+                            const BonePose& A = clip.frames[f0*nb + sm.boneIdx];
+                            const BonePose& B = clip.frames[f1*nb + sm.boneIdx];
+                            P.px = A.px*(1-u)+B.px*u; P.py = A.py*(1-u)+B.py*u; P.pz = A.pz*(1-u)+B.pz*u;
+                        }
+                        float os = fs.scale;
+                        float oY = rigYaw*(3.14159265f/180.0f), oX = fs.rotationX*(3.14159265f/180.0f), oZ = fs.rotationZ*(3.14159265f/180.0f);
+                        float bcY=cosf(oY),bsY=sinf(oY),bcX=cosf(oX),bsX=sinf(oX),bcZ=cosf(oZ),bsZ=sinf(oZ);
+                        float blx=P.px*os, bly=P.py*os, blz=P.pz*os;
+                        float rxx=blx*bcY+blz*bsY, rzz=-blx*bsY+blz*bcY, ryy=bly;
+                        float ry2=ryy*bcX-rzz*bsX, rz2=ryy*bsX+rzz*bcX;
+                        float bxo=rxx*bcZ-ry2*bsZ, byo=rxx*bsZ+ry2*bcZ, bzo=rz2;
+                        bX = fs.x + bxo + sm.offsetX; bY = fs.y + byo + sm.offsetY; bZ = fs.z + bzo + sm.offsetZ;
+                        snapped = true;
+                    }
+                }
+                if (!snapped) { bX = fs.x + sm.offsetX; bY = fs.y + sm.offsetY; bZ = fs.z + sm.offsetZ; }
+
+                glPushMatrix();
+                glTranslatef(bX, bY, bZ);
+                // Orientation = the authored Yaw ONLY (runtime parity: at spawn the
+                // model draws at sp->rotY and then follows the player's turn DELTA,
+                // which is zero relative to the editor pose — the object's rotation
+                // is the spawn reference, so it must NOT be added here; rigYaw is
+                // only for the bone POSITION, which must match the drawn rig).
+                glRotatef(sm.yaw, 0, 1, 0);
+                glScalef(sm.scale, sm.scale, sm.scale);
+
+                bool amTex  = am.textured && am.glTexID != 0;
+                bool amVcol = am.hasVertexColor && !am.ignoreVertexColor;
+                if (amTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, am.glTexID); }
+                else glDisable(GL_TEXTURE_2D);
+                if (amTex && am.useSoftAlpha) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
+                else if (amTex && am.textureUseAlpha) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
+                glDisable(GL_CULL_FACE);
+
+                const MeshVertex* av0 = am.vertices.data();
+                glVertexPointer(3, GL_FLOAT, sizeof(MeshVertex), &av0->px);
+                glTexCoordPointer(2, GL_FLOAT, sizeof(MeshVertex), &av0->u);
+                if (amVcol) { glEnableClientState(GL_COLOR_ARRAY); glColorPointer(3, GL_FLOAT, sizeof(MeshVertex), &av0->r); }
+                else glColor3f(1, 1, 1);
+                glMatrixMode(GL_TEXTURE); glLoadIdentity();
+                glScalef(1.0f, -1.0f, 1.0f); glTranslatef(0.0f, -1.0f, 0.0f);
+                glMatrixMode(GL_MODELVIEW);
+                if (!am.indices.empty())
+                    glDrawElements(GL_TRIANGLES, (GLsizei)am.indices.size(), GL_UNSIGNED_INT, am.indices.data());
+                if (!am.quadIndices.empty())
+                    glDrawElements(GL_QUADS, (GLsizei)am.quadIndices.size(), GL_UNSIGNED_INT, am.quadIndices.data());
+                glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+                if (amVcol) glDisableClientState(GL_COLOR_ARRAY);
+                glDisable(GL_ALPHA_TEST); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
+                glPopMatrix();
+            }
         }
 
         // ---- picking: project every sprite's anchor to GBA logical coords ----
