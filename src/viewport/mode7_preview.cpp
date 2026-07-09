@@ -12,7 +12,27 @@
 namespace Mode7
 {
 
-static unsigned char sFrameBuf[kGBAWidth * kGBAHeight * 3];
+// Internal supersample: the preview rasterizes at kRS x the GBA-era logical
+// resolution (crisp geometry instead of chunky 256-wide pixels). All screen
+// math scales through kRS/kRCX; click-picking (sLastProj) stays in logical
+// GBA coords so the editor's mouse mapping is untouched.
+static constexpr int   kRS  = 2;   // 3 was ~9x the fill of the old buffer — too heavy per frame
+static constexpr int   kRW  = kGBAWidth  * kRS;
+static constexpr int   kRH  = kGBAHeight * kRS;
+static constexpr float kRCX = 120.0f * kRS;   // projection center x (GBA 120, scaled)
+// TRUE-PITCH camera for the 3D paths. The legacy renderer faked pitch by sliding
+// the horizon row (Mode-7 y-shear) — fine for the Mode-7 floor, but it SKEWS all
+// real 3D geometry as soon as the camera tilts. Each frame we derive the actual
+// pitch angle that puts the world horizon on that row and rotate view-space
+// (vy,vz) by it before projecting, giving a correct perspective camera.
+static float sPitchS = 0.0f, sPitchC = 1.0f;
+static inline void pitch_rot(float& vy, float& vz) {
+    float y = vy * sPitchC + vz * sPitchS;
+    float z = vz * sPitchC - vy * sPitchS;
+    vy = y; vz = z;
+}
+
+static unsigned char sFrameBuf[kRW * kRH * 3];
 static GLuint        sTexture = 0;
 // Per-pixel depth buffer for the mesh rasterizer. We store 1/z (smaller = farther)
 // to skip a divide per pixel — the existing perspective-correct interp already
@@ -20,7 +40,7 @@ static GLuint        sTexture = 0;
 // (i.e. closer than what's already there). Cleared to 0.0 each frame so the
 // first opaque pixel always wins. Used only by the mesh path; sprites and HUD
 // still composite on top in their existing painter order.
-static float sZBuf[kGBAWidth * kGBAHeight];
+static float sZBuf[kRW * kRH];
 
 // Last frame's projected sprites for viewport click-to-select
 static SpriteScreenPos sLastProj[kMaxFloorSprites];
@@ -40,9 +60,9 @@ void Init()
     {
         glGenTextures(1, &sTexture);
         glBindTexture(GL_TEXTURE_2D, sTexture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, kGBAWidth, kGBAHeight, 0,
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // supersampled buffer: smooth resample to the viewport
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, kRW, kRH, 0,
                      GL_RGB, GL_UNSIGNED_BYTE, sFrameBuf);
     }
 }
@@ -107,11 +127,11 @@ static void DrawRect(int rx, int ry, int rw, int rh,
 {
     int x0 = std::max(0, rx);
     int y0 = std::max(0, ry);
-    int x1 = std::min(kGBAWidth,  rx + rw);
-    int y1 = std::min(kGBAHeight, ry + rh);
+    int x1 = std::min(kRW,  rx + rw);
+    int y1 = std::min(kRH, ry + rh);
     for (int y = y0; y < y1; y++)
     {
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        uint8_t* row = sFrameBuf + y * kRW * 3;
         for (int x = x0; x < x1; x++)
         {
             if (alpha >= 1.0f)
@@ -133,14 +153,14 @@ static void DrawDiamond(int cx, int cy, int halfW, int halfH,
                         uint8_t cr, uint8_t cg, uint8_t cb, float fogAlpha)
 {
     int y0 = std::max(0, cy - halfH);
-    int y1 = std::min(kGBAHeight, cy + halfH);
+    int y1 = std::min(kRH, cy + halfH);
     for (int y = y0; y < y1; y++)
     {
         float fy = 1.0f - fabsf((float)(y - cy) / (float)halfH);
         int hw = (int)(halfW * fy);
         int x0 = std::max(0, cx - hw);
-        int x1 = std::min(kGBAWidth, cx + hw);
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        int x1 = std::min(kRW, cx + hw);
+        uint8_t* row = sFrameBuf + y * kRW * 3;
         for (int x = x0; x < x1; x++)
         {
             // Blend with fog
@@ -162,15 +182,15 @@ static void DrawDiamond(int cx, int cy, int halfW, int halfH,
             float fy = 1.0f - fabsf((float)dy / (float)halfH);
             int hw = (int)(halfW * fy);
             int py = cy + dy;
-            if (py < 0 || py >= kGBAHeight) continue;
-            uint8_t* row = sFrameBuf + py * kGBAWidth * 3;
+            if (py < 0 || py >= kRH) continue;
+            uint8_t* row = sFrameBuf + py * kRW * 3;
             // Left edge
             int lx = cx - hw;
-            if (lx >= 0 && lx < kGBAWidth)
+            if (lx >= 0 && lx < kRW)
             { row[lx*3+0] = olr; row[lx*3+1] = olg; row[lx*3+2] = olb; }
             // Right edge
             int rx2 = cx + hw - 1;
-            if (rx2 >= 0 && rx2 < kGBAWidth)
+            if (rx2 >= 0 && rx2 < kRW)
             { row[rx2*3+0] = olr; row[rx2*3+1] = olg; row[rx2*3+2] = olb; }
         }
     }
@@ -199,7 +219,7 @@ static void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float
     if (y1 > y2) { std::swap(x1, x2); std::swap(y1, y2); }
 
     int iy0 = std::max(0, (int)ceilf(y0));
-    int iy2 = std::min(kGBAHeight - 1, (int)floorf(y2));
+    int iy2 = std::min(kRH - 1, (int)floorf(y2));
 
     float totalH = y2 - y0;
     if (totalH < 0.5f) return;
@@ -229,9 +249,9 @@ static void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float
         }
 
         int left = std::max(0, (int)ceilf(std::min(xLong, xShort)));
-        int right = std::min(kGBAWidth - 1, (int)floorf(std::max(xLong, xShort)));
+        int right = std::min(kRW - 1, (int)floorf(std::max(xLong, xShort)));
 
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        uint8_t* row = sFrameBuf + y * kRW * 3;
         for (int x = left; x <= right; x++)
         {
             row[x * 3 + 0] = fr;
@@ -251,6 +271,7 @@ static void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float
 struct ClipVtx {
     float vx, vy, vz;  // view-space (cam-relative) position
     float u,  v;       // texture coords (post-V-flip)
+    float r, g, b;     // vertex color (modulates the texture, runtime parity)
 };
 
 static constexpr float kNearPlane = 0.1f;
@@ -264,6 +285,9 @@ static ClipVtx clip_lerp(const ClipVtx& a, const ClipVtx& b, float t)
     o.u  = a.u  + (b.u  - a.u ) * t;
     o.v  = a.v  + (b.v  - a.v ) * t;
     return o;
+    o.r  = a.r  + (b.r  - a.r ) * t;
+    o.g  = a.g  + (b.g  - a.g ) * t;
+    o.b  = a.b  + (b.b  - a.b ) * t;
 }
 
 // Returns the number of output triangles (0, 1, or 2). out[] is filled with
@@ -311,8 +335,8 @@ static inline void project_vs(const ClipVtx& vtx, const Mode7Camera& cam,
 {
     float lambda = vtx.vz / cam.fov;
     if (lambda < 0.01f) lambda = 0.01f;
-    sx = 120.0f + vtx.vx / lambda;
-    sy = cam.horizon - vtx.vy / lambda;
+    sx = kRCX + kRS * vtx.vx / lambda;
+    sy = (float)kRH * 0.5f - kRS * vtx.vy / lambda;   // screen-centered: pitch is in (vy,vz) now
 }
 
 // Draw a textured triangle with perspective-correct UV interpolation.
@@ -330,13 +354,17 @@ static void DrawTriangleTex(float x0, float y0, float u0, float v0, float d0,
                             float x1, float y1, float u1, float v1, float d1,
                             float x2, float y2, float u2, float v2, float d2,
                             const uint8_t* texPixels, const uint32_t* texPal,
-                            int texW, int texH, float fogAlpha)
+                            int texW, int texH, float fogAlpha,
+                            float r0, float g0, float b0,
+                            float r1, float g1, float b1,
+                            float r2, float g2, float b2,
+                            bool cutout)
 {
     // Barycentric rasterizer — compute bounding box, test each pixel
     int minX = std::max(0, (int)floorf(std::min({x0, x1, x2})));
-    int maxX = std::min(kGBAWidth - 1, (int)ceilf(std::max({x0, x1, x2})));
+    int maxX = std::min(kRW - 1, (int)ceilf(std::max({x0, x1, x2})));
     int minY = std::max(0, (int)floorf(std::min({y0, y1, y2})));
-    int maxY = std::min(kGBAHeight - 1, (int)ceilf(std::max({y0, y1, y2})));
+    int maxY = std::min(kRH - 1, (int)ceilf(std::max({y0, y1, y2})));
 
     float denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
     if (fabsf(denom) < 0.001f) return;
@@ -352,11 +380,12 @@ static void DrawTriangleTex(float x0, float y0, float u0, float v0, float d0,
 
     for (int y = minY; y <= maxY; y++)
     {
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        uint8_t* row = sFrameBuf + y * kRW * 3;
         for (int x = minX; x <= maxX; x++)
         {
-            float w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) * invD;
-            float w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) * invD;
+            float pxc = x + 0.5f, pyc = y + 0.5f;   // sample at the pixel CENTER (seam/crack fix)
+            float w0 = ((y1 - y2) * (pxc - x2) + (x2 - x1) * (pyc - y2)) * invD;
+            float w1 = ((y2 - y0) * (pxc - x2) + (x0 - x2) * (pyc - y2)) * invD;
             float w2 = 1.0f - w0 - w1;
             if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
 
@@ -381,14 +410,17 @@ static void DrawTriangleTex(float x0, float y0, float u0, float v0, float d0,
             // drawn mesh (smaller-volume, by our sort) reliably wins
             // coplanar ties. Non-coplanar cases differ by far more than
             // this and still resolve normally.
-            float* zSlot = &sZBuf[y * kGBAWidth + x];
-            if (pixInvZ * 1.01f < *zSlot) continue;
-            *zSlot = pixInvZ;
             int tu = (int)floorf(su * texW) % texW; if (tu < 0) tu += texW;
             int tv = (int)floorf(sv * texH) % texH; if (tv < 0) tv += texH;
             uint8_t idx = texPixels[tv * texW + tu];
+            if (cutout && idx == 0) continue;           // Use Alpha: transparent texel — no color, NO z-write
+            float* zSlot = &sZBuf[y * kRW + x];
+            if (pixInvZ * 1.0005f < *zSlot) continue;   // 0.05%: coplanar ties only — 1% let whole layers bleed through
+            *zSlot = pixInvZ;
             uint32_t c = texPal[idx];
-            uint8_t tr = c & 0xFF, tg = (c >> 8) & 0xFF, tb = (c >> 16) & 0xFF;
+            // Modulate by the interpolated vertex color (runtime parity: tex * vcol).
+            float mr = w0*r0 + w1*r1 + w2*r2, mg = w0*g0 + w1*g1 + w2*g2, mb = w0*b0 + w1*b1 + w2*b2;
+            uint8_t tr = (uint8_t)((c & 0xFF) * mr), tg = (uint8_t)(((c >> 8) & 0xFF) * mg), tb = (uint8_t)(((c >> 16) & 0xFF) * mb);
             row[x * 3 + 0] = (uint8_t)(tr * (1 - fogAlpha) + kSkyCol[0] * fogAlpha);
             row[x * 3 + 1] = (uint8_t)(tg * (1 - fogAlpha) + kSkyCol[1] * fogAlpha);
             row[x * 3 + 2] = (uint8_t)(tb * (1 - fogAlpha) + kSkyCol[2] * fogAlpha);
@@ -406,9 +438,9 @@ static void DrawTriangleTexA(float x0, float y0, float u0, float v0, float d0,
                              const uint8_t* texAlpha, int texW, int texH)
 {
     int minX = std::max(0, (int)floorf(std::min({x0, x1, x2})));
-    int maxX = std::min(kGBAWidth - 1, (int)ceilf(std::max({x0, x1, x2})));
+    int maxX = std::min(kRW - 1, (int)ceilf(std::max({x0, x1, x2})));
     int minY = std::max(0, (int)floorf(std::min({y0, y1, y2})));
-    int maxY = std::min(kGBAHeight - 1, (int)ceilf(std::max({y0, y1, y2})));
+    int maxY = std::min(kRH - 1, (int)ceilf(std::max({y0, y1, y2})));
     float denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
     if (fabsf(denom) < 0.001f) return;
     float invD = 1.0f / denom;
@@ -416,10 +448,11 @@ static void DrawTriangleTexA(float x0, float y0, float u0, float v0, float d0,
     float iz0 = perspOk ? 1.0f/d0 : 1.0f, iz1 = perspOk ? 1.0f/d1 : 1.0f, iz2 = perspOk ? 1.0f/d2 : 1.0f;
     float uz0 = u0*iz0, uz1 = u1*iz1, uz2 = u2*iz2, vz0 = v0*iz0, vz1 = v1*iz1, vz2 = v2*iz2;
     for (int y = minY; y <= maxY; y++) {
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        uint8_t* row = sFrameBuf + y * kRW * 3;
         for (int x = minX; x <= maxX; x++) {
-            float w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) * invD;
-            float w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) * invD;
+            float pxc = x + 0.5f, pyc = y + 0.5f;   // sample at the pixel CENTER (seam/crack fix)
+            float w0 = ((y1 - y2) * (pxc - x2) + (x2 - x1) * (pyc - y2)) * invD;
+            float w1 = ((y2 - y0) * (pxc - x2) + (x0 - x2) * (pyc - y2)) * invD;
             float w2 = 1.0f - w0 - w1;
             if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
             float su, sv;
@@ -450,9 +483,9 @@ static void DrawLine(int ax, int ay, int bx, int by,
     int err = dx - dy;
     for (int steps = 0; steps < 1000; steps++)
     {
-        if (ax >= 0 && ax < kGBAWidth && ay >= 0 && ay < kGBAHeight)
+        if (ax >= 0 && ax < kRW && ay >= 0 && ay < kRH)
         {
-            uint8_t* p = sFrameBuf + (ay * kGBAWidth + ax) * 3;
+            uint8_t* p = sFrameBuf + (ay * kRW + ax) * 3;
             p[0] = cr; p[1] = cg; p[2] = cb;
         }
         if (ax == bx && ay == by) break;
@@ -484,12 +517,12 @@ static void DrawLineZ(int ax, int ay, float az,
     float invZStep = (invZb - invZa) / (float)steps;
     for (int s = 0; s <= steps; s++)
     {
-        if (ax >= 0 && ax < kGBAWidth && ay >= 0 && ay < kGBAHeight)
+        if (ax >= 0 && ax < kRW && ay >= 0 && ay < kRH)
         {
-            float* zSlot = &sZBuf[ay * kGBAWidth + ax];
+            float* zSlot = &sZBuf[ay * kRW + ax];
             if (invZ >= *zSlot)
             {
-                uint8_t* p = sFrameBuf + (ay * kGBAWidth + ax) * 3;
+                uint8_t* p = sFrameBuf + (ay * kRW + ax) * 3;
                 p[0] = cr; p[1] = cg; p[2] = cb;
             }
         }
@@ -510,15 +543,17 @@ static bool ProjectPoint(float wx, float wy, float wz,
     float dx = wx - cam.x;
     float dz = wz - cam.z;
 
-    float fovLambda = dx * sinA - dz * cosA;
-    if (fovLambda < 0.1f) fovLambda = 0.1f;
+    float vz = dx * sinA - dz * cosA;
+    float vy = wy - cam.height;
+    pitch_rot(vy, vz);                    // true pitch (was a horizon shear)
+    if (vz < 0.1f) vz = 0.1f;
 
-    float lambda = fovLambda / cam.fov;
+    float lambda = vz / cam.fov;
     if (lambda < 0.01f) lambda = 0.01f;
 
-    sy = cam.horizon + (cam.height - wy) / lambda;
+    sy = (float)kRH * 0.5f - kRS * vy / lambda;
     float sideComponent = dx * cosA + dz * sinA;
-    sx = 120.0f + sideComponent / lambda;
+    sx = kRCX + kRS * sideComponent / lambda;
 
     // Clamp to prevent extreme values from causing rendering issues
     if (sx < -8192.0f) sx = -8192.0f;
@@ -533,14 +568,14 @@ static void DrawSquare(int cx, int cy, int half, uint8_t cr, uint8_t cg, uint8_t
 {
     int x0 = std::max(0, cx - half);
     int y0 = std::max(0, cy - half);
-    int x1 = std::min(kGBAWidth, cx + half);
-    int y1 = std::min(kGBAHeight, cy + half);
+    int x1 = std::min(kRW, cx + half);
+    int y1 = std::min(kRH, cy + half);
     uint8_t fr = (uint8_t)(cr*(1-fogAlpha) + kSkyCol[0]*fogAlpha);
     uint8_t fg = (uint8_t)(cg*(1-fogAlpha) + kSkyCol[1]*fogAlpha);
     uint8_t fb = (uint8_t)(cb*(1-fogAlpha) + kSkyCol[2]*fogAlpha);
     for (int y = y0; y < y1; y++)
     {
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        uint8_t* row = sFrameBuf + y * kRW * 3;
         for (int x = x0; x < x1; x++)
         {
             // Border
@@ -551,11 +586,11 @@ static void DrawSquare(int cx, int cy, int half, uint8_t cr, uint8_t cg, uint8_t
         }
     }
     // Direction notch at top center
-    if (cx >= 0 && cx < kGBAWidth && cy - half - 1 >= 0 && cy - half - 1 < kGBAHeight)
+    if (cx >= 0 && cx < kRW && cy - half - 1 >= 0 && cy - half - 1 < kRH)
     {
-        uint8_t* row = sFrameBuf + (cy - half - 1) * kGBAWidth * 3;
+        uint8_t* row = sFrameBuf + (cy - half - 1) * kRW * 3;
         int nx0 = std::max(0, cx - 1);
-        int nx1 = std::min(kGBAWidth, cx + 2);
+        int nx1 = std::min(kRW, cx + 2);
         for (int x = nx0; x < nx1; x++)
         { row[x*3+0] = fr; row[x*3+1] = fg; row[x*3+2] = fb; }
     }
@@ -579,8 +614,8 @@ static void DrawSpriteFrame(int cx, int cy, int halfW, int halfH,
     for (int dy = 0; dy < drawH; dy++)
     {
         int sy = sy0 + dy;
-        if (sy < 0 || sy >= kGBAHeight) continue;
-        uint8_t* row = sFrameBuf + sy * kGBAWidth * 3;
+        if (sy < 0 || sy >= kRH) continue;
+        uint8_t* row = sFrameBuf + sy * kRW * 3;
 
         int fy = dy * fH / drawH;
         if (fy >= fH) fy = fH - 1;
@@ -588,7 +623,7 @@ static void DrawSpriteFrame(int cx, int cy, int halfW, int halfH,
         for (int dx = 0; dx < drawW; dx++)
         {
             int sx = sx0 + dx;
-            if (sx < 0 || sx >= kGBAWidth) continue;
+            if (sx < 0 || sx >= kRW) continue;
 
             int fx = dx * fW / drawW;
             if (fx >= fW) fx = fW - 1;
@@ -624,8 +659,8 @@ static void DrawRGBASprite(int cx, int cy, int halfW, int halfH,
     for (int dy = 0; dy < drawH; dy++)
     {
         int sy = sy0 + dy;
-        if (sy < 0 || sy >= kGBAHeight) continue;
-        uint8_t* row = sFrameBuf + sy * kGBAWidth * 3;
+        if (sy < 0 || sy >= kRH) continue;
+        uint8_t* row = sFrameBuf + sy * kRW * 3;
 
         int iy = dy * imgH / drawH;
         if (iy >= imgH) iy = imgH - 1;
@@ -633,7 +668,7 @@ static void DrawRGBASprite(int cx, int cy, int halfW, int halfH,
         for (int dx = 0; dx < drawW; dx++)
         {
             int sx = sx0 + dx;
-            if (sx < 0 || sx >= kGBAWidth) continue;
+            if (sx < 0 || sx >= kRW) continue;
 
             int ix = dx * imgW / drawW;
             if (ix >= imgW) ix = imgW - 1;
@@ -671,14 +706,19 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
     memset(sZBuf, 0, sizeof(sZBuf));
 
     // Horizon line — controlled by camera pitch (I/K keys)
-    int horizon = (int)cam.horizon;
+    int horizon = (int)(cam.horizon * kRS);   // horizon row in RENDER pixels (Mode-7 shear paths)
+    {
+        float cyGBA = (float)kRH / (2.0f * kRS);
+        float pitch = atanf((cyGBA - cam.horizon) / cam.fov);
+        sPitchS = sinf(pitch); sPitchC = cosf(pitch);
+    }
 
     if (mode7Floor)
     {
         // --- Mode 4 affine floor rendering ---
-        for (int y = 0; y < kGBAHeight; y++)
+        for (int y = 0; y < kRH; y++)
         {
-            uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+            uint8_t* row = sFrameBuf + y * kRW * 3;
 
             if (y <= horizon)
             {
@@ -691,10 +731,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     // Map y [0..horizon] to texture row: bottom of sky texture at horizon
                     int skyRow = (horizon > 0) ? (y * skyH / (horizon + 1)) : 0;
                     if (skyRow >= skyH) skyRow = skyH - 1;
-                    for (int x = 0; x < kGBAWidth; x++)
+                    for (int x = 0; x < kRW; x++)
                     {
                         // Map screen x [0..240) to panorama with wrapping
-                        int skyX = (skyBaseX + x * skyW / kGBAWidth) % skyW;
+                        int skyX = (skyBaseX + x * skyW / kRW) % skyW;
                         int idx = (skyRow * skyW + skyX) * 4;
                         row[x * 3 + 0] = skyPixels[idx + 0];
                         row[x * 3 + 1] = skyPixels[idx + 1];
@@ -703,7 +743,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 }
                 else
                 {
-                    for (int x = 0; x < kGBAWidth; x++)
+                    for (int x = 0; x < kRW; x++)
                     {
                         row[x * 3 + 0] = kSkyCol[0];
                         row[x * 3 + 1] = kSkyCol[1];
@@ -714,7 +754,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             }
 
             // Mode 4 per-scanline math (matches Tonc HBlank ISR)
-            float lambda = cam.height / (float)(y - horizon);
+            float lambda = kRS * cam.height / (float)(y - horizon);   // GBA-row math at render res
 
             float lcf = lambda * cosA;
             float lsf = lambda * sinA;
@@ -722,13 +762,13 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float startX = cam.x + (-120.0f * lcf) + (cam.fov * lsf);
             float startZ = cam.z + (-120.0f * lsf) - (cam.fov * lcf);
 
-            float stepX = lcf;
-            float stepZ = lsf;
+            float stepX = lcf / (float)kRS;   // same world span over kRS x the pixels
+            float stepZ = lsf / (float)kRS;
 
             float wx = startX;
             float wz = startZ;
 
-            for (int x = 0; x < kGBAWidth; x++)
+            for (int x = 0; x < kRW; x++)
             {
                 uint8_t r, g, b;
                 if (floorPixels && floorW > 0 && floorH > 0)
@@ -769,9 +809,9 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
     else
     {
         // --- Clear to sky ---
-        for (int y = 0; y < kGBAHeight; y++)
+        for (int y = 0; y < kRH; y++)
         {
-            uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+            uint8_t* row = sFrameBuf + y * kRW * 3;
             if (skyPixels && skyW > 0 && skyH > 0 && y <= horizon)
             {
                 float angNorm = cam.angle / (2.0f * 3.14159265f);
@@ -779,9 +819,9 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 int skyBaseX = (int)(angNorm * skyW);
                 int skyRow = (horizon > 0) ? (y * skyH / (horizon + 1)) : 0;
                 if (skyRow >= skyH) skyRow = skyH - 1;
-                for (int x = 0; x < kGBAWidth; x++)
+                for (int x = 0; x < kRW; x++)
                 {
-                    int skyX = (skyBaseX + x * skyW / kGBAWidth) % skyW;
+                    int skyX = (skyBaseX + x * skyW / kRW) % skyW;
                     int idx = (skyRow * skyW + skyX) * 4;
                     row[x * 3 + 0] = skyPixels[idx + 0];
                     row[x * 3 + 1] = skyPixels[idx + 1];
@@ -790,7 +830,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             }
             else
             {
-                for (int x = 0; x < kGBAWidth; x++)
+                for (int x = 0; x < kRW; x++)
                 {
                     row[x * 3 + 0] = kSkyCol[0];
                     row[x * 3 + 1] = kSkyCol[1];
@@ -835,9 +875,9 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                         float fog = lambda / 300.0f;
                         if (fog > 0.95f) { prevVis = false; continue; }
 
-                        int screenY = horizon + (int)(cam.height / lambda);
+                        int screenY = horizon + (int)(kRS * cam.height / lambda);
                         float side = ddx * cosA + ddz * sinA;
-                        int screenX = 120 + (int)(side / lambda);
+                        int screenX = (int)kRCX + (int)(kRS * side / lambda);
 
                         // Fog-blend the color
                         uint8_t fr = (uint8_t)(gr * (1.0f - fog) + kSkyCol[0] * fog);
@@ -934,19 +974,22 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float lambda = fovLambda / cam.fov;
             if (lambda < 0.01f) lambda = 0.01f;
 
-            int screenY = horizon + (int)((cam.height - wy) / lambda);
+            float vyB = wy - cam.height, vzB = lambda * cam.fov;
+            pitch_rot(vyB, vzB); if (vzB < 0.1f) vzB = 0.1f;
+            float lamP = vzB / cam.fov; if (lamP < 0.01f) lamP = 0.01f;
+            int screenY = (int)((float)kRH * 0.5f - kRS * vyB / lamP);
             float sideComponent = dx * cosA + dz * sinA;
-            int screenX = 120 + (int)(sideComponent / lambda);
+            int screenX = (int)kRCX + (int)(kRS * sideComponent / lamP);
 
             bool isMesh = (subPass < 0 && sprites[i].type == SpriteType::Mesh
                           && sprites[i].meshIdx >= 0);
             // Skip screen-bounds culling for mesh sprites — their vertices are projected independently
             if (!isMesh) {
-                if (screenY < 0 || screenY >= kGBAHeight) continue;
-                if (screenX < -32 || screenX >= kGBAWidth + 32) continue;
+                if (screenY < 0 || screenY >= kRH) continue;
+                if (screenX < -32 || screenX >= kRW + 32) continue;
             }
 
-            float scale = cam.height / lambda;
+            float scale = kRS * cam.height / lamP;
             float fog = lambda / 300.0f;
             if (fog > 1.0f) fog = 1.0f;
             if (!isMesh && fog > 0.95f) continue;
@@ -1228,10 +1271,12 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                                          am.texturePixels.data(), am.texturePalette, am.texAlpha.data(), am.texW, am.texH);
                     else if (tex)
                         DrawTriangleTex(vx[i0],vy[i0],a.u,1.0f-a.v,vd[i0], vx[i1],vy[i1],b.u,1.0f-b.v,vd[i1], vx[i2],vy[i2],c.u,1.0f-c.v,vd[i2],
-                                        am.texturePixels.data(), am.texturePalette, am.texW, am.texH, 0.0f);
-                    else { DrawLine((int)vx[i0],(int)vy[i0],(int)vx[i1],(int)vy[i1],120,220,255);
-                           DrawLine((int)vx[i1],(int)vy[i1],(int)vx[i2],(int)vy[i2],120,220,255);
-                           DrawLine((int)vx[i2],(int)vy[i2],(int)vx[i0],(int)vy[i0],120,220,255); }
+                                        am.texturePixels.data(), am.texturePalette, am.texW, am.texH, 0.0f,
+                                        a.r,a.g,a.b, b.r,b.g,b.b, c.r,c.g,c.b,
+                                        am.textureUseAlpha);
+                    else { DrawLineZ((int)vx[i0],(int)vy[i0],vd[i0],(int)vx[i1],(int)vy[i1],vd[i1],120,220,255);
+                           DrawLineZ((int)vx[i1],(int)vy[i1],vd[i1],(int)vx[i2],(int)vy[i2],vd[i2],120,220,255);
+                           DrawLineZ((int)vx[i2],(int)vy[i2],vd[i2],(int)vx[i0],(int)vy[i0],vd[i0],120,220,255); }
                 };
                 for (size_t t = 0; t + 3 <= am.indices.size(); t += 3)
                     tri(am.indices[t], am.indices[t+1], am.indices[t+2]);
@@ -1400,9 +1445,12 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     // that show up as bent/distorted geometry near the camera.
                     float dx = wx - cam.x;
                     float dz = wz - cam.z;
-                    pDepth[v] = dx * sinA - dz * cosA;
+                    float vzf = dx * sinA - dz * cosA;
+                    float vyf = wy - cam.height;
+                    pitch_rot(vyf, vzf);               // true pitch — matches project_vs
+                    pDepth[v] = vzf;
                     pVX[v]    = dx * cosA + dz * sinA;
-                    pVY[v]    = wy - cam.height;
+                    pVY[v]    = vyf;
                 }
 
                 // Simple flat shading: use a directional light
@@ -1516,9 +1564,9 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                         // straddles the camera plane — the old path passed clamped
                         // screen coords directly to DrawTriangleTex.
                         auto rasterizeTri = [&](int a, int b, int c) {
-                            ClipVtx ca{ pVX[a], pVY[a], pDepth[a], verts[a].u, 1.0f - verts[a].v };
-                            ClipVtx cb{ pVX[b], pVY[b], pDepth[b], verts[b].u, 1.0f - verts[b].v };
-                            ClipVtx cc{ pVX[c], pVY[c], pDepth[c], verts[c].u, 1.0f - verts[c].v };
+                            ClipVtx ca{ pVX[a], pVY[a], pDepth[a], verts[a].u, 1.0f - verts[a].v, verts[a].r, verts[a].g, verts[a].b };
+                            ClipVtx cb{ pVX[b], pVY[b], pDepth[b], verts[b].u, 1.0f - verts[b].v, verts[b].r, verts[b].g, verts[b].b };
+                            ClipVtx cc{ pVX[c], pVY[c], pDepth[c], verts[c].u, 1.0f - verts[c].v, verts[c].r, verts[c].g, verts[c].b };
                             ClipVtx out[6];
                             int n = clip_tri_near(ca, cb, cc, out);
                             for (int k = 0; k < n; k++) {
@@ -1539,7 +1587,11 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                                     sx1, sy1, out[k*3+1].u, out[k*3+1].v, out[k*3+1].vz,
                                     sx2, sy2, out[k*3+2].u, out[k*3+2].v, out[k*3+2].vz,
                                     ma.texturePixels.data(), ma.texturePalette,
-                                    ma.texW, ma.texH, sp.fog);
+                                    ma.texW, ma.texH, sp.fog,
+                                    out[k*3+0].r, out[k*3+0].g, out[k*3+0].b,
+                                    out[k*3+1].r, out[k*3+1].g, out[k*3+1].b,
+                                    out[k*3+2].r, out[k*3+2].g, out[k*3+2].b,
+                                    ma.textured && ma.textureUseAlpha);
                             }
                         };
                         rasterizeTri(i0, i1, i2);
@@ -1764,10 +1816,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             }
 
             // Store for viewport click-to-select
-            sLastProj[sLastProjCount].screenX = hasMeshBounds ? meshSelCX : sp.screenX;
-            sLastProj[sLastProjCount].screenY = drawCenterY;
-            sLastProj[sLastProjCount].halfW = halfW;
-            sLastProj[sLastProjCount].halfH = halfH;
+            sLastProj[sLastProjCount].screenX = (hasMeshBounds ? meshSelCX : sp.screenX) / kRS;
+            sLastProj[sLastProjCount].screenY = drawCenterY / kRS;
+            sLastProj[sLastProjCount].halfW = halfW / kRS;
+            sLastProj[sLastProjCount].halfH = halfH / kRS;
             sLastProj[sLastProjCount].spriteIdx = sp.idx;
             sLastProjCount++;
         }
@@ -1785,18 +1837,21 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float lambda = fovLambda / cam.fov;
             if (lambda < 0.01f) lambda = 0.01f; // prevent overflow when camera is very close
 
-            int screenY = horizon + (int)(cam.height / lambda);
+            float vyB = 0.0f - cam.height, vzB = lambda * cam.fov;
+            pitch_rot(vyB, vzB); if (vzB < 0.1f) vzB = 0.1f;
+            float lamP = vzB / cam.fov; if (lamP < 0.01f) lamP = 0.01f;
+            int screenY = (int)((float)kRH * 0.5f - kRS * vyB / lamP);
             float sideComponent = dx * cosA + dz * sinA;
-            int screenX = 120 + (int)(sideComponent / lambda);
+            int screenX = (int)kRCX + (int)(kRS * sideComponent / lamP);
 
             // Skip if way off screen
-            if (screenY > -200 && screenY < kGBAHeight + 200 &&
-                screenX > -200 && screenX < kGBAWidth + 200)
+            if (screenY > -200 && screenY < kRH + 200 &&
+                screenX > -200 && screenX < kRW + 200)
             {
                 float fog = lambda / 300.0f;
                 if (fog > 1.0f) fog = 1.0f;
 
-                float scale = cam.height / lambda;
+                float scale = kRS * cam.height / lamP;
                 int half = std::clamp((int)(10.0f * scale / cam.height * 16.0f * camObjScale), 2, 200);
 
                 DrawSquare(screenX, screenY - half, half, 100, 220, 255, fog);
@@ -1860,7 +1915,7 @@ void UploadTexture()
 {
     if (!sTexture) return;
     glBindTexture(GL_TEXTURE_2D, sTexture);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kGBAWidth, kGBAHeight,
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kRW, kRH,
                     GL_RGB, GL_UNSIGNED_BYTE, sFrameBuf);
 }
 

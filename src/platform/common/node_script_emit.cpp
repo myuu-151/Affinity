@@ -826,6 +826,10 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* taD = findDataIn(a->id, 11); auto* tlD = findDataIn(a->id, 12);
                 int ta = taD ? resolveInt(taD) : 96;   // afterimage trail alpha (peak ~96)
                 int tl = tlD ? resolveInt(tlD) : 6;    // afterimage trail length (ghosts, max 6)
+                auto* trD = findDataIn(a->id, 13); auto* tgD = findDataIn(a->id, 14); auto* tbD = findDataIn(a->id, 15);
+                int tr = trD ? resolveInt(trD) : 150;  // ghost tint (default = the prototype cyan)
+                int tg = tgD ? resolveInt(tgD) : 220;
+                int tb = tbD ? resolveInt(tbD) : 255;
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
                 f << "    if (afn_qa_cd <= 0 && afn_qa_phase == 0 && afn_energy >= " << ec << ") {\n";
                 f << "        afn_qa_speed = " << sp << "; afn_qa_range = " << sr << "; afn_qa_dmg = " << dm << ";\n";
@@ -833,6 +837,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "        afn_qa_clip_lunge = " << lc << "; afn_qa_clip_skid = " << sc << "; afn_qa_clip_idle = " << ic << ";\n";
                 f << "        afn_qa_cd = " << cd << ";\n";
                 f << "        afn_qa_trail_alpha = " << ta << "; afn_qa_trail_len = " << tl << ";   // dash afterimage\n";
+                f << "        afn_qa_trail_r = " << tr << "; afn_qa_trail_g = " << tg << "; afn_qa_trail_b = " << tb << ";   // ghost tint\n";
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 f << "        afn_qa_tgt = afn_cam_lock_target;   // dash homes the lock target (-1 = straight forward)\n";
                 f << "#else\n";
@@ -1223,6 +1228,16 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << "; afn_pc_knock = " << (d9?resolveInt(d9):14) << ";\n";
                 break;
             }
+            case AfnScriptNodeType::LockReticle: {
+                // Lock-on reticle config (migrated hardcode) — defaults = the prototype gold ring.
+                auto* d0=findDataIn(a->id,0);  auto* d1=findDataIn(a->id,1);  auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3);  auto* d4=findDataIn(a->id,4);  auto* d5=findDataIn(a->id,5);
+                f << "    afn_lret_on = 1;\n";
+                f << "    afn_lret_size = " << (d0?resolveInt(d0):100) << "; afn_lret_r = " << (d1?resolveInt(d1):255)
+                  << "; afn_lret_g = " << (d2?resolveInt(d2):200) << "; afn_lret_b = " << (d3?resolveInt(d3):80) << ";\n";
+                f << "    afn_lret_spin = " << (d4?resolveInt(d4):100) << "; afn_lret_pulse = " << (d5?resolveInt(d5):100) << ";\n";
+                break;
+            }
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
             case AfnScriptNodeType::AiFireBeam: {
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Charged / Tap SFX (5 / 6)
@@ -1246,6 +1261,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_eqa_jump_chance = " << (d7?resolveInt(d7):65) << "; afn_eqa_jump_cd = " << (d8?resolveInt(d8):40) << ";\n";
                 f << "    afn_ai_sfx_whoosh = " << (d9?resolveInt(d9):17) << ";\n";
                 f << "    afn_eqa_trail_alpha = " << (d10?resolveInt(d10):96) << "; afn_eqa_trail_len = " << (d11?resolveInt(d11):6) << ";\n";
+                auto* d12=findDataIn(a->id,12); auto* d13=findDataIn(a->id,13); auto* d14=findDataIn(a->id,14);   // ghost tint
+                f << "    afn_eqa_trail_r = " << (d12?resolveInt(d12):255) << "; afn_eqa_trail_g = " << (d13?resolveInt(d13):255)
+                  << "; afn_eqa_trail_b = " << (d14?resolveInt(d14):255) << ";\n";
                 f << "    afn_ai_quick_attack();\n";
                 break;
             }
@@ -1457,6 +1475,10 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* d8=findDataIn(a->id,8); auto* d9=findDataIn(a->id,9);
                 auto* d10=findDataIn(a->id,10); auto* d11=findDataIn(a->id,11);
                 f << "    afn_ai_enabled = 1;\n";
+                // The BP owner IS the enemy: claiming afn_enemy_eidx keys every
+                // enemy-coupled system (bone snapshots, HP, clash, nav override,
+                // afterimage) to THIS sprite — no node, no enemy, all dormant.
+                f << "    if (afn_bp_cur_spr_idx >= 0) afn_enemy_eidx = afn_bp_cur_spr_idx;\n";
                 f << "    afn_ai_detect_r = " << (d0?resolveInt(d0):60) << "; afn_ai_lose_r = " << (d1?resolveInt(d1):95)
                   << "; afn_ai_pref_r = " << (d2?resolveInt(d2):22) << ";\n";
                 f << "    afn_ai_atkcd = " << (d3?resolveInt(d3):80) << "; afn_ai_chargeprob = " << (d4?resolveInt(d4):40)
@@ -1643,6 +1665,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_lock_zoom_in = " << (a->paramInt[2] & 1) << ";\n";
                 f << "    afn_lock_height = " << (lkHeight / 4) << ";\n";
                 f << "    afn_lock_no_lookdown = " << ((a->paramInt[2] >> 1) & 1) << ";\n";
+                // Same-key release: capture the key that fired us (afn_pause_key
+                // pattern) so pressing it again toggles the lock off.
+                auto* skD = findDataIn(a->id, 1);
+                f << "    afn_lock_release_same = " << (skD ? resolveInt(skD) : 1) << ";\n";
+                f << "    if (afn_keys_pressed) afn_lock_key = afn_keys_pressed;   // capture the locking key (same-key release)\n";
                 f << "#endif\n";
                 break;
             }

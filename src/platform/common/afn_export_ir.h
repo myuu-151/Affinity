@@ -54,6 +54,8 @@ struct AfnSpriteExport
     float navStopDist = 32.0f;  // stop this close to the goal, editor units
     int   navRepath = 30;       // frames between path recomputes
     int   navMoveClip = -1;     // rig clip to play while moving (-1 = keep current)
+    int   navPauseMin = 60;     // wander: min idle frames between legs
+    int   navPauseMax = 180;    // wander: max idle frames between legs
     // Nav bounds box: axis-aligned volume selecting which scene geometry
     // participates in the PSV navmesh build (extents in editor units).
     bool  isNavPlane = false;
@@ -648,6 +650,7 @@ enum class AfnScriptNodeType : int {
     ThrowBall,       // action (On Key Released): throw the aimed pokeball
     AimBall,         // action (On Key Held): aim the pokeball throw
     PhysicalClash,   // action (config): arm the dash-vs-dash QTE struggle
+    LockReticle,     // action (config): draw the lock-on ring under the locked target
     COUNT
 };
 

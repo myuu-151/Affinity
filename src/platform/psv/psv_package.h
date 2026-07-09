@@ -7,6 +7,11 @@
 namespace Affinity
 {
 
+// Navmesh bake source (set by the editor before PackagePSV): -1 = every placed
+// mesh feeds Recast; >= 0 = only instances of that mesh asset (e.g. the Ground),
+// keeping foliage / sky spheres out of the voxelizer.
+extern int g_navSourceMesh;
+
 // Package the current map for the PS Vita runtime (vitaGL / Mode 4 3D).
 //
 // The Vita shares the PSP's float-geometry + RGBA8888 data layout, so this

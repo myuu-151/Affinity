@@ -79,14 +79,20 @@ static int    s_npcPathLen[AFN_NPC_COUNT + 1];
 static int    s_npcPathIdx[AFN_NPC_COUNT + 1];
 static int    s_npcRepathT[AFN_NPC_COUNT + 1];                // frames until repath
 static unsigned char s_npcNavMoving[AFN_NPC_COUNT + 1];       // moving this frame (move clip)
+static short         s_npcPauseT[AFN_NPC_COUNT + 1];          // wander: idle frames left at the current stop
+static unsigned      s_navPauseRng = 0x9E37u;                 // tiny LCG for pause-length variation
+static unsigned      nav_pause_rand(void) { s_navPauseRng = s_navPauseRng*1664525u + 1013904223u; return (s_navPauseRng >> 8) & 0xFFFF; }
 #endif
 extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8 fixed, shared with player)
 
-// ===================== HARDCODED: enemy NPC combat AI =====================
-// Prototype enemy that mirrors the player controller (lock-on strafe + charge/tap
-// projectiles + dodge) AI-driven. Gated to one NPC (editor sprite AFN_ENEMY_EIDX).
-// Migrate to nodes later (the AI node-verbs are currently stubs). Tunable below.
-#define AFN_ENEMY_EIDX        3        // exported editor sprite index of the NPC (afn_npc_inst col 7)
+// ===================== NODE-DRIVEN: enemy NPC combat AI =====================
+// Enemy that mirrors the player controller (lock-on strafe + charge/tap
+// projectiles + dodge), driven by the BP state machine + AI nodes. The enemy's
+// IDENTITY is claimed by the Enemy AI node from its blueprint owner
+// (afn_enemy_eidx = afn_bp_cur_spr_idx) — with no Enemy AI node wired it stays
+// -1 and ALL enemy-keyed systems (bone snapshots, HP seeding, clash, nav
+// override, afterimage) are dormant, so nothing leaks into other projects.
+int afn_enemy_eidx = -1;               // editor sprite index of the enemy (afn_npc_inst col 7); -1 = none
 #define ENEMY_HP_MAX          100
 // NOTE: this scene uses small world coords (~128-156, nav walk 0.35/frame), so all
 // distances/speeds are in those units. Tune to taste.
@@ -454,6 +460,12 @@ int afn_pc_dmg_e = 12, afn_pc_dmg_p = 10;     // resolve damage
 int afn_pc_cd_frames = 150;                   // re-trigger cooldown
 int afn_pc_window = 55, afn_pc_ai_wait = 50;  // base prompt window / AI cadence (frames)
 int afn_pc_knock = 14;                        // knockback shove frames
+// Lock Reticle node (afn_lret_*): the pulsing lock-on ring under the locked
+// target. afn_lret_on gates the render — no node wired = no reticle ever draws.
+int afn_lret_on = 0;
+int afn_lret_size = 100;                      // ring size %
+int afn_lret_r = 255, afn_lret_g = 200, afn_lret_b = 80;   // color (default gold)
+int afn_lret_spin = 100, afn_lret_pulse = 100;             // spin speed % / breathe %
 static int s_clashPunishLeft = 0;   // fast-press presses remaining in the current burst
 void afn_clash_suppress_beams(void);     // fwd (defined below) — node SuppressBeams / ClashBegin
 // The real body is guarded by AFN_HAS_HUD && AFN_HAS_PLAYER_RIG && AFN_HAS_SPRITE_IDX,
@@ -527,7 +539,7 @@ static void rig_init(void) {
         s_npcYaw[i] = afn_npc_inst[i][3];
         s_npcFloorN[i][0] = 0.0f; s_npcFloorN[i][1] = 1.0f; s_npcFloorN[i][2] = 0.0f;
 #ifdef AFN_HAS_NAVMESH
-        s_npcPathLen[i] = 0; s_npcPathIdx[i] = 0; s_npcRepathT[i] = 0; s_npcNavMoving[i] = 0;
+        s_npcPathLen[i] = 0; s_npcPathIdx[i] = 0; s_npcRepathT[i] = 0; s_npcNavMoving[i] = 0; s_npcPauseT[i] = 0;
 #endif
     }
     // HARDCODED: reset enemy combat AI on (re)init so a scene restart re-seeds HP/state.
@@ -689,12 +701,13 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     glDisableClientState(GL_VERTEX_ARRAY);
 }
 
-// HARDCODED Quick Attack afterimage (player only): faint cyan ghost silhouettes of
-// the rig at recent trail positions, to sell the dash speed. Reuses the CURRENT
+// NODE-DRIVEN Quick Attack afterimage (player): ghost silhouettes of the rig at
+// recent trail positions, to sell the dash speed — alpha/length/tint come from
+// the Quick Attack node's Trail pins (afn_qa_trail_*). Reuses the CURRENT
 // skinned pose (s_skinned) drawn at past world positions; overwrites s_skinned
 // colors with a flat tint — skin() resets them to white next frame, so no
 // save/restore needed. Untextured, alpha-blended, depth-write off so the trail
-// layers behind the live player. Could become a Quick Attack node tunable later.
+// layers behind the live player.
 #define PA_TRAIL_N 16
 static float s_paTrail[PA_TRAIL_N][4];   // player x,y,z,yawDeg history (one sample / rendered frame)
 static int   s_paHead = -1, s_paFilled = 0;
@@ -706,8 +719,10 @@ extern int afn_player_frozen;            // defined later; forward-declared so r
 // Quick Attack afterimage tunables — NODE-DRIVEN (Quick Attack / Ai Quick Attack nodes).
 // Trail Alpha scales the per-ghost alpha ramp (default 96 = the original peak); Trail
 // Length = how many of the 6 trail samples to draw (nearest N). Defaults = original look.
-int afn_qa_trail_alpha = 96, afn_qa_trail_len = 6;    // player (cyan)
-int afn_eqa_trail_alpha = 96, afn_eqa_trail_len = 6;  // enemy (white)
+int afn_qa_trail_alpha = 96, afn_qa_trail_len = 6;    // player
+int afn_qa_trail_r = 150, afn_qa_trail_g = 220, afn_qa_trail_b = 255;   // player ghost tint (default cyan)
+int afn_eqa_trail_alpha = 96, afn_eqa_trail_len = 6;  // enemy
+int afn_eqa_trail_r = 255, afn_eqa_trail_g = 255, afn_eqa_trail_b = 255;   // enemy ghost tint (default white)
 int afn_wild_charge = 0;   // 1 while a Wild Charge dash is running: yellow trail + blue sparks (Quick Attack reused)
 
 // tint24 = 0xBBGGRR speed-ghost colour (player cyan, enemy red); alpha 0..255.
@@ -802,7 +817,8 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
             if (paBack[k] >= s_paFilled) continue;
             int gi = (s_paHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
             int a = (18 + (k + 1) * 13) * afn_qa_trail_alpha / 96;   // far fainter -> near brighter, scaled by Trail Alpha
-            unsigned trailCol = afn_wild_charge ? 0x0000E0FFu : 0x00FFDC96u;   // Wild Charge = yellow, else cyan (0xBBGGRR)
+            unsigned trailCol = afn_wild_charge ? 0x0000E0FFu   // Wild Charge keeps its yellow (0xBBGGRR)
+                : (((unsigned)afn_qa_trail_b << 16) | ((unsigned)afn_qa_trail_g << 8) | (unsigned)afn_qa_trail_r);   // Trail R/G/B pins
             draw_rig_afterimage(PR, view, s_paTrail[gi][0], s_paTrail[gi][1],
                                 s_paTrail[gi][2], s_paTrail[gi][3],
                                 AFN_PLAYER_SCALE, floorN, a, trailCol);
@@ -857,7 +873,7 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop),
         // tilted to the smoothed floor normal like the player (slope snap).
 #ifdef AFN_HAS_SPRITE_IDX
-        s_cacheEnemyBones = ((int)N[7] == AFN_ENEMY_EIDX);   // HARDCODED: snapshot enemy bones for its orb muzzle
+        s_cacheEnemyBones = (afn_enemy_eidx >= 0 && (int)N[7] == afn_enemy_eidx);   // snapshot enemy bones for its orb muzzle (Enemy AI node)
 #endif
         rig_draw(R, s_rigTex[slot], view, s_npcX[i], s_npcY[i], s_npcZ[i], s_npcYaw[i], N[4], s_npcFloorN[i]);
         s_cacheEnemyBones = 0;
@@ -865,7 +881,7 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         // Enemy Quick Attack afterimage: red ghost trail behind the dashing enemy.
         // Record its pose each frame; draw ghosts while its melee dash/skid runs
         // (s_eqaPhase != 0). Reuses the enemy's just-skinned pose (s_skinned).
-        if ((int)N[7] == AFN_ENEMY_EIDX) {
+        if (afn_enemy_eidx >= 0 && (int)N[7] == afn_enemy_eidx) {
             s_eaHead = (s_eaHead + 1) % PA_TRAIL_N;
             s_eaTrail[s_eaHead][0] = s_npcX[i]; s_eaTrail[s_eaHead][1] = s_npcY[i];
             s_eaTrail[s_eaHead][2] = s_npcZ[i]; s_eaTrail[s_eaHead][3] = s_npcYaw[i];
@@ -877,9 +893,10 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
                     if (paBack[k] >= s_eaFilled) continue;
                     int gi = (s_eaHead - paBack[k] + PA_TRAIL_N) % PA_TRAIL_N;
                     int a = (18 + (k + 1) * 13) * afn_eqa_trail_alpha / 96;
+                    unsigned eCol = ((unsigned)afn_eqa_trail_b << 16) | ((unsigned)afn_eqa_trail_g << 8) | (unsigned)afn_eqa_trail_r;   // Trail R/G/B pins
                     draw_rig_afterimage(R, view, s_eaTrail[gi][0], s_eaTrail[gi][1],
                                         s_eaTrail[gi][2], s_eaTrail[gi][3],
-                                        N[4], s_npcFloorN[i], a, 0x00FFFFFFu);   // white
+                                        N[4], s_npcFloorN[i], a, eCol);
                 }
             }
         }
@@ -2200,6 +2217,10 @@ int   afn_hpbar_active = 0, afn_hpbar_obj = -1, afn_hpbar_max = 100;
 // world-px lateral shift.
 int afn_lock_zoom = 18, afn_lock_side = 8;
 int afn_lock_zoom_in = 0;   // 0 = zoom OUT (pull back), 1 = zoom IN (pull closer)
+// Same-key lock release (Lock On node pin + auto-captured key, like afn_pause_key):
+// pressing the key that locked again releases the lock. Pin default 1 = on.
+int afn_lock_release_same = 1;
+unsigned afn_lock_key = 0;  // key bitmask captured from the press that fired Lock On
 int afn_lock_height = 8;    // raises the locked pitch aim (world px): camera rides
                             // higher and looks down a bit instead of dead level
 int afn_lock_no_lookdown = 0;  // 1 = clamp the locked pitch so it never looks DOWN
@@ -3024,7 +3045,7 @@ extern int afn_pc_window, afn_pc_ai_wait;   // Physical Clash node tunables (def
 // 80%) but scales it from the node's base Window / Ai Wait instead of 55/50.
 static int pc_window(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float W=(float)afn_pc_window; float w=W - d*(W*0.5455f); if(d>0.6f) w-=(d-0.6f)*6.0f; if(w<6.0f)w=6.0f; return (int)w; }
 static int pc_ai_wait(void){ float d=fabsf(s_pc_pressure-0.5f)*2.0f; float W=(float)afn_pc_ai_wait; float w=W - d*(W*0.54f); if(d>0.6f) w-=(d-0.6f)*5.0f; if(w<6.0f)w=6.0f; return (int)(w*(0.8f+pc_rand()*0.5f)); }
-static int pc_enemy_npc(void){ for(int i=0;i<AFN_NPC_COUNT;i++) if((int)afn_npc_inst[i][7]==AFN_ENEMY_EIDX) return i; return -1; }
+static int pc_enemy_npc(void){ if(afn_enemy_eidx<0) return -1; for(int i=0;i<AFN_NPC_COUNT;i++) if((int)afn_npc_inst[i][7]==afn_enemy_eidx) return i; return -1; }
 // (The struggle UI is drawn as a fullscreen 2D cut-in — physclash_render_2d, defined with the
 //  other HUD-space renderers next to clash_render_2d — matching the beam clash's presentation.)
 
@@ -4310,6 +4331,48 @@ void afn_reticle_render(const float* view, float px, float py, float pz, float y
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
 
+#if defined(AFN_HAS_PLAYER_RIG)
+// NODE-DRIVEN: lock-on reticle (Lock Reticle node, afn_lret_*) — while the camera
+// is locked (Lock On node), draw a pulsing double-ring at the locked target's
+// feet so the lock is readable even when the target wanders. Same strip
+// technique as afn_reticle_render. Dormant without the node (afn_lret_on).
+static void afn_lockon_reticle_render(const float* view) {
+    if (!afn_lret_on) return;
+    if (afn_cam_lock_target < 0) return;
+    int slot = -1;
+    for (int i = 0; i < AFN_NPC_COUNT; i++)
+        if ((int)afn_npc_inst[i][7] == afn_cam_lock_target) { slot = i; break; }
+    if (slot < 0) return;
+    float rx = s_npcX[slot], ry = s_npcY[slot] + 0.35f, rz = s_npcZ[slot];
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
+    unsigned rc = ((unsigned)afn_lret_b << 16) | ((unsigned)afn_lret_g << 8) | (unsigned)afn_lret_r;   // 0xAABBGGRR
+    float sz   = (float)afn_lret_size * 0.01f;
+    float pls  = (0.5f + 0.5f*sinf((float)afn_frame_count*0.15f)) * ((float)afn_lret_pulse * 0.01f);   // breathe
+    float spin = (float)afn_frame_count*0.045f*((float)afn_lret_spin * 0.01f);
+    for (int ringN = 0; ringN < 2; ringN++) {                    // outer spin ring + tight inner ring
+        float r0 = (ringN ? 2.0f : 3.4f + 0.6f*pls) * sz;
+        float r1 = r0 + (ringN ? 0.6f : 1.1f) * sz;
+        float dir = ringN ? -1.0f : 1.0f;                        // counter-rotate
+        unsigned a = ringN ? 150u : (170u + (unsigned)(70.0f*pls));
+        AfnVertex ring[2*25];
+        for (int j = 0; j <= 24; j++) {
+            float ang = dir*spin + (float)j*(6.2831853f/24.0f), ca = cosf(ang), sa = sinf(ang);
+            unsigned col = rc | (a<<24);
+            ring[2*j].u=0;   ring[2*j].v=0;   ring[2*j].color=col;   ring[2*j].x=rx+ca*r0; ring[2*j].y=ry; ring[2*j].z=rz+sa*r0;
+            ring[2*j+1].u=1; ring[2*j+1].v=0; ring[2*j+1].color=col; ring[2*j+1].x=rx+ca*r1; ring[2*j+1].y=ry; ring[2*j+1].z=rz+sa*r1;
+        }
+        glColorPointer(4,GL_UNSIGNED_BYTE,sizeof(AfnVertex),&ring->color);
+        glVertexPointer(3,GL_FLOAT,sizeof(AfnVertex),&ring->x);
+        glDrawArrays(GL_TRIANGLE_STRIP,0,2*25);
+    }
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
+}
+#endif
+
 // ============================================================================
 // POKEBALL THROW — NODE-DRIVEN (Aim Ball / Throw Ball nodes; see afn_pbt_*).
 // Runtime primitives for the throw (aim an arc + floor reticle, play the
@@ -4533,11 +4596,11 @@ void afn_focus_blast_step(void) {
 // player, tick cooldowns, and set the gate flags (lose/dodge/can-fire). Frozen
 // during a beam clash (the clash owns the enemy then).
 void afn_ai_sense(void) {
-    if (afn_ai_slot < 0)
+    if (afn_ai_slot < 0 && afn_enemy_eidx >= 0)
         for (int n = 0; n < AFN_NPC_COUNT; n++)
-            if ((int)afn_npc_inst[n][7] == AFN_ENEMY_EIDX) { afn_ai_slot = n; break; }
+            if ((int)afn_npc_inst[n][7] == afn_enemy_eidx) { afn_ai_slot = n; break; }
     int i = afn_ai_slot; if (i < 0) return;
-    int eidx = AFN_ENEMY_EIDX;
+    int eidx = afn_enemy_eidx;
     if (!s_aiInited) { afn_hp[eidx] = ENEMY_HP_MAX; afn_sprite_visible[eidx] = 1; afn_ai_state = AI_ROAM; s_aiInited = 1; }
     if (afn_enemy_frozen || afn_paused) {   // cutscene freeze OR scene pause: no decisions
         // Don't stand a DEAD enemy back up. A victory cutscene (Freeze Enemy) or pause
@@ -4829,7 +4892,7 @@ void afn_ai_quick_attack(void) {
     int i = afn_ai_slot; if (i < 0) return;
     if (afn_enemy_frozen || afn_paused) return;   // cutscene freeze OR scene pause
     if (afn_hud_visible[AFN_CLASH_ELEM]) return;
-    afn_ai_melee_reflex(i, AFN_ENEMY_EIDX, (float)player_x, (float)player_z);
+    afn_ai_melee_reflex(i, afn_enemy_eidx, (float)player_x, (float)player_z);
 }
 
 // CHARGE begin: roll charge-vs-tap, start the wind-up (called once on entry).
@@ -5954,7 +6017,10 @@ int main(void)
 #endif
 #ifdef AFN_HAS_PLAYER_RIG
     rig_init();
-    afn_hp[AFN_ENEMY_EIDX] = ENEMY_HP_MAX;   // seed at boot so a BP Is HP Zero(self) doesn't fire in menus (enemy BP runs all scenes)
+    // Seed EVERY sprite's HP at boot so a BP Is HP Zero(self) doesn't fire in
+    // menus (the enemy isn't known yet — the Enemy AI node claims afn_enemy_eidx
+    // on its first tick; afn_ai_sense re-seeds the real enemy then).
+    for (int hi = 0; hi < NUM_SPRITES; hi++) afn_hp[hi] = ENEMY_HP_MAX;
 #endif
 #ifdef AFN_HAS_HUD
     hud_init();
@@ -6102,6 +6168,20 @@ int main(void)
         afn_lock_functions = 0;   // Lock Player Functions node re-asserts each frame it runs (the held-mask above already consumed last frame's value)
         script_tick();   // runs even while paused (HUD upkeep); AI + projectiles self-gate on afn_paused, freeze block (below) zeros player actions
 #if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
+        // NODE-DRIVEN: same-key lock-on release (Lock On node's Same-Key Release pin;
+        // the key is auto-captured from the On Key Pressed that fired the node, so it
+        // toggles with whatever key the project locks with — no baked-in L).
+        // s_lockPrev = LAST frame's target, so a lock acquired THIS frame (the BP's
+        // On Key Pressed -> Lock On ran just above in script_tick) is not
+        // instantly released by the very press that created it.
+        {
+            static int s_lockPrev = -1;
+            if (afn_lock_release_same && afn_lock_key
+                && (afn_keys_pressed & afn_lock_key)
+                && afn_cam_lock_target >= 0 && s_lockPrev >= 0)
+                afn_cam_lock_target = -1;
+            s_lockPrev = afn_cam_lock_target;
+        }
         // Pokeball throw (node-armed) — state machine (see the block near afn_reticle_render).
         // Runs before the freeze block so aiming/throwing can freeze player translation.
         {
@@ -6330,9 +6410,12 @@ int main(void)
             // HARDCODED: re-seed combat + results state on every scene (re)entry so
             // Restart/Title from the results menu starts a clean battle (rig_init's
             // reset only runs at boot, not on a scene swap).
-            s_aiInited = 0; afn_ai_state = AI_ROAM; afn_ai_slot = -1; s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0;
+            s_aiInited = 0; afn_ai_state = AI_ROAM; afn_ai_slot = -1; afn_enemy_eidx = -1;   // Enemy AI node re-claims next tick
+            s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0;
             s_eqaPhase = 0; s_eqaCD = 0; s_eJumpCD = 0; s_ePrevPlayerQA = 0;   // clear melee reflexes
-            afn_hp[AFN_ENEMY_EIDX] = ENEMY_HP_MAX;   // seed HP before the first script tick (else BP Is HP Zero fires at start)
+            // Seed every sprite's HP before the first script tick (else BP Is HP
+            // Zero fires at start; the enemy isn't known until its node ticks).
+            for (int hi = 0; hi < NUM_SPRITES; hi++) afn_hp[hi] = ENEMY_HP_MAX;
             afn_ai_dodge_done = afn_ai_charge_done = afn_ai_fire_done = afn_ai_reached = 0;
             s_playerClipHold = 0;   // clear the player die-clip hold (HoldSkelClip)
             afn_cam_orbit_active = 0; afn_cam_orbit_timer = 0; afn_cam_orbit_obj = -1;   // OrbitCameraOnObject node
@@ -7117,7 +7200,7 @@ int main(void)
         if (s_pc_cd > 0) s_pc_cd--;
         if (afn_qa_phase == 1) s_pc_pG = 12; else if (s_pc_pG > 0) s_pc_pG--;   // refresh/bleed the grace windows
         if (s_eqaPhase == 1)   s_pc_eG = 12; else if (s_pc_eG > 0) s_pc_eG--;
-        if (afn_pc_on && !s_pc_active && s_pc_cd == 0 && s_pc_pG > 0 && s_pc_eG > 0 && afn_hp[AFN_ENEMY_EIDX] > 0) {
+        if (afn_pc_on && afn_enemy_eidx >= 0 && !s_pc_active && s_pc_cd == 0 && s_pc_pG > 0 && s_pc_eG > 0 && afn_hp[afn_enemy_eidx] > 0) {
             int eN = pc_enemy_npc();
             if (eN >= 0) {
                 float dx = s_npcX[eN]-playerX, dz = s_npcZ[eN]-playerZ;
@@ -7172,7 +7255,7 @@ int main(void)
                 if (done) {
                     s_pc_active = 0; s_pc_cd = afn_pc_cd_frames; s_pc_won = won; s_pc_knock = afn_pc_knock;
                     afn_player_frozen = 0;
-                    if (won) { afn_hp[AFN_ENEMY_EIDX] -= afn_pc_dmg_e; if (afn_hp[AFN_ENEMY_EIDX] < 0) afn_hp[AFN_ENEMY_EIDX] = 0;
+                    if (won) { if (afn_enemy_eidx >= 0) { afn_hp[afn_enemy_eidx] -= afn_pc_dmg_e; if (afn_hp[afn_enemy_eidx] < 0) afn_hp[afn_enemy_eidx] = 0; }
                                if (eN >= 0) { s_npcVY[eN] = 1.1f; s_npcGround[eN] = 0; } }
                     else     { afn_health -= afn_pc_dmg_p; if (afn_health < 0) afn_health = 0; playerVY = 1.1f; }
 #ifdef AFN_SND_WIN_CLASH
@@ -7231,7 +7314,7 @@ int main(void)
                 s_npcNavMoving[i] = 0;
                 {
                     int   mode  = (int)afn_npc_nav[i][0];
-                    if (eidx == AFN_ENEMY_EIDX && afn_ai_state != AI_ROAM) mode = 0;   // AI drives motion in combat (node-set state)
+                    if (afn_enemy_eidx >= 0 && eidx == afn_enemy_eidx && afn_ai_state != AI_ROAM) mode = 0;   // AI drives motion in combat (node-set state)
                     float speed = afn_npc_nav[i][1];
                     float stopD = afn_npc_nav[i][2];
                     int   repat = (int)afn_npc_nav[i][3];
@@ -7242,7 +7325,9 @@ int main(void)
                     if (mode != 0 && afn_nav_is_ready()) {
                         float pdx = playerX - s_npcX[i], pdz = playerZ - s_npcZ[i];
                         float pd2 = pdx*pdx + pdz*pdz;
-                        if (mode == 1 && pd2 <= stopD*stopD) {
+                        if (mode == 2 && s_npcPathIdx[i] >= s_npcPathLen[i] && s_npcPauseT[i] > 0) {
+                            s_npcPauseT[i]--;              // standing at a wander stop (idle clip plays)
+                        } else if (mode == 1 && pd2 <= stopD*stopD) {
                             s_npcPathLen[i] = 0;           // close enough — idle
                             s_npcRepathT[i] = 0;           // re-engage instantly when player leaves
                         } else if (--s_npcRepathT[i] <= 0 ||
@@ -7252,7 +7337,13 @@ int main(void)
                             if (mode == 2 && (s_npcPathIdx[i] >= s_npcPathLen[i])) {
                                 float rp[3];
                                 ok = afn_nav_find_random_point(rp);
-                                if (ok) { gx = rp[0]; gy = rp[1]; gz = rp[2]; }
+                                if (ok) { gx = rp[0]; gy = rp[1]; gz = rp[2];
+                                    // Arm the idle pause for when THIS leg completes:
+                                    // random in [Pause Min, Pause Max] (afn_npc_nav cols 5/6).
+                                    int pmin = (int)afn_npc_nav[i][5], pmax = (int)afn_npc_nav[i][6];
+                                    if (pmax < pmin) pmax = pmin;
+                                    s_npcPauseT[i] = (short)(pmin + (pmax > pmin ? (int)(nav_pause_rand() % (unsigned)(pmax - pmin + 1)) : 0));
+                                }
                             } else if (mode == 2) {
                                 ok = 0;                    // wander: keep current leg until done
                             }
@@ -7996,6 +8087,9 @@ int main(void)
         afn_aim_step(playerX, playerY, playerZ, playerYaw);              // Aim Stick node (free-aim + orbit)
         afn_thunder_step(view, playerX, playerY, playerZ, playerYaw);
         afn_reticle_render(view, playerX, playerY, playerZ, playerYaw);   // Floor Reticle node
+#if defined(AFN_HAS_PLAYER_RIG)
+        afn_lockon_reticle_render(view);   // NODE-DRIVEN: Lock Reticle ring under the locked target (afn_lret_on)
+#endif
         afn_beam_resolve(playerX, playerY, playerZ, playerYaw);
         afn_beam_render(view);
 

@@ -961,6 +961,7 @@ enum class VsNodeType : int {
     ThrowBall,       // action (drive from On Key RELEASED): throw the aimed pokeball (pitch anim + arc flight)
     AimBall,         // action (drive from On Key HELD): aim the pokeball throw (arc + reticle; L-stick steers)
     PhysicalClash,   // action (config, wire On Start): arm the dash-vs-dash QTE struggle (prompts + pressure meter)
+    LockReticle,     // action (config, wire On Start): draw the pulsing lock-on ring under the locked target
     COUNT
 };
 
@@ -1282,7 +1283,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Turn Player",     0xFF6644AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
     { "Cast Effect",     0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
     { "Attached Sprite", 0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
-    { "Lock On",         0xFF3355AA, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
+    { "Lock On",         0xFF3355AA, 1, 1, 2, 0, {"Target (obj)","Same-Key Release (int)"}, {}, {} },
     { "Release Lock On", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Lock Strafe",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Is Locked On",    0xFF885533, 1, 1, 0, 0, {}, {}, {} },
@@ -1364,12 +1365,12 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "AI Block Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "AI Block Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
     { "Can Fire Blast",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
-    { "Quick Attack",    0xFF3355AA, 1, 1, 13, 0, {"Speed (int)","Stop Range","Damage (int)","Max Frames","Skid Frames","Punch %","Lunge Clip","Skid Clip","Idle Clip","Cooldown (int)","Energy Cost (int)","Trail Alpha","Trail Length"}, {}, {} },
+    { "Quick Attack",    0xFF3355AA, 1, 1, 16, 0, {"Speed (int)","Stop Range","Damage (int)","Max Frames","Skid Frames","Punch %","Lunge Clip","Skid Clip","Idle Clip","Cooldown (int)","Energy Cost (int)","Trail Alpha","Trail Length","Trail R","Trail G","Trail B"}, {}, {} },
     { "Is Dashing",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Quick Attack Hit",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Charge Up",       0xFF3355AA, 1, 1, 2, 0, {"Energy/Frame (int)", "Charge Clip (Skel Anim)"}, {}, {} },
     { "Quick Attack Started",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
-    { "Ai Quick Attack", 0xFFAA5566, 1, 1, 12, 0, {"Dash Range", "Trigger /1000", "Dash Speed", "Contact Range", "Damage", "Cooldown", "Jump Vel x100", "Jump % (unused)", "Jump Cooldown", "Whoosh SFX", "Trail Alpha", "Trail Length"}, {}, {} },
+    { "Ai Quick Attack", 0xFFAA5566, 1, 1, 15, 0, {"Dash Range", "Trigger /1000", "Dash Speed", "Contact Range", "Damage", "Cooldown", "Jump Vel x100", "Jump % (unused)", "Jump Cooldown", "Whoosh SFX", "Trail Alpha", "Trail Length", "Trail R", "Trail G", "Trail B"}, {}, {} },
     { "AI Timing",       0xFF55AA66, 1, 1, 10, 0, {"De-Aggro Frames", "Strafe Leg", "Yaw Ease x100", "Tap Windup", "Fire Recover", "Dodge Frames", "Dodge Cooldown", "Dodge Speed (-1=player)", "Dodge Ramp (-1=player)", "Dodge Falloff (-1=player)"}, {}, {} },
     { "AI Clips",        0xFF55AA66, 1, 1, 16, 0, {"Move", "Idle", "Strafe L", "Strafe LD", "Strafe LDFW", "Strafe R", "Strafe RD", "Strafe RDFW", "Backpeddle", "Block", "Charge Pose", "Launch", "Lunge", "Skid", "Jump", "Jump Fall"}, {}, {} },
     { "Play Camera Anim",0xFF3355AA, 1, 1, 12, 0, {"Anim (int)", "Freeze Player (int)", "Loop (int)", "Hold Last (int)", "Freeze Enemy (int)", "Player Clip (int)", "Cry Sound (int)", "Snap Player (int)", "Snap X (int)", "Snap Z (int)", "Face Angle (int)", "Freeze Input (int)"}, {}, {} },
@@ -1387,6 +1388,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Throw Ball",       0xFF7744CC, 1, 1, 4, 0, {"Pitch Clip (int)","Release % (int)","Speed x10 (int)","Cooldown (int)"}, {}, {} },
     { "Aim Ball",         0xFF7744CC, 1, 1, 7, 0, {"Dist Min (int)","Dist Max (int)","Dist Default (int)","Turn Rate x10 (int)","Dist Rate x10 (int)","Arc % (int)","Freeze Aim (int)"}, {}, {} },
     { "Physical Clash",   0xFFCC5533, 1, 1, 10, 0, {"Meet Radius (int)","Push x1000 (int)","Miss x1000 (int)","Ai Push x1000 (int)","Enemy Dmg (int)","Player Dmg (int)","Cooldown (int)","Window (int)","Ai Wait (int)","Knockback (int)"}, {}, {} },
+    { "Lock Reticle",     0xFF2090D0, 1, 1, 6, 0, {"Size % (int)","Red (int)","Green (int)","Blue (int)","Spin % (int)","Pulse % (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1475,6 +1477,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::ThrowBall:     desc = "Throws the aimed pokeball — drive from On Key RELEASED (same key as the Aim Ball On Key Held). The pitch clip plays, the hand ball detaches at Release % of the clip, flies the aimed arc, and despawns on landing; after Cooldown frames it respawns in the hand. Any aim freeze is released the moment the ball detaches. Pitch Clip unwired = name-resolves 'pitch'. Pair with Aim Ball; needs a bone-attached hand model + player rig."; break;
     case VsNodeType::AimBall:       desc = "Aims the pokeball throw — drive from On Key HELD. While held: a dotted arc + white floor reticle preview the shot, L-stick X turns the aim, L-stick Y sets the distance (Dist Min..Max, starting at Dist Default). Freeze Aim (default 1) locks player movement while aiming. Release the key into an On Key Released -> Throw Ball to fire; letting go with no Throw Ball wired just cancels the aim. Without these nodes the system is fully dormant."; break;
     case VsNodeType::PhysicalClash: desc = "Arms the PHYSICAL clash (wire from On Start): when the player's Quick Attack dash and the enemy's dash meet head-on within Meet Radius, both fighters lock nose-to-nose and a pressure QTE begins — random face-button prompts shove the meter toward the enemy (Push), wrong buttons bleed it back (Miss), and the AI shoves on its own cadence (Ai Push / Ai Wait). Prompts and AI both quicken as the meter nears either edge (base Window frames). Overflow a side to resolve: winner deals Enemy/Player Dmg + launches the loser with Knockback frames of shove. Cooldown frames before it can re-trigger. Without this node the system is fully dormant. x1000 pins: 60 = 0.060 meter shove."; break;
+    case VsNodeType::LockReticle:   desc = "Draws the lock-on reticle (wire from On Start): while the camera is locked (Lock On node), a pulsing double-ring — counter-rotating outer + tight inner, additive glow — is drawn at the locked target's feet so the lock stays readable as the target wanders. Size % scales the rings (100 = default), Red/Green/Blue set the color (default gold 255/200/80), Spin % scales the rotation speed and Pulse % the breathing amount (0 = static ring). Without this node no reticle ever draws."; break;
     case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
     case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
     case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
@@ -1644,7 +1647,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
     case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
     case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
-    case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On. Node-body settings: Zoom % = P0; Side Offset and Height are their own ints; P2 is a bitfield (bit0 = Zoom In/Out direction, bit1 = No Look-Down) — use bpVsSetBit to flip one without disturbing the other."; break;
+    case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On — or, with Same-Key Release (default 1), until the key that locked is pressed again (the key is auto-captured from the On Key Pressed driving this node; 0 = only Release Lock On unlocks). Node-body settings: Zoom % = P0; Side Offset and Height are their own ints; P2 is a bitfield (bit0 = Zoom In/Out direction, bit1 = No Look-Down) — use bpVsSetBit to flip one without disturbing the other."; break;
     case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
     case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
     case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
@@ -1686,15 +1689,15 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AiChargeStep: desc = "Holds the charge pose and grows the orb at the muzzle bone; sets 'charge_done' when the wind-up elapses. Run under Is AI State(Charge); on charge_done -> AI Fire Beam + Set AI State(Fire). Charge-dodge: an incoming blast in Dodge Range makes the enemy sidestep WITHOUT dropping the charge (orb keeps growing, plays the charge-dodge clips) — so it no longer cancels the charge to dodge."; break;
     case VsNodeType::AiFireBeam: desc = "Launches the enemy projectile from the muzzle toward the player (sets damage/speed/homing and the full-beam flag for clashes), and starts the recovery + attack cooldown. Charged SFX / Tap SFX = the launch sound instances, played at proximity gain — defaults 5 ('shoot', for a full charge) and 6 ('smallblast', for a tap)."; break;
     case VsNodeType::AiFireRecover: desc = "Holds the launch clip and sets 'fire_done' when the recovery timer elapses. Run under Is AI State(Fire); on fire_done -> Set AI State(Strafe)."; break;
-    case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000), Dodge Range (px from an incoming blast — homing OR forward — at which it reacts), Block % (chance to block instead of dodge an incoming blast), Block Dmg % (damage taken while blocking — 20 = take 20%; applies to BOTH the enemy and your block), Charge Speed + Tap Speed (the enemy's projectile launch speeds in TENTHS of px/frame, like your Fire Charge Shot — 20 = 2.0 full charge, 25 = 2.5 tap). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800/24/30/20/20/25."; break;
+    case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000), Dodge Range (px from an incoming blast — homing OR forward — at which it reacts), Block % (chance to block instead of dodge an incoming blast), Block Dmg % (damage taken while blocking — 20 = take 20%; applies to BOTH the enemy and your block), Charge Speed + Tap Speed (the enemy's projectile launch speeds in TENTHS of px/frame, like your Fire Charge Shot — 20 = 2.0 full charge, 25 = 2.5 tap). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this turns it on, claims the BP's owner sprite as THE enemy (all enemy-keyed runtime systems — bone snapshots, HP seeding, physical clash, nav override, afterimage — key off it and stay dormant in projects without this node), and feeds the runtime primitives. Defaults 60/95/22/80/40/70/800/24/30/20/20/25."; break;
     case VsNodeType::SetBlock: desc = "Sets the player's blocking flag (On 0/1). While 1, an incoming enemy hit is reduced to Block Dmg % (default 20) and the player spends Energy Cost energy per BLOCKED HIT (not per press — block freely, only pay when a hit actually lands). Wire On Key Held(Block) -> Set Block(1, cost) and On Key Released -> Set Block(0), next to your block clip."; break;
     case VsNodeType::ShouldAiBlock: desc = "Gate: passes when a player blast is incoming (within Dodge Range) and the Block % chance rolls true — and the AI isn't already dodging/blocking. The AI dodges OR blocks. Wire: AI Sense -> Should AI Block -> On Rise -> AI Block Begin + Set AI State(Block)."; break;
     case VsNodeType::CanFireBlast: desc = "Gate: passes its exec ONLY while no Focus Blast is in flight (afn_fb_active == 0). The blast machine is single-shot — once a shot is on the field you can't charge or fire a new one — but the fire/charge SFX node would still play on the button press. Wire your Focus Blast charge/fire sound (and the charge start, if you want) behind this gate so it stays silent while a shot is already out: On Key Pressed(fire) -> Can Fire Blast -> Play Sound."; break;
-    case VsNodeType::QuickAttack: desc = "Dash-in melee (PSV): drive from On Key Pressed (e.g. Triangle). Lunges the player toward the Lock On target (or straight forward if nothing is locked), and on reaching Stop Range deals Damage once (enemy Block cuts it) and punches the camera in for impact; a whiff overshoots until Max Frames runs out, then a short Skid decelerates to a stop. Movement mirrors the Dodge (committed burst, wall-collide); normal movement is suppressed for the whole move. Tunables: Speed, Stop Range, Damage, Max Frames (dash budget), Skid Frames, Punch % (camera zoom-in, 0 = off), Lunge/Skid/Idle Clip (rig poses for each phase, -1 = leave current), Cooldown (spam-gate frames), Energy Cost, Trail Alpha (afterimage peak alpha, default 96; 0 = no trail) and Trail Length (ghost count 0-6, default 6). Pair with Is Dashing (hold poses / i-frames) and Quick Attack Hit (smack SFX/FX)."; break;
+    case VsNodeType::QuickAttack: desc = "Dash-in melee (PSV): drive from On Key Pressed (e.g. Triangle). Lunges the player toward the Lock On target (or straight forward if nothing is locked), and on reaching Stop Range deals Damage once (enemy Block cuts it) and punches the camera in for impact; a whiff overshoots until Max Frames runs out, then a short Skid decelerates to a stop. Movement mirrors the Dodge (committed burst, wall-collide); normal movement is suppressed for the whole move. Tunables: Speed, Stop Range, Damage, Max Frames (dash budget), Skid Frames, Punch % (camera zoom-in, 0 = off), Lunge/Skid/Idle Clip (rig poses for each phase, -1 = leave current), Cooldown (spam-gate frames), Energy Cost, Trail Alpha (afterimage peak alpha, default 96; 0 = no trail), Trail Length (ghost count 0-6, default 6) and Trail R/G/B (ghost tint, default cyan 150/220/255 — Wild Charge's yellow still overrides while it dashes). Pair with Is Dashing (hold poses / i-frames) and Quick Attack Hit (smack SFX/FX)."; break;
     case VsNodeType::IsDashing: desc = "Gate: passes while a Quick Attack is mid-move (dash OR skid, afn_qa_phase != 0). Use it to hold the lunge/skid pose, grant i-frames, block other inputs, or loop a dash SFX for the committed window."; break;
     case VsNodeType::QuickAttackHit: desc = "Gate: passes on the SINGLE frame a Quick Attack dash reaches Stop Range and lands its hit (one per dash). Wire the smack SFX, impact FX, or a HUD flash behind it."; break;
     case VsNodeType::QuickAttackStarted: desc = "Gate: passes on the SINGLE frame a Quick Attack dash ACTUALLY begins (after the cooldown/energy/charge gate, unlike the raw key press). Drive On Update -> Quick Attack Started -> Play Sound for a swing-whoosh that never fires on a blocked press."; break;
-    case VsNodeType::AiQuickAttack: desc = "Enemy AI melee reflex (run every frame from the enemy's On Update, AFTER its movement/state nodes so it can override pose + position). Two behaviours: (1) Quick Attack — when the player is within Dash Range and off cooldown, it rolls Trigger /1000 per frame to dash in at Dash Speed, dealing Damage on contact within Contact Range (a connect ends the dash; only a whiff plays the skid). (2) Jump-evade — ALWAYS hops a player Quick Attack dashing straight at it (Jump Vel x100 launch, same gravity arc as the player), even mid-charge. Auto-suppressed during the beam-clash struggle. Jump % is reserved (unused) for a future chance-gated evade. Tunables match the old #defines: Dash Range 70, Trigger 12/1000, Dash Speed 34, Contact Range 14, Damage 8, Cooldown 90, Jump Vel 150 (=1.5), Jump Cooldown 40. Whoosh SFX = the dash sound instance (proximity-gained), default 17 ('quicksweep'). Trail Alpha (afterimage peak alpha, default 96; 0 = off) and Trail Length (white ghost count 0-6, default 6)."; break;
+    case VsNodeType::AiQuickAttack: desc = "Enemy AI melee reflex (run every frame from the enemy's On Update, AFTER its movement/state nodes so it can override pose + position). Two behaviours: (1) Quick Attack — when the player is within Dash Range and off cooldown, it rolls Trigger /1000 per frame to dash in at Dash Speed, dealing Damage on contact within Contact Range (a connect ends the dash; only a whiff plays the skid). (2) Jump-evade — ALWAYS hops a player Quick Attack dashing straight at it (Jump Vel x100 launch, same gravity arc as the player), even mid-charge. Auto-suppressed during the beam-clash struggle. Jump % is reserved (unused) for a future chance-gated evade. Tunables match the old #defines: Dash Range 70, Trigger 12/1000, Dash Speed 34, Contact Range 14, Damage 8, Cooldown 90, Jump Vel 150 (=1.5), Jump Cooldown 40. Whoosh SFX = the dash sound instance (proximity-gained), default 17 ('quicksweep'). Trail Alpha (afterimage peak alpha, default 96; 0 = off), Trail Length (ghost count 0-6, default 6) and Trail R/G/B (ghost tint, default white 255/255/255)."; break;
     case VsNodeType::EnemyAiTiming: desc = "Sets the enemy AI's remaining decision/timing knobs (the ones the Enemy AI node doesn't cover) — run it once from On Update BEFORE AI Sense. The state machine itself lives in the blueprint (Is AI State/Flag -> Set AI State); this just tunes the cadence. Pins (defaults match the old #defines): De-Aggro Frames (150 = ~2.5s outside Lose Range before returning to roam), Strafe Leg (90 = frames before re-rolling strafe direction), Yaw Ease x100 (35 = 0.35 turn-to-face lerp), Tap Windup (12 = quick-shot charge frames), Fire Recover (18 = post-launch recovery), Dodge Frames (20 = dodge duration), Dodge Cooldown (45 = frames between dodges), and Dodge Speed/Ramp/Falloff (default -1 = inherit the PLAYER's Dodge-node roll, so the enemy dodges identically; set >=0 to give it its own feel). Leave a pin unwired to keep its default."; break;
     case VsNodeType::PlayCameraAnim: desc = "Takes over the game camera and plays the player's keyframed cutscene camera path (authored in the Meshes tab). Freeze Player (1) holds the player still during the cutscene; Freeze Enemy (1) holds the enemy AI (no movement, attacks, or decisions — stands in idle) until the path ends; Loop (1) repeats the path; Hold Last (1) keeps the final shot, otherwise (0) the camera eases back to the normal follow camera at the end and the player+enemy unfreeze. Anim = which path (0 for now). Player Clip = wire a Skeletal Animation node to force the player rig onto that clip (e.g. a 'winner' pose) for the WHOLE cutscene — it overrides the idle/move state machine until the path ends, then normal animation resumes; leave unwired for no override. Cry Sound = wire a Sound Instance index to play once at the cutscene start (e.g. a Pokémon cry); unwired = silent. Snap Player (1) = teleport the player to the scene-START pose the camera path was authored around (and clear lock-on/tank facing) at cut start, so a cutscene triggered MID-FIGHT (e.g. the victory cam) frames the player correctly instead of animating at the authored spot while the player is elsewhere; leave 0/unwired if the player is already in place (e.g. the intro). Snap X / Snap Z (int, world units) = an explicit snap spot instead of the scene spawn (wire BOTH; Y stays at spawn ground); leave unwired to snap to spawn. Face Angle (int, degrees 0-359) = the facing to hold for the whole cut instead of the scene-default heading; leave unwired for the default. Snap X/Z + Face Angle only apply when Snap Player is on. Freeze Input (1) = mask ALL buttons while the path is animating so no ability/lock-on/charge/dodge/movement fires during the shot — pair with Freeze Player; it auto-releases the instant the path completes (so a Hold-Last cut's results menu still gets input); 0/unwired = input stays live. Drive from On Start or any event."; break;
     case VsNodeType::AiClips: desc = "Sets the enemy's animation clip indices (Move, Idle, the 8-dir strafe set, Block, Charge Pose, Launch, Lunge, Skid, Jump, Jump Fall) — run once from On Update. The magic: each UNWIRED pin is name-resolved AT EXPORT to the rig's current clip index, so re-exporting the glTF (which re-sorts the anim list) can't drift the enemy's animations — same protection the player's SkelAnim nodes get. Wire a pin to a Skeletal Animation node to override a specific clip. Without this node the enemy uses the old hardcoded indices (which DO drift)."; break;
@@ -5401,6 +5404,22 @@ static void RedoPush()
 }
 
 // Viewport image position/scale — updated each frame for grab mode
+static bool sM7ViewportVisible = false;   // set by the Mode-4/Mode-7 viewport draw each frame it's visible
+// GL scene preview (RenderScenePreviewGL) state — declared early: armed at the
+// viewport draw (~16000) and consumed by FrameTick + the renderer at the bottom.
+static bool   sGLPrevActive = false;   // armed by the viewport draw each frame the 3D tab shows
+static bool   sGLProjValid  = false;   // sGLProj[] holds last GL frame's picking positions
+static ImVec2 sGLPrevPos, sGLPrevSize; // viewport image rect (screen px)
+static Mode7::SpriteScreenPos sGLProj[kMaxFloorSprites];
+static int    sGLProjCount = 0;
+// 3D-scene viewport background gradient (Maya-style), editable in Camera
+// Properties, persisted in affinity_prefs.ini.
+static float  sGLPrevGradTop[3] = { 0.09f, 0.11f, 0.14f };
+static float  sGLPrevGradBot[3] = { 0.45f, 0.55f, 0.65f };
+// FBO the scene preview renders into; the viewport ImGui::Image displays its
+// color texture (V-flipped), so menus/popups layer over it correctly.
+static unsigned int sGLPrevFBO = 0, sGLPrevColorTex = 0, sGLPrevDepthRB = 0;
+static int    sGLPrevFboW = 0, sGLPrevFboH = 0;
 static ImVec2 sVPImgPos;
 static float  sVPImgScale = 1.0f;
 static CameraStartObject sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
@@ -5925,6 +5944,7 @@ static bool sMeshDragSelecting = false;     // true while drag-selecting in mesh
 static std::vector<float> sNavPreviewTris;  // editor-space xyz, 3 verts/tri
 static bool sNavPreviewShow = false;
 static bool sNavPreviewPaths = false;       // draw each nav NPC's path to the Player
+static int  sNavSourceMesh = -1;            // navmesh bake source: -1 = all meshes, else one mesh asset
 static int  sNavBoxEdit = -1;               // sprite index of the nav box being edited
                                             // in the Navigation section (not the object
                                             // selection — boxes are edited in-section)
@@ -5953,6 +5973,7 @@ static void BuildNavMeshPreview()
         const FloorSprite& s = sSprites[i];
         if (s.type != SpriteType::Mesh) continue;
         if (s.meshIdx < 0 || s.meshIdx >= (int)sMeshAssets.size()) continue;
+        if (sNavSourceMesh >= 0 && s.meshIdx != sNavSourceMesh) continue;   // Nav Source gate
         const MeshAsset& m = sMeshAssets[s.meshIdx];
         std::vector<uint32_t> idx = m.indices;
         for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
@@ -6058,6 +6079,13 @@ static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset
         if (ImGui::DragFloat("Stop Distance##navstop", &sp.navStopDist, 0.5f, 0.0f, 512.0f, "%.0f")) dirty = true;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop pathing when this close to the goal (don't crowd the player).");
         if (ImGui::DragInt("Repath Frames##navrep", &sp.navRepath, 1.0f, 5, 600)) dirty = true;
+        if (sp.navMode == 2) {
+            if (ImGui::DragInt("Pause Min##navpmin", &sp.navPauseMin, 1.0f, 0, 3600)) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Wander: MINIMUM frames to stand idle after reaching a wander goal (60 = 1s).");
+            if (ImGui::DragInt("Pause Max##navpmax", &sp.navPauseMax, 1.0f, 0, 3600)) dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Wander: MAXIMUM idle frames — each stop picks a random pause in [Min, Max].");
+            if (sp.navPauseMax < sp.navPauseMin) sp.navPauseMax = sp.navPauseMin;
+        }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames between path recomputes (60 = once per second).");
         ImGui::PopItemWidth();
         // Move Clip: skeletal clip played while pathing, reverts to the
@@ -6079,6 +6107,22 @@ static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset
             ImGui::PopItemWidth();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skeletal clip played while moving (e.g. a walk cycle); the authored clip resumes when the NPC stops.");
         }
+    }
+    // Bake source: which mesh asset feeds Recast. "(all meshes)" = whole scene;
+    // picking e.g. the Ground keeps 100k-tri foliage / a giant sky sphere out of
+    // the voxelizer (a huge bound explodes the grid and the bake comes back empty).
+    {
+        if (sNavSourceMesh >= (int)sMeshAssets.size()) sNavSourceMesh = -1;   // mesh deleted
+        const char* srcName = (sNavSourceMesh >= 0) ? sMeshAssets[sNavSourceMesh].name.c_str() : "(all meshes)";
+        ImGui::PushItemWidth(Scaled(140));
+        if (ImGui::BeginCombo("Nav Source##navsrc", srcName)) {
+            if (ImGui::Selectable("(all meshes)", sNavSourceMesh < 0)) { sNavSourceMesh = -1; sProjectDirty = true; }
+            for (int mi2 = 0; mi2 < (int)sMeshAssets.size(); mi2++)
+                if (ImGui::Selectable(sMeshAssets[mi2].name.c_str(), sNavSourceMesh == mi2)) { sNavSourceMesh = mi2; sProjectDirty = true; }
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Which mesh the navmesh bakes from — preview AND the PSV/Switch export.\n(all meshes) can fail on big scenes: dense foliage or a sky sphere blows\nup the voxel grid. Pick the walkable ground mesh.");
     }
     // Preview the navmesh the PSV export will bake — same triangle soup +
     // Recast params, overlaid on the 3D viewport.
@@ -6204,6 +6248,10 @@ static GLuint s3DFloorTex  = 0;
 static bool  s3DRenderNeeded = false; // set true during FrameTick, consumed by Render3DViewport
 static ImVec2 s3DViewPos = {};        // viewport position for GL rendering
 static ImVec2 s3DViewSize = {};       // viewport size for GL rendering
+// Meshes-tab viewport FBO (same scheme as the scene preview): the tab shows
+// the color texture as an ImGui image, so menus/popups layer over it.
+static unsigned int s3DViewFBO = 0, s3DViewTex = 0, s3DViewRB = 0;
+static int   s3DViewFboW = 0, s3DViewFboH = 0;
 // Clipboard for Ctrl+C / Ctrl+V on the 3D viewport. Stores copies of
 // every currently-selected sprite so paste recreates the whole group
 // (with a small XZ nudge so the paste sits visibly offset from the
@@ -8393,7 +8441,8 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "dynamic_horizon=%d\n", sCamObj.dynamicHorizon ? 1 : 0);
     fprintf(f, "wall_aware=%d\n", sCamObj.wallAware ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n", sCamObjEditorScale);
-    fprintf(f, "build_target=%d\nstart_scene_mode=%d\n\n", (int)sBuildTarget, sLastSceneTabMode);
+    fprintf(f, "build_target=%d\nstart_scene_mode=%d\n", (int)sBuildTarget, sLastSceneTabMode);
+    fprintf(f, "navSourceMesh=%d\n\n", sNavSourceMesh);
 
     // Editor camera
     fprintf(f, "[EditorCamera]\n");
@@ -8410,13 +8459,14 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d,%d,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
                 sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
                 sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
                 sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
-                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0);
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0,
+                sp.navPauseMin, sp.navPauseMax);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -8977,13 +9027,14 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
                     sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
                 sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
-                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0);
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0,
+                sp.navPauseMin, sp.navPauseMax);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -9141,13 +9192,14 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
                     sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
                 sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
-                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0);
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0,
+                sp.navPauseMin, sp.navPauseMax);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -9667,6 +9719,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "wall_aware=%d", &ival) == 1) sCamObj.wallAware = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
             else if (sscanf(line, "build_target=%d", &ival) == 1) sBuildTarget = (BuildTarget)ival;
+            else if (sscanf(line, "navSourceMesh=%d", &ival) == 1) sNavSourceMesh = ival;
             else if (sscanf(line, "start_scene_mode=%d", &ival) == 1) sLastSceneTabMode = ival;
         }
         else if (strcmp(section, "EditorCamera") == 0)
@@ -9698,9 +9751,9 @@ static bool LoadProject(const std::string& path)
                 int blitSl = -1;
                 int navMd = 0, navRep = 30, navClp = -1;
                 float navSpd = 5.0f, navStp = 32.0f;
-                int navPl = 0, navNeg = 0;
+                int navPl = 0, navNeg = 0, navPmin = 60, navPmax = 180;
                 float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg);
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg, &navPmin, &navPmax);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -9742,6 +9795,8 @@ static bool LoadProject(const std::string& path)
                     sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
                     sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
                     sp.navNegate = (matched >= 37) ? (navNeg != 0) : false;
+                    sp.navPauseMin = (matched >= 38) ? navPmin : 60;
+                    sp.navPauseMax = (matched >= 39) ? navPmax : 180;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -11175,12 +11230,12 @@ static bool LoadProject(const std::string& path)
                 int blitSl = -1;
                 int navMd = 0, navRep = 30, navClp = -1;
                 float navSpd = 5.0f, navStp = 32.0f;
-                int navPl = 0, navNeg = 0;
+                int navPl = 0, navNeg = 0, navPmin = 60, navPmax = 180;
                 float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d",
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg, &navPmin, &navPmax);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -11210,6 +11265,8 @@ static bool LoadProject(const std::string& path)
                     sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
                     sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
                     sp.navNegate = (matched >= 37) ? (navNeg != 0) : false;
+                    sp.navPauseMin = (matched >= 38) ? navPmin : 60;
+                    sp.navPauseMax = (matched >= 39) ? navPmax : 180;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -11708,12 +11765,12 @@ static bool LoadProject(const std::string& path)
                 int blitSl = -1;
                 int navMd = 0, navRep = 30, navClp = -1;
                 float navSpd = 5.0f, navStp = 32.0f;
-                int navPl = 0, navNeg = 0;
+                int navPl = 0, navNeg = 0, navPmin = 60, navPmax = 180;
                 float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d",
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg, &navPmin, &navPmax);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -11743,6 +11800,8 @@ static bool LoadProject(const std::string& path)
                     sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
                     sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
                     sp.navNegate = (matched >= 37) ? (navNeg != 0) : false;
+                    sp.navPauseMin = (matched >= 38) ? navPmin : 60;
+                    sp.navPauseMax = (matched >= 39) ? navPmax : 180;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -12672,6 +12731,8 @@ void FrameInit(const char* openPath)
             else if (sscanf(line, "tl_range_end=%d", &ival) == 1) sHudTimelineRangeEnd = std::max(0, ival);
             else if (sscanf(line, "tl_label_w=%f", &fval) == 1) sHudTimelineLabelW = std::clamp(fval, 80.0f, 600.0f);
             else if (sscanf(line, "use_external_assets=%d", &ival) == 1) sUseExternalAssets = (ival != 0);
+            else if (sscanf(line, "vp_grad_top=%f,%f,%f", &sGLPrevGradTop[0], &sGLPrevGradTop[1], &sGLPrevGradTop[2]) == 3) {}
+            else if (sscanf(line, "vp_grad_bot=%f,%f,%f", &sGLPrevGradBot[0], &sGLPrevGradBot[1], &sGLPrevGradBot[2]) == 3) {}
             else if (strncmp(line, "external_asset_dir=", 19) == 0) {
                 std::string v = line + 19;
                 while (!v.empty() && (v.back()=='\n' || v.back()=='\r')) v.pop_back();
@@ -13697,10 +13758,14 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
-    // Store viewport rect for post-ImGui GL rendering (exclude side panel)
+    // Store viewport rect for the GL render (exclude side panel) and show the
+    // FBO's color texture here — ImGui popups/menus then layer over it.
     s3DRenderNeeded = true;
     s3DViewPos = pos;
     s3DViewSize = ImVec2(vpAreaW, size.y);
+    if (s3DViewTex)
+        ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)s3DViewTex,
+            pos, ImVec2(pos.x + vpAreaW, pos.y + size.y), ImVec2(0, 1), ImVec2(1, 0));   // FBO is bottom-up
 
     // Ctrl+C / Ctrl+V on the hovered 3D viewport: copy the WHOLE current
     // selection (multi-select aware), paste creates the same number of
@@ -15962,7 +16027,16 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
     ImVec2 imgPos = ImGui::GetCursorScreenPos();
     sVPImgPos = imgPos;
     sVPImgScale = scale;
-    ImGui::Image((ImTextureID)(intptr_t)Mode7::GetTexture(), ImVec2(w, h));
+    sM7ViewportVisible = true;   // the software preview is on-screen — render it next tick
+    // Hardware path: every tab except the authentic Mode-7 floor renders via GL
+    // into an FBO (RenderScenePreviewGL, called before the ImGui draw) and the
+    // color texture is shown here — so menus/popups layer over it normally.
+    sGLPrevActive = (sActiveTab != EditorTab::Mode7);
+    sGLPrevPos = imgPos; sGLPrevSize = ImVec2(w, h);
+    if (sGLPrevActive && sGLPrevColorTex)
+        ImGui::Image((ImTextureID)(intptr_t)sGLPrevColorTex, ImVec2(w, h), ImVec2(0, 1), ImVec2(1, 0));   // FBO is bottom-up
+    else
+        ImGui::Image((ImTextureID)(intptr_t)Mode7::GetTexture(), ImVec2(w, h));
 
     // Click on sprite in viewport to select it
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsKeyDown(ImGuiKey_R) && !sGrabMode)
@@ -15973,7 +16047,9 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
         float gbaY = (mouse.y - imgPos.y) / scale;
 
         const Mode7::SpriteScreenPos* proj;
-        int projCount = Mode7::GetProjectedSprites(&proj);
+        int projCount;
+        if (sGLProjValid) { proj = sGLProj; projCount = sGLProjCount; }
+        else projCount = Mode7::GetProjectedSprites(&proj);
 
         // Deselect previous
         if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
@@ -20502,6 +20578,8 @@ void FrameTick(float dt)
                         se.navStopDist = sSprites[i].navStopDist;
                         se.navRepath = sSprites[i].navRepath;
                         se.navMoveClip = sSprites[i].navMoveClip;
+                        se.navPauseMin = sSprites[i].navPauseMin;
+                        se.navPauseMax = sSprites[i].navPauseMax;
                         se.isNavPlane = sSprites[i].isNavPlane;
                         se.navPlaneW = sSprites[i].navPlaneW;
                         se.navPlaneD = sSprites[i].navPlaneD;
@@ -22181,6 +22259,7 @@ void FrameTick(float dt)
                 for (const auto& s : exportSprites)
                     if (s.spriteType == 1 && s.riggedMeshIdx >= 0) { playerPspRigIdx = s.riggedMeshIdx; break; }
 
+                g_navSourceMesh = sNavSourceMesh;   // gate GeneratePSVNav to the chosen mesh
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
                              exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa, exportRigs, exportPspRigs, playerPspRigIdx]() {
@@ -23850,6 +23929,12 @@ void FrameTick(float dt)
         }
     }
 
+    // Only rasterize the software preview while its viewport is actually shown —
+    // it is by far the most expensive per-frame work in the editor, and tabs like
+    // Meshes/Nodes never display it. (The flag is re-armed by the viewport draw.)
+    bool m7show = sM7ViewportVisible; sM7ViewportVisible = false;
+    if (m7show && useMode7Floor) {   // software rasterizer serves ONLY the Mode-7 floor tab
+    sGLProjValid = false;            // picking falls back to the software projections
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
                   nullptr, spriteAngle,
@@ -23872,6 +23957,7 @@ void FrameTick(float dt)
     }
 
     Mode7::UploadTexture();
+    }   // sM7ViewportVisible
 
     // ---- Layout: NEXXT-style fixed panels ----
     ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -25797,7 +25883,7 @@ void FrameTick(float dt)
                 case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
-                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On."; break;
+                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On — or press the locking key again (Same-Key Release pin, default on)."; break;
                 case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
                 case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
                 case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
@@ -27070,7 +27156,7 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::LockOnTarget: {
                     editorCode = "// Lock-on camera assist toward a target object";
-                    char lcBuf[900];
+                    char lcBuf[1200];
                     int lkZoom = infoNode.paramInt[0] > 0 ? infoNode.paramInt[0] : 18;
                     int lkSide = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 32;
                     int lkHeight = infoNode.paramInt[3] > 0 ? infoNode.paramInt[3] : 32;
@@ -27079,6 +27165,8 @@ void FrameTick(float dt)
                         "    afn_cam_lock_target = %s;\n"
                         "    afn_lock_zoom = %d; afn_lock_side = %d; afn_lock_zoom_in = %d;\n"
                         "    afn_lock_height = %d; afn_lock_no_lookdown = %d;\n"
+                        "    afn_lock_release_same = %s;\n"
+                        "    if (afn_keys_pressed) afn_lock_key = afn_keys_pressed;   // capture the locking key\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c, pre-orbit + camera block) ---\n"
                         "    // Once locked, orbit yaw + pitch ALWAYS ease to face the target\n"
@@ -27088,10 +27176,13 @@ void FrameTick(float dt)
                         "    // No Look-Down (%d) clamps trackP's DOWN side only — Height's\n"
                         "    // framing still applies and stays adjustable; jumps still pull up.\n"
                         "    // Over-the-shoulder frame: %d%% zoom-%s + %d-px lateral shift.\n"
-                        "    // Gate with Is In View. Until Release Lock On.",
+                        "    // Gate with Is In View. Until Release Lock On — or, with Same-Key\n"
+                        "    // Release, pressing afn_lock_key again (s_lockPrev latch skips the\n"
+                        "    // very press that locked).",
                         fmtInt(infoNode.id, 0, "<target>"),
                         lkZoom, lkSide / 4, infoNode.paramInt[2] & 1, lkHeight / 4,
                         (infoNode.paramInt[2] >> 1) & 1,
+                        fmtInt(infoNode.id, 1, "1"),
                         lkHeight / 4, (infoNode.paramInt[2] >> 1) & 1,
                         lkZoom, (infoNode.paramInt[2] & 1) ? "in" : "out", lkSide / 4);
                     setActionFunc(infoNode, "_lock_on", lcBuf);
@@ -27261,7 +27352,7 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::QuickAttack: {
                     editorCode = "// Dash-in melee: lunge at the lock target, smack, skid";
-                    char qaBuf[1400];
+                    char qaBuf[1600];
                     snprintf(qaBuf, sizeof(qaBuf),
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
                         "    if (afn_qa_cd <= 0 && afn_qa_phase == 0 && afn_energy >= %s) {\n"
@@ -27269,7 +27360,8 @@ void FrameTick(float dt)
                         "        afn_qa_max = %s; afn_qa_skid = %s; afn_qa_punch = %s;      // dash budget / skid frames / cam punch %%\n"
                         "        afn_qa_clip_lunge = %s; afn_qa_clip_skid = %s; afn_qa_clip_idle = %s;\n"
                         "        afn_qa_cd = %s; afn_qa_tgt = afn_cam_lock_target; afn_qa_trigger = 1;\n"
-                        "        afn_qa_trail_alpha = %s; afn_qa_trail_len = %s;   // cyan dash afterimage (peak alpha / ghosts, max 6)\n"
+                        "        afn_qa_trail_alpha = %s; afn_qa_trail_len = %s;   // dash afterimage (peak alpha / ghosts, max 6)\n"
+                        "        afn_qa_trail_r = %s; afn_qa_trail_g = %s; afn_qa_trail_b = %s;   // ghost tint (default cyan)\n"
                         "    }\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c movement block) ---\n"
@@ -27292,7 +27384,10 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 8, "-1"),
                         fmtInt(infoNode.id, 9, "0"),
                         fmtInt(infoNode.id, 11, "96"),
-                        fmtInt(infoNode.id, 12, "6"));
+                        fmtInt(infoNode.id, 12, "6"),
+                        fmtInt(infoNode.id, 13, "150"),
+                        fmtInt(infoNode.id, 14, "220"),
+                        fmtInt(infoNode.id, 15, "255"));
                     setActionFunc(infoNode, "_quick_attack", qaBuf);
                     break;
                 }
@@ -27333,7 +27428,8 @@ void FrameTick(float dt)
                         "    afn_eqa_cd = <Cooldown>; afn_eqa_jump_vel_m = <Jump Vel x100>;\n"
                         "    afn_eqa_jump_chance = <Jump % (unused)>; afn_eqa_jump_cd = <Jump Cooldown>;\n"
                         "    afn_ai_sfx_whoosh = <Whoosh SFX>;   // dash whoosh instance (default 17 = 'quicksweep')\n"
-                        "    afn_eqa_trail_alpha = <Trail Alpha>; afn_eqa_trail_len = <Trail Length>;   // white dash afterimage\n"
+                        "    afn_eqa_trail_alpha = <Trail Alpha>; afn_eqa_trail_len = <Trail Length>;   // dash afterimage\n"
+                        "    afn_eqa_trail_r = <Trail R>; afn_eqa_trail_g = <Trail G>; afn_eqa_trail_b = <Trail B>;   // ghost tint (default white)\n"
                         "    afn_ai_quick_attack();   // runs the reflex for the AI slot (afn_ai_slot)\n"
                         "    // --- Runtime (psv main.c) ---\n"
                         "    // afn_ai_quick_attack(): i = afn_ai_slot; suppressed while the clash backdrop\n"
@@ -27661,6 +27757,20 @@ void FrameTick(float dt)
                         "    // Resolve at 0/1: dmg + knockback launch, cooldown afn_pc_cd_frames.");
                     break;
                 }
+                case VsNodeType::LockReticle: {
+                    editorCode = "// Lock-on reticle config (wire from On Start) — draws while Lock On holds a target";
+                    setActionFunc(infoNode, "_lock_reticle",
+                        "    afn_lret_on = 1;                                 // enable the lock-on reticle\n"
+                        "    afn_lret_size = <Size % (int)>;                  // ring size % (100 = default)\n"
+                        "    afn_lret_r = <Red (int)>; afn_lret_g = <Green (int)>; afn_lret_b = <Blue (int)>;\n"
+                        "    afn_lret_spin = <Spin % (int)>; afn_lret_pulse = <Pulse % (int)>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_lockon_reticle_render: while afn_cam_lock_target >= 0 (Lock On node) it\n"
+                        "    //   finds the locked NPC's slot and draws the pulsing counter-rotating double\n"
+                        "    //   ring (additive, depth-read) at its feet using the pins above.\n"
+                        "    // afn_lret_on = 0 (no node) -> the render is fully dormant.");
+                    break;
+                }
                 case VsNodeType::AimBall: {
                     editorCode = "// Aim the pokeball throw — drive from On Key HELD (pair with Throw Ball)";
                     setActionFunc(infoNode, "_aim_ball",
@@ -27707,6 +27817,7 @@ void FrameTick(float dt)
                     editorCode = "// Enable the enemy AI + set its tunables";
                     setActionFunc(infoNode, "_enemy_ai",
                         "    afn_ai_enabled = 1;\n"
+                        "    if (afn_bp_cur_spr_idx >= 0) afn_enemy_eidx = afn_bp_cur_spr_idx;   // THIS sprite is the enemy\n"
                         "    afn_ai_detect_r = <Detect Range>; afn_ai_lose_r = <Lose Range>; afn_ai_pref_r = <Pref Dist>;\n"
                         "    afn_ai_atkcd = <Atk Cooldown>; afn_ai_chargeprob = <Charge %>; afn_ai_dodgeprob = <Dodge %>;\n"
                         "    afn_ai_movespd_m = <Move Speed>;   // x1000 (800 = 0.8 px/frame)\n"
@@ -27714,8 +27825,10 @@ void FrameTick(float dt)
                         "    afn_ai_block_prob = <Block %>; afn_block_pct = <Block Dmg %>; // 30 / 20\n"
                         "    afn_ai_chg_speed_t = <Charge Speed>; afn_ai_tap_speed_t = <Tap Speed>; // tenths px/f (20/25)\n"
                         "    // --- Runtime (psv main.c) ---\n"
-                        "    // The state machine lives in the AI helper nodes; this just enables it +\n"
-                        "    // feeds the knobs the runtime sense/move/charge primitives read.");
+                        "    // The state machine lives in the AI helper nodes; this enables it, CLAIMS\n"
+                        "    // the BP owner as the enemy (afn_enemy_eidx keys bone snapshots, HP seeding,\n"
+                        "    // physical clash, nav override, afterimage — all dormant at -1), and feeds\n"
+                        "    // the knobs the runtime sense/move/charge primitives read.");
                     break;
                 }
                 case VsNodeType::ClashHitEnemy: {
@@ -39182,6 +39295,20 @@ void FrameTick(float dt)
 
         ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Text("Viewport");
+        ImGui::ColorEdit3("Gradient Top##vpgrad", sGLPrevGradTop, ImGuiColorEditFlags_NoInputs);
+        ImGui::SameLine();
+        ImGui::ColorEdit3("Gradient Bottom##vpgrad", sGLPrevGradBot, ImGuiColorEditFlags_NoInputs);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##vpgrad")) {
+            sGLPrevGradTop[0] = 0.09f; sGLPrevGradTop[1] = 0.11f; sGLPrevGradTop[2] = 0.14f;
+            sGLPrevGradBot[0] = 0.45f; sGLPrevGradBot[1] = 0.55f; sGLPrevGradBot[2] = 0.65f;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("3D scene viewport background gradient.");
+
+        ImGui::Spacing();
+        ImGui::Separator();
         static float sPrefsSaveTimer = 0.0f;
         if (ImGui::Button("Save Preferences"))
         {
@@ -39195,6 +39322,8 @@ void FrameTick(float dt)
                 fprintf(f, "tl_range_end=%d\n", sHudTimelineRangeEnd);
                 fprintf(f, "tl_label_w=%.0f\n", sHudTimelineLabelW);
                 fprintf(f, "use_external_assets=%d\n", sUseExternalAssets ? 1 : 0);
+                fprintf(f, "vp_grad_top=%.3f,%.3f,%.3f\n", sGLPrevGradTop[0], sGLPrevGradTop[1], sGLPrevGradTop[2]);
+                fprintf(f, "vp_grad_bot=%.3f,%.3f,%.3f\n", sGLPrevGradBot[0], sGLPrevGradBot[1], sGLPrevGradBot[2]);
                 if (!sExternalAssetDir.empty())
                     fprintf(f, "external_asset_dir=%s\n", sExternalAssetDir.c_str());
                 fclose(f);
@@ -39376,6 +39505,34 @@ void FrameTick(float dt)
                     }
                     sPackageDone = false;
                 }
+                // Switch: also offer a direct emulator launch — Ryujinx runs the
+                // .nro straight from disk (no SD-card copy needed for a quick test).
+                if (sBuildTarget == BuildTarget::Switch)
+                {
+                    ImGui::SameLine();
+                    float rjW = std::max(150.0f * sUiScale, ImGui::CalcTextSize("  Open in Ryujinx  ").x + 20.0f);
+                    if (ImGui::Button("  Open in Ryujinx  ", ImVec2(rjW, btnH)))
+                    {
+                        const char* rjPaths[] = {
+                            "C:\\Users\\NoSig\\Documents\\ryujinx\\publish\\Ryujinx.exe",
+                            "C:\\Program Files\\Ryujinx\\Ryujinx.exe",
+                        };
+                        bool launched = false;
+                        for (const char* rp : rjPaths)
+                        {
+                            if (GetFileAttributesA(rp) == INVALID_FILE_ATTRIBUTES) continue;
+                            std::string cmd = "\"" + std::string(rp) + "\" \"" + sPackageOutputPath + "\"";
+                            STARTUPINFOA si = {}; si.cb = sizeof(si);
+                            PROCESS_INFORMATION pi = {};
+                            if (CreateProcessA(nullptr, (LPSTR)cmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+                            { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); launched = true; break; }
+                        }
+                        if (!launched)
+                            ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                        sPackageDone = false;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Boot the freshly built .nro in Ryujinx (Intel iGPU: prefer the OpenGL backend in Ryujinx settings).");
+                }
             }
         }
 
@@ -39386,6 +39543,468 @@ void FrameTick(float dt)
 const Mode7Camera& GetCamera()
 {
     return sCamera;
+}
+
+// ===========================================================================
+// GL SCENE PREVIEW — hardware renderer for the Mode-4 "3D Scene" tab.
+// The legacy Mode-7-derived software rasterizer (mode7_preview.cpp) had fake
+// shear pitch, GBA-res buffers and painter-order artifacts; it now serves ONLY
+// the Mode-7 floor tab. This draws the placed scene with real OpenGL — proper
+// perspective, native resolution, hardware depth — composited over the
+// viewport's ImGui rect exactly like Render3DViewport composites the Meshes tab.
+// ===========================================================================
+// ---- Minimal FBO loader: Windows GL 1.1 headers don't declare these ----
+#define AFN_GL_FRAMEBUFFER          0x8D40
+#define AFN_GL_RENDERBUFFER         0x8D41
+#define AFN_GL_COLOR_ATTACHMENT0    0x8CE0
+#define AFN_GL_DEPTH_ATTACHMENT     0x8D00
+#define AFN_GL_DEPTH_COMPONENT24    0x81A6
+#define AFN_GL_FRAMEBUFFER_COMPLETE 0x8CD5
+typedef void   (APIENTRY* PfnGlGenFramebuffers)(GLsizei, GLuint*);
+typedef void   (APIENTRY* PfnGlBindFramebuffer)(GLenum, GLuint);
+typedef void   (APIENTRY* PfnGlFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+typedef void   (APIENTRY* PfnGlGenRenderbuffers)(GLsizei, GLuint*);
+typedef void   (APIENTRY* PfnGlBindRenderbuffer)(GLenum, GLuint);
+typedef void   (APIENTRY* PfnGlRenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
+typedef void   (APIENTRY* PfnGlFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
+typedef GLenum (APIENTRY* PfnGlCheckFramebufferStatus)(GLenum);
+typedef void   (APIENTRY* PfnGlDeleteFramebuffers)(GLsizei, const GLuint*);
+typedef void   (APIENTRY* PfnGlDeleteRenderbuffers)(GLsizei, const GLuint*);
+static PfnGlGenFramebuffers        pglGenFramebuffers;
+static PfnGlBindFramebuffer        pglBindFramebuffer;
+static PfnGlFramebufferTexture2D   pglFramebufferTexture2D;
+static PfnGlGenRenderbuffers       pglGenRenderbuffers;
+static PfnGlBindRenderbuffer       pglBindRenderbuffer;
+static PfnGlRenderbufferStorage    pglRenderbufferStorage;
+static PfnGlFramebufferRenderbuffer pglFramebufferRenderbuffer;
+static PfnGlCheckFramebufferStatus pglCheckFramebufferStatus;
+static PfnGlDeleteFramebuffers     pglDeleteFramebuffers;
+static PfnGlDeleteRenderbuffers    pglDeleteRenderbuffers;
+
+static bool GLPrevLoadFBOFuncs()
+{
+    static int state = 0;   // 0 = untried, 1 = ok, -1 = unavailable
+    if (state) return state > 0;
+    auto ld = [](const char* n) -> PROC {
+        PROC p = wglGetProcAddress(n);
+        if (!p) { char ext[64]; snprintf(ext, sizeof(ext), "%sEXT", n); p = wglGetProcAddress(ext); }
+        return p;
+    };
+    pglGenFramebuffers         = (PfnGlGenFramebuffers)ld("glGenFramebuffers");
+    pglBindFramebuffer         = (PfnGlBindFramebuffer)ld("glBindFramebuffer");
+    pglFramebufferTexture2D    = (PfnGlFramebufferTexture2D)ld("glFramebufferTexture2D");
+    pglGenRenderbuffers        = (PfnGlGenRenderbuffers)ld("glGenRenderbuffers");
+    pglBindRenderbuffer        = (PfnGlBindRenderbuffer)ld("glBindRenderbuffer");
+    pglRenderbufferStorage     = (PfnGlRenderbufferStorage)ld("glRenderbufferStorage");
+    pglFramebufferRenderbuffer = (PfnGlFramebufferRenderbuffer)ld("glFramebufferRenderbuffer");
+    pglCheckFramebufferStatus  = (PfnGlCheckFramebufferStatus)ld("glCheckFramebufferStatus");
+    pglDeleteFramebuffers      = (PfnGlDeleteFramebuffers)ld("glDeleteFramebuffers");
+    pglDeleteRenderbuffers     = (PfnGlDeleteRenderbuffers)ld("glDeleteRenderbuffers");
+    bool ok = pglGenFramebuffers && pglBindFramebuffer && pglFramebufferTexture2D
+           && pglGenRenderbuffers && pglBindRenderbuffer && pglRenderbufferStorage
+           && pglFramebufferRenderbuffer && pglCheckFramebufferStatus
+           && pglDeleteFramebuffers && pglDeleteRenderbuffers;
+    state = ok ? 1 : -1;
+    return ok;
+}
+
+// (Re)create an offscreen render target at the given size (shared by the
+// scene-preview and Meshes-tab viewports).
+static bool EnsureGlFbo(unsigned int& fbo, unsigned int& tex, unsigned int& rb,
+                        int& curW, int& curH, int w, int h)
+{
+    if (!GLPrevLoadFBOFuncs()) return false;
+    if (fbo && w == curW && h == curH) return true;
+    if (fbo) { pglDeleteFramebuffers(1, &fbo); fbo = 0; }
+    if (rb)  { pglDeleteRenderbuffers(1, &rb); rb = 0; }
+    if (tex) { glDeleteTextures(1, &tex); tex = 0; }
+
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    pglGenRenderbuffers(1, &rb);
+    pglBindRenderbuffer(AFN_GL_RENDERBUFFER, rb);
+    pglRenderbufferStorage(AFN_GL_RENDERBUFFER, AFN_GL_DEPTH_COMPONENT24, w, h);
+    pglBindRenderbuffer(AFN_GL_RENDERBUFFER, 0);
+
+    pglGenFramebuffers(1, &fbo);
+    pglBindFramebuffer(AFN_GL_FRAMEBUFFER, fbo);
+    pglFramebufferTexture2D(AFN_GL_FRAMEBUFFER, AFN_GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    pglFramebufferRenderbuffer(AFN_GL_FRAMEBUFFER, AFN_GL_DEPTH_ATTACHMENT, AFN_GL_RENDERBUFFER, rb);
+    bool ok = pglCheckFramebufferStatus(AFN_GL_FRAMEBUFFER) == AFN_GL_FRAMEBUFFER_COMPLETE;
+    pglBindFramebuffer(AFN_GL_FRAMEBUFFER, 0);
+    curW = w; curH = h;
+    if (!ok) {
+        pglDeleteFramebuffers(1, &fbo);  fbo = 0;
+        pglDeleteRenderbuffers(1, &rb);  rb = 0;
+        glDeleteTextures(1, &tex);       tex = 0;
+    }
+    return ok;
+}
+
+static bool GLPrevEnsureFBO(int w, int h)
+{
+    return EnsureGlFbo(sGLPrevFBO, sGLPrevColorTex, sGLPrevDepthRB, sGLPrevFboW, sGLPrevFboH, w, h);
+}
+
+void RenderScenePreviewGL()
+{
+    if (!sGLPrevActive) return;
+    sGLPrevActive = false;
+    ImVec2 size = sGLPrevSize;
+    if (size.x < 8 || size.y < 8) return;
+    if (!GLPrevEnsureFBO((int)size.x, (int)size.y)) return;
+
+    const Mode7Camera& cam = sCamera;
+    const float R2D = 180.0f / 3.14159265f;
+    // True pitch from the legacy horizon convention (same derivation the software
+    // path used): the pitch angle that puts the world horizon on that row.
+    float cyGBA  = (float)kGBAHeight * 0.5f;
+    float pitch  = atanf((cyGBA - cam.horizon) / cam.fov);
+
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glMatrixMode(GL_PROJECTION); glPushMatrix();
+    glMatrixMode(GL_MODELVIEW);  glPushMatrix();
+
+    pglBindFramebuffer(AFN_GL_FRAMEBUFFER, sGLPrevFBO);
+    glViewport(0, 0, sGLPrevFboW, sGLPrevFboH);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(sGLPrevGradTop[0], sGLPrevGradTop[1], sGLPrevGradTop[2], 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+
+    // Maya-style viewport background gradient (colors from Camera Properties) —
+    // fullscreen quad drawn behind everything (no depth).
+    {
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_TEXTURE_2D);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        glBegin(GL_QUADS);
+        glColor3fv(sGLPrevGradBot); glVertex2f(-1.0f, -1.0f); glVertex2f(1.0f, -1.0f);
+        glColor3fv(sGLPrevGradTop); glVertex2f(1.0f, 1.0f);   glVertex2f(-1.0f, 1.0f);
+        glEnd();
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    // Projection: focal length cam.fov px on the logical GBA screen.
+    const float nearP = 1.0f, farP = 100000.0f;
+    float top   = nearP * ((float)kGBAHeight * 0.5f) / cam.fov;
+    float right = nearP * ((float)kGBAWidth  * 0.5f) / cam.fov;
+    glMatrixMode(GL_PROJECTION); glLoadIdentity();
+    glFrustum(-right, right, -top, top, nearP, farP);
+
+    // View: pitch about camera X, yaw about Y, then translate. Yaw sign chosen so
+    // the software convention (forward = (sinA, 0, -cosA)) is preserved.
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glRotatef(pitch * R2D, 1, 0, 0);
+    // Yaw NEGATED: the legacy renderer builds its basis from -cam.angle
+    // (mode7_preview cosf(-cam.angle)), i.e. forward = (-sinA, 0, -cosA) —
+    // the same direction the W key moves. +cam.angle mirrors every turn.
+    glRotatef(-cam.angle * R2D, 0, 1, 0);
+    glTranslatef(-cam.x, -cam.height, -cam.z);
+
+    // CPU-side projection for click-picking (GBA logical coords, same consumers).
+    float cA = cosf(-cam.angle), sA = sinf(-cam.angle);   // legacy negated-angle basis (must match the view yaw)
+    float cP = cosf(pitch),      sP = sinf(pitch);
+    auto projectPick = [&](float wx, float wy, float wz, float& gx, float& gy, float& vzOut) -> bool {
+        float dx = wx - cam.x, dz = wz - cam.z;
+        float vz = dx * sA - dz * cA;
+        float vy = wy - cam.height;
+        float vx = dx * cA + dz * sA;
+        float vy2 = vy * cP + vz * sP;
+        float vz2 = vz * cP - vy * sP;
+        if (vz2 < 0.1f) return false;
+        gx = 120.0f + cam.fov * vx / vz2;
+        gy = cyGBA  - cam.fov * vy2 / vz2;
+        vzOut = vz2;
+        return true;
+    };
+    sGLProjCount = 0;
+
+    // Ground grid at the world origin — same as the legacy software preview:
+    // 17 lines per axis at 32-unit spacing (-256..+256), bright grey center
+    // axes, dark green lines, fading into the sky with distance (legacy fog
+    // reached 1.0 at viewZ = 300 * cam.fov).
+    {
+        glDisable(GL_TEXTURE_2D);
+        glEnable(GL_FOG);
+        glFogi(GL_FOG_MODE, GL_LINEAR);
+        float fogCol[4] = { (sGLPrevGradTop[0] + sGLPrevGradBot[0]) * 0.5f,   // gradient horizon tone —
+                            (sGLPrevGradTop[1] + sGLPrevGradBot[1]) * 0.5f,   // lines melt into the background
+                            (sGLPrevGradTop[2] + sGLPrevGradBot[2]) * 0.5f, 1.0f };
+        glFogfv(GL_FOG_COLOR, fogCol);
+        glFogf(GL_FOG_START, 0.0f);
+        glFogf(GL_FOG_END, 300.0f * cam.fov);
+        const float kGridSpacing = 32.0f, kGridHalf = 256.0f;
+        const int kGridLines = 17;
+        glBegin(GL_LINES);
+        for (int axis = 0; axis < 2; axis++)
+            for (int gi = 0; gi < kGridLines; gi++) {
+                float offset = -kGridHalf + gi * kGridSpacing;
+                if (gi == kGridLines / 2) glColor3f(180/255.0f, 180/255.0f, 180/255.0f);
+                else                      glColor3f(60/255.0f, 70/255.0f, 60/255.0f);
+                if (axis == 0) { glVertex3f(-kGridHalf, 0.0f, offset); glVertex3f(kGridHalf, 0.0f, offset); }
+                else           { glVertex3f(offset, 0.0f, -kGridHalf); glVertex3f(offset, 0.0f, kGridHalf); }
+            }
+        glEnd();
+        glDisable(GL_FOG);
+    }
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+    for (int i = 0; i < sSpriteCount; i++)
+    {
+        const FloorSprite& fs = sSprites[i];
+
+        // ---- placed meshes ----
+        if (fs.type == SpriteType::Mesh && fs.meshIdx >= 0 && fs.meshIdx < (int)sMeshAssets.size())
+        {
+            const MeshAsset& ma = sMeshAssets[fs.meshIdx];
+            if (ma.vertices.empty()) continue;
+            glPushMatrix();
+            glTranslatef(fs.x, fs.y, fs.z);
+            glRotatef(fs.rotation,  0, 1, 0);
+            glRotatef(fs.rotationX, 1, 0, 0);
+            glRotatef(fs.rotationZ, 0, 0, 1);
+            float s = fs.scale > 0.0001f ? fs.scale : 1.0f;
+            glScalef(s, s, s);
+
+            bool tex  = ma.textured && ma.glTexID != 0;
+            bool vcol = ma.hasVertexColor && !ma.ignoreVertexColor;
+            if (tex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.glTexID); }
+            else glDisable(GL_TEXTURE_2D);
+            if (tex && ma.textureUseAlpha) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
+            glDisable(GL_CULL_FACE);   // level meshes two-sided (runtime parity)
+
+            const MeshVertex* v0 = ma.vertices.data();
+            glVertexPointer(3, GL_FLOAT, sizeof(MeshVertex), &v0->px);
+            glTexCoordPointer(2, GL_FLOAT, sizeof(MeshVertex), &v0->u);
+            if (vcol) { glEnableClientState(GL_COLOR_ARRAY); glColorPointer(3, GL_FLOAT, sizeof(MeshVertex), &v0->r); }
+            else glColor3f(1, 1, 1);
+            // NOTE: editor meshes store OpenGL-flipped V already in the GL texture
+            // upload (LoadMeshTexture flips at draw in the Meshes tab via 1-v).
+            // The Meshes tab draws with 1-v; client arrays can't flip, so flip the
+            // texture matrix instead.
+            glMatrixMode(GL_TEXTURE); glLoadIdentity();
+            glScalef(1.0f, -1.0f, 1.0f); glTranslatef(0.0f, -1.0f, 0.0f);
+            glMatrixMode(GL_MODELVIEW);
+
+            if (!ma.indices.empty())
+                glDrawElements(GL_TRIANGLES, (GLsizei)ma.indices.size(), GL_UNSIGNED_INT, ma.indices.data());
+            if (!ma.quadIndices.empty())
+                glDrawElements(GL_QUADS, (GLsizei)ma.quadIndices.size(), GL_UNSIGNED_INT, ma.quadIndices.data());
+
+            // Lightmap / AO multiply passes — the same DST_COLOR×ZERO passes the
+            // Meshes tab and the PSV runtime draw (depth EQUAL over the base pass,
+            // so alpha-cutout texels auto-skip). The texture matrix V-flip is still
+            // active, so raw u2/v2 (u3/v3) arrays land on the flipped coords.
+            bool anyMaps = (ma.hasLightmap && ma.lmGlTex)
+                        || (ma.hasAOMap && ma.aoGlTex && ma.aoStrength > 0.001f)
+                        || ma.mapGroups.size() > 1;
+            if (anyMaps)
+            {
+                if (vcol) glDisableClientState(GL_COLOR_ARRAY);
+                glDisable(GL_ALPHA_TEST);
+                glEnable(GL_TEXTURE_2D);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_DST_COLOR, GL_ZERO);
+                glDepthFunc(GL_EQUAL);
+                glDepthMask(GL_FALSE);
+                glColor3f(1, 1, 1);
+                // Single-slot lightmap (UV2) then AO (UV3, aoStrength folded into
+                // the texture by RebuildMeshAOTex) over the whole mesh.
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    unsigned int mtex = pass == 0
+                        ? (ma.hasLightmap ? ma.lmGlTex : 0)
+                        : ((ma.hasAOMap && ma.aoStrength > 0.001f) ? ma.aoGlTex : 0);
+                    if (!mtex) continue;
+                    glBindTexture(GL_TEXTURE_2D, mtex);
+                    glTexCoordPointer(2, GL_FLOAT, sizeof(MeshVertex), pass == 0 ? &v0->u2 : &v0->u3);
+                    if (!ma.indices.empty())
+                        glDrawElements(GL_TRIANGLES, (GLsizei)ma.indices.size(), GL_UNSIGNED_INT, ma.indices.data());
+                    if (!ma.quadIndices.empty())
+                        glDrawElements(GL_QUADS, (GLsizei)ma.quadIndices.size(), GL_UNSIGNED_INT, ma.quadIndices.data());
+                }
+                // MAP GROUPS (multi lightmap/AO in one OBJ): per-group faces sample
+                // that group's textures — immediate mode for the per-face filter.
+                if (ma.mapGroups.size() > 1)
+                {
+                    int triCount  = (int)ma.indices.size() / 3;
+                    int quadCount = (int)ma.quadIndices.size() / 4;
+                    glDisableClientState(GL_VERTEX_ARRAY);
+                    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+                    for (int pass = 0; pass < 2; pass++)
+                    {
+                        if (pass == 1 && ma.aoStrength <= 0.001f) break;
+                        for (int gi2 = 0; gi2 < (int)ma.mapGroups.size(); gi2++)
+                        {
+                            const MeshAsset::MeshMapGroup& mgp = ma.mapGroups[gi2];
+                            unsigned int mtex = (pass == 0) ? mgp.lmGlTex : mgp.aoGlTex;
+                            if (!mtex) continue;
+                            glBindTexture(GL_TEXTURE_2D, mtex);
+                            glBegin(GL_TRIANGLES);
+                            for (int t = 0; t < triCount; t++) {
+                                if (t < (int)ma.triMapGroup.size() && ma.triMapGroup[t] != gi2) continue;
+                                for (int k = 0; k < 3; k++) {
+                                    const MeshVertex& v = ma.vertices[ma.indices[t*3+k]];
+                                    if (pass == 0) glTexCoord2f(v.u2, v.v2);
+                                    else           glTexCoord2f(v.u3, v.v3);
+                                    glVertex3f(v.px, v.py, v.pz);
+                                }
+                            }
+                            for (int q = 0; q < quadCount; q++) {
+                                if (q < (int)ma.quadMapGroup.size() && ma.quadMapGroup[q] != gi2) continue;
+                                const MeshVertex* tv[6] = {
+                                    &ma.vertices[ma.quadIndices[q*4+0]], &ma.vertices[ma.quadIndices[q*4+1]], &ma.vertices[ma.quadIndices[q*4+2]],
+                                    &ma.vertices[ma.quadIndices[q*4+0]], &ma.vertices[ma.quadIndices[q*4+2]], &ma.vertices[ma.quadIndices[q*4+3]] };
+                                for (int k = 0; k < 6; k++) {
+                                    if (pass == 0) glTexCoord2f(tv[k]->u2, tv[k]->v2);
+                                    else           glTexCoord2f(tv[k]->u3, tv[k]->v3);
+                                    glVertex3f(tv[k]->px, tv[k]->py, tv[k]->pz);
+                                }
+                            }
+                            glEnd();
+                        }
+                    }
+                    glEnableClientState(GL_VERTEX_ARRAY);
+                    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+                }
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LEQUAL);     // scene-preview default
+                glDisable(GL_BLEND);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+
+            glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+            if (vcol) glDisableClientState(GL_COLOR_ARRAY);
+            glDisable(GL_ALPHA_TEST);
+            glPopMatrix();
+        }
+
+        // ---- rigged (skinned glTF) sprites: player, NPCs ----
+        else if (fs.riggedMeshIdx >= 0 && fs.riggedMeshIdx < (int)sRiggedMeshAssets.size())
+        {
+            const RiggedMeshAsset& rm = sRiggedMeshAssets[fs.riggedMeshIdx];
+            if (rm.baseVerts.empty() || rm.indices.empty() || rm.boneCount <= 0) continue;
+            int nb = rm.boneCount;
+            std::vector<BonePose> pose(nb);
+            bool hasClip = (fs.rigAnimIdx >= 0 && fs.rigAnimIdx < (int)rm.clips.size()
+                            && rm.clips[fs.rigAnimIdx].frameCount > 0);
+            if (hasClip) {
+                const RigAnimClip& clip = rm.clips[fs.rigAnimIdx];
+                int fc = clip.frameCount;
+                float ff = fs.rigAnimClock < 0 ? 0 : fs.rigAnimClock;
+                int f0 = (int)floorf(ff) % fc, f1 = (f0 + 1) % fc;
+                float u = ff - floorf(ff);
+                for (int bi = 0; bi < nb; bi++) {
+                    const BonePose& A = clip.frames[f0*nb + bi];
+                    const BonePose& B = clip.frames[f1*nb + bi];
+                    BonePose& P = pose[bi];
+                    P.px = A.px*(1-u)+B.px*u; P.py = A.py*(1-u)+B.py*u; P.pz = A.pz*(1-u)+B.pz*u;
+                    float dot = A.qw*B.qw+A.qx*B.qx+A.qy*B.qy+A.qz*B.qz; float sgn = (dot<0)?-1.f:1.f;
+                    float qw=A.qw*(1-u)+sgn*B.qw*u, qx=A.qx*(1-u)+sgn*B.qx*u, qy=A.qy*(1-u)+sgn*B.qy*u, qz=A.qz*(1-u)+sgn*B.qz*u;
+                    float m = sqrtf(qw*qw+qx*qx+qy*qy+qz*qz); if (m==0) m=1;
+                    P.qw=qw/m; P.qx=qx/m; P.qy=qy/m; P.qz=qz/m;
+                }
+            } else {
+                for (int bi = 0; bi < nb; bi++) pose[bi] = rm.bindPose[bi];
+            }
+            auto rotq = [](const BonePose& P, float vx, float vy, float vz, float& ox, float& oy, float& oz){
+                float tx=2*(P.qy*vz-P.qz*vy), ty=2*(P.qz*vx-P.qx*vz), tz=2*(P.qx*vy-P.qy*vx);
+                ox=vx+P.qw*tx+(P.qy*tz-P.qz*ty); oy=vy+P.qw*ty+(P.qz*tx-P.qx*tz); oz=vz+P.qw*tz+(P.qx*ty-P.qy*tx);
+            };
+            glPushMatrix();
+            glTranslatef(fs.x, fs.y, fs.z);
+            glRotatef(fs.rotation + rm.yawOffset + fs.modelYaw, 0, 1, 0);
+            glRotatef(fs.rotationX, 1, 0, 0);
+            glRotatef(fs.rotationZ, 0, 0, 1);
+            glScalef(fs.scale, fs.scale, fs.scale);
+            if (rm.cullMode == 2) glDisable(GL_CULL_FACE);
+            else { glEnable(GL_CULL_FACE); glCullFace(rm.cullMode == 1 ? GL_FRONT : GL_BACK); }
+            if (rm.useAlpha) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
+            glDisableClientState(GL_VERTEX_ARRAY);
+            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            for (int ms = 0; ms < rm.matCount(); ms++) {
+                bool slotTex = (rm.matTextured(ms) && rm.matGlTexID(ms) != 0);
+                if (slotTex) {
+                    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.matGlTexID(ms)); glColor3f(1,1,1);
+                    // Per-slot UV addressing (Meshes-tab parity): Clip/Extend/Mirror.
+                    GLint rigWrap = (rm.matWrap(ms) == 1) ? GL_REPEAT
+                                  : (rm.matWrap(ms) == 2) ? GL_MIRRORED_REPEAT : GL_CLAMP;
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, rigWrap);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, rigWrap);
+                }
+                else { glDisable(GL_TEXTURE_2D); glColor3f(0.8f, 0.8f, 0.82f); }
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
+                    size_t tri = ti / 3;
+                    int triSlot = (tri < rm.triMaterial.size()) ? rm.triMaterial[tri] : 0;
+                    if (triSlot != ms) continue;
+                    for (int k = 0; k < 3; k++) {
+                        const MeshVertex& bv = rm.baseVerts[rm.indices[ti + k]];
+                        const BonePose& P = pose[rm.vertBone[rm.indices[ti + k]]];
+                        float px, py, pz; rotq(P, bv.px, bv.py, bv.pz, px, py, pz);
+                        if (slotTex) glTexCoord2f(bv.u, bv.v);   // glTF UVs are stored GL-ready (no flip — Meshes-tab parity)
+                        glVertex3f(px + P.px, py + P.py, pz + P.pz);
+                    }
+                }
+                glEnd();
+            }
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glDisable(GL_ALPHA_TEST);
+            glDisable(GL_CULL_FACE);
+            glPopMatrix();
+        }
+
+        // ---- picking: project every sprite's anchor to GBA logical coords ----
+        float gx, gy, vz;
+        if (sGLProjCount < kMaxFloorSprites && projectPick(fs.x, fs.y, fs.z, gx, gy, vz)) {
+            float half = 900.0f * fs.scale / vz; if (half < 4) half = 4; if (half > 60) half = 60;
+            sGLProj[sGLProjCount].screenX = (int)gx;
+            sGLProj[sGLProjCount].screenY = (int)gy;
+            sGLProj[sGLProjCount].halfW = (int)half;
+            sGLProj[sGLProjCount].halfH = (int)half;
+            sGLProj[sGLProjCount].spriteIdx = i;
+            sGLProjCount++;
+        }
+    }
+
+    // Selection marker: simple highlight box around the selected sprite.
+    if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount) {
+        const FloorSprite& sp = sSprites[sSelectedSprite];
+        glDisable(GL_TEXTURE_2D); glDisable(GL_DEPTH_TEST);
+        glColor3f(1.0f, 0.65f, 0.1f);
+        glLineWidth(2.0f);
+        float e = 4.0f * (sp.scale > 0.2f ? sp.scale : 0.2f); if (e > 24.0f) e = 24.0f;
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(sp.x-e, sp.y,     sp.z-e); glVertex3f(sp.x+e, sp.y,     sp.z-e);
+        glVertex3f(sp.x+e, sp.y,     sp.z+e); glVertex3f(sp.x-e, sp.y,     sp.z+e);
+        glEnd();
+        glLineWidth(1.0f);
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    sGLProjValid = true;
+
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    pglBindFramebuffer(AFN_GL_FRAMEBUFFER, 0);   // back to the window framebuffer
+    glMatrixMode(GL_PROJECTION); glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);  glPopMatrix();
+    glPopAttrib();
 }
 
 void Render3DViewport()
@@ -39400,12 +40019,12 @@ void Render3DViewport()
     float camY = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
     float camZ = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
 
-    // GL viewport coords (Y is bottom-up in GL)
-    float dispH = ImGui::GetIO().DisplaySize.y;
-    int vpX = (int)pos.x;
-    int vpY = (int)(dispH - pos.y - size.y);
     int vpW = (int)size.x;
     int vpH = (int)size.y;
+    if (vpW < 8 || vpH < 8) return;
+    // Render into the tab's FBO (shown by ImGui as an image) so menus/popups
+    // layer over the viewport instead of being painted over.
+    if (!EnsureGlFbo(s3DViewFBO, s3DViewTex, s3DViewRB, s3DViewFboW, s3DViewFboH, vpW, vpH)) return;
 
     glPushAttrib(GL_ALL_ATTRIB_BITS);
     glMatrixMode(GL_PROJECTION);
@@ -39413,10 +40032,10 @@ void Render3DViewport()
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
 
-    glViewport(vpX, vpY, vpW, vpH);
+    pglBindFramebuffer(AFN_GL_FRAMEBUFFER, s3DViewFBO);
+    glViewport(0, 0, vpW, vpH);
     glEnable(GL_DEPTH_TEST);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(vpX, vpY, vpW, vpH);
+    glDisable(GL_SCISSOR_TEST);
     glClearColor(0.08f, 0.08f, 0.10f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -40798,15 +41417,15 @@ void Render3DViewport()
     // OVER the ImGui draw lists, so an ImGui ring would be painted over.
     if (s3DVtxBrushShow)
     {
-        ImVec2 disp = ImGui::GetIO().DisplaySize;
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_TEXTURE_2D);
         glDisable(GL_LIGHTING);
         glDisable(GL_SCISSOR_TEST);
-        glViewport(0, 0, (int)disp.x, (int)disp.y);
+        glViewport(0, 0, vpW, vpH);
         glMatrixMode(GL_PROJECTION); glLoadIdentity();
-        glOrtho(0.0, disp.x, disp.y, 0.0, -1.0, 1.0); // top-left origin, y-down (matches ImGui screen space)
+        glOrtho(0.0, size.x, size.y, 0.0, -1.0, 1.0); // top-left origin, y-down (matches ImGui screen space)
         glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        glTranslatef(-pos.x, -pos.y, 0.0f);           // overlay coords are screen-space; FBO is viewport-local
         float cx = s3DVtxBrushSX, cy = s3DVtxBrushSY, rr = s3DVtxPaintRadius;
         bool eraser = (s3DVtxPaintTool == 1);
         float br = eraser ? 1.0f : s3DVtxPaintColor[0] * s3DVtxPaintBright;
@@ -40833,17 +41452,17 @@ void Render3DViewport()
     // release end). Drawn in GL for the same reason as the brush ring above.
     if (s3DVtxRampBoxShow)
     {
-        ImVec2 disp = ImGui::GetIO().DisplaySize;
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_TEXTURE_2D);
         glDisable(GL_LIGHTING);
         glDisable(GL_SCISSOR_TEST);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glViewport(0, 0, (int)disp.x, (int)disp.y);
+        glViewport(0, 0, vpW, vpH);
         glMatrixMode(GL_PROJECTION); glLoadIdentity();
-        glOrtho(0.0, disp.x, disp.y, 0.0, -1.0, 1.0);
+        glOrtho(0.0, size.x, size.y, 0.0, -1.0, 1.0);
         glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        glTranslatef(-pos.x, -pos.y, 0.0f);           // overlay coords are screen-space; FBO is viewport-local
         float sx = s3DVtxRampStartX, sy = s3DVtxRampStartY;   // dark end
         float ex = s3DVtxRampCurX,   ey = s3DVtxRampCurY;     // light end
         float ax = sx < ex ? sx : ex, bx = sx < ex ? ex : sx;
@@ -40888,6 +41507,7 @@ void Render3DViewport()
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
+    pglBindFramebuffer(AFN_GL_FRAMEBUFFER, 0);   // back to the window framebuffer
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);

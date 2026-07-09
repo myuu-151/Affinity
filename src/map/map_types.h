@@ -552,6 +552,8 @@ struct FloorSprite
     float navStopDist = 32.0f;    // stop this close to the goal, editor units (follow mode)
     int   navRepath = 30;         // frames between path recomputes
     int   navMoveClip = -1;       // rig clip to play while moving (-1 = keep current)
+    int   navPauseMin = 60;       // wander: min idle frames between legs
+    int   navPauseMax = 180;      // wander: max idle frames between legs (random in [min,max])
     // Nav bounds box (Nebula NavMesh3DNode semantics): an axis-aligned volume
     // centered on x/y/z. When any exist, only scene geometry with a vertex
     // inside a box participates in the navmesh build, so the walkable surface

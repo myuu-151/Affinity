@@ -16,5 +16,6 @@ const Mode7Camera& GetCamera();
 
 // Render 3D viewport (call AFTER ImGui render, before swap)
 void Render3DViewport();
+void RenderScenePreviewGL();   // Mode-4 "3D Scene" tab hardware preview (replaces the software rasterizer there)
 
 } // namespace Affinity

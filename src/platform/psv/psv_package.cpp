@@ -36,6 +36,7 @@ namespace Affinity {
 // worker thread while the UI reads this on the main thread.
 std::mutex g_psvBuildLogMtx;
 std::string g_psvBuildLog;
+int g_navSourceMesh = -1;   // navmesh bake source (see psv_package.h)
 static void PsvBuildLog(const char* msg) {
     std::lock_guard<std::mutex> lk(g_psvBuildLogMtx);
     g_psvBuildLog += msg; g_psvBuildLog += "\n";
@@ -355,20 +356,23 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
 
     // Per-NPC navigation (editor Navigation section on NPC/Enemy objects):
     // { mode (0 off / 1 follow player / 2 wander), speed (world px/frame),
-    //   stop distance (world px), repath frames, move clip (-1 = keep) }.
+    //   stop distance (world px), repath frames, move clip (-1 = keep),
+    //   wander pause min, wander pause max (idle frames between legs) }.
     // Parallel to afn_npc_inst. Speed/distance authored in editor units, /4
     // to world px like every other exported coordinate. The runtime's
     // npc_nav_update() consumes this with the psv_nav.h navmesh blob.
-    f << "static const float afn_npc_nav[" << (npcs.empty()?1:npcs.size()) << "][5] = {\n";
+    f << "static const float afn_npc_nav[" << (npcs.empty()?1:npcs.size()) << "][7] = {\n";
     for (const auto& n : npcs) {
         const auto& s = sprites[n.sprite];
         int mclip = (s.navMoveClip >= 0 && s.navMoveClip < (int)rigs[used[n.slot]].clips.size())
                   ? s.navMoveClip : -1;
+        int pmin = s.navPauseMin < 0 ? 0 : s.navPauseMin;
+        int pmax = s.navPauseMax < pmin ? pmin : s.navPauseMax;
         f << "  { " << s.navMode << ", " << PFlt(s.navSpeed / 4.0f) << ", "
           << PFlt(s.navStopDist / 4.0f) << ", " << (s.navRepath > 0 ? s.navRepath : 30)
-          << ", " << mclip << " },\n";
+          << ", " << mclip << ", " << pmin << ", " << pmax << " },\n";
     }
-    if (npcs.empty()) f << "  {0,0,0,30,-1},\n";
+    if (npcs.empty()) f << "  {0,0,0,30,-1,60,180},\n";
     f << "};\n";
 
     f.close();
@@ -415,6 +419,7 @@ static bool GeneratePSVNav(const std::string& runtimeDir,
     }
     for (const auto& s : sprites) {
         if (s.meshIdx < 0 || s.meshIdx >= (int)meshes.size()) continue;
+        if (g_navSourceMesh >= 0 && s.meshIdx != g_navSourceMesh) continue;   // Nav Source gate
         const auto& m = meshes[s.meshIdx];
         std::vector<unsigned int> idx = m.indices;
         for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {

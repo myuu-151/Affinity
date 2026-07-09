@@ -106,6 +106,11 @@ int main(int argc, char** argv)
 
         Affinity::FrameTick(dt);
 
+        // Both GL viewports render to their FBO textures BEFORE the ImGui draw:
+        // the tabs show them as normal images, so popups layer over.
+        Affinity::RenderScenePreviewGL();
+        Affinity::Render3DViewport();
+
         ImGui::Render();
 
         int fbW, fbH;
@@ -115,9 +120,6 @@ int main(int argc, char** argv)
         glClear(GL_COLOR_BUFFER_BIT);
 
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-
-        // Render 3D viewport on top of ImGui (after ImGui draw, before swap)
-        Affinity::Render3DViewport();
 
         glfwSwapBuffers(window);
     }
