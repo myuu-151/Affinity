@@ -27,6 +27,9 @@ struct AfnSpriteExport
     int   parentIdx = -1; // parent sprite index (-1 = standalone)
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
     int   boneIdx = -1;   // attached sub-sprite: ride this parent-rig bone (-1 = parent origin)
+    float attachShadow = -1.0f; // attached model shading depth override (-1 = inherit the parent rig's)
+    bool  attachCustomLight = false;         // attached model: own camera-light aim (else parent rig's)
+    float attachLightX = 50.0f, attachLightY = 180.0f; // own headlamp aim (pitch/yaw deg off camera)
     int   driveElementIdx = -1; // attached sub-sprite: run this HUD element's keyframe animation
                                 // (rotation/scale) on the sub-sprite's own graphic (-1 = none)
     int   effectKind = 0;       // attached sub-sprite: 0 = draw the sprite; >0 = draw a procedural

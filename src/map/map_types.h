@@ -398,6 +398,7 @@ struct RiggedMeshAsset
     bool useAlpha = false;                    // true = palette index 0 (alpha=0 src) renders transparent
     bool cameraLight = false;                // true = light follows the camera (headlamp)
     float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw in degrees off the camera
+    float shadowIntensity = 1.0f;            // editor rig shading depth: 0 = flat (no shadow), 1 = default, 2 = black shadow side
     float yawOffset = 0.0f;                  // model forward correction, degrees — added to ALL
                                              // instance yaw (set 180 for glTFs authored facing -Z,
                                              // fixes movement-facing "moonwalk")
@@ -607,6 +608,9 @@ struct FloorSprite
         bool  editorHide = false;  // hide in the EDITOR preview only (declutter); still shows in-game
         int   boneIdx = -1;        // -1 = anchor to parent origin; >=0 = ride this rig bone
                                    // (player rig only for now); offset X/Y/Z is bone-relative
+        float shadowIntensity = -1.0f; // -1 = inherit the parent rig's; >=0 = own shading depth (0..2)
+        bool  customLight = false;     // true = own camera-light aim (below) instead of the parent rig's
+        float lightX = 50.0f, lightY = 180.0f; // own headlamp aim (pitch/yaw deg off camera)
     };
     static constexpr int kMaxSubModels = 2;
     SubModel subModels[kMaxSubModels];

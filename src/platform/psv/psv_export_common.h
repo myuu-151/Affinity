@@ -45,6 +45,7 @@ struct AfnRigExport {
     bool useAlpha  = false;
     bool cameraLight = false; // headlamp follows the camera (per-material toggle)
     float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw deg off camera
+    float shadowIntensity = 1.0f;            // shading depth: 0 flat, 1 default (amb 8/31), 2 black shadows
     float yawOffset = 0.0f;   // model forward correction, degrees (added to all yaw)
     int   collisionType = 0;                 // 0 = none, 1 = box (AABB proxy)
     float colCenter[3]  = {0,0,0};           // box center, rig-local (model) space

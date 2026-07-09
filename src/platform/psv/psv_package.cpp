@@ -298,11 +298,18 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
             float cx=cosf(ax), sx=sinf(ax), cy=cosf(ay), sy=sinf(ay);
             ldx=-cx*sy; ldy=sx; ldz=-cx*cy;
         }
+        // Shadow Intensity -> baked ambient floor (matches the editor preview
+        // mapping): 0 -> 1.0 (flat), 1 -> 8/31 (default), 2 -> 0 (black shadows).
+        const float ambR = 8.0f/31.0f;
+        float Sv = rig.shadowIntensity;
+        float shAmb = (Sv <= 1.0f) ? (1.0f + Sv * (ambR - 1.0f)) : (ambR * (2.0f - Sv));
+        if (shAmb < 0.0f) shAmb = 0.0f; if (shAmb > 1.0f) shAmb = 1.0f;
         std::string S = "afn_rig" + std::to_string(i) + "_";
         f << "  { " << rig.boneCount << ", " << (int)rig.verts.size() << ", " << mc << ", "
           << (int)rig.clips.size() << ", " << rig.cullMode << ", 0.25f, " << cl << ", "
           << PFlt(ldx) << "," << PFlt(ldy) << "," << PFlt(ldz) << ", "
           << PFlt(rig.yawOffset * 3.14159265f / 180.0f) << ", "   // model yaw correction (rad)
+          << PFlt(shAmb) << ", "                                   // headlamp ambient floor (Shadow Intensity)
           << S << "vpos, " << S << "vnorm, " << S << "vuv, " << S << "vbone, "
           << S << "idx_ptrs, " << S << "idx_counts, " << S << "tex_ptrs, " << S << "tex_w, " << S << "tex_h, "
           << S << "clip_ptrs, " << S << "clip_frames, " << S << "clip_loop, " << S << "clip_speed },\n";

@@ -192,6 +192,8 @@ float afn_ai_orb_min = 0.05f, afn_ai_orb_max = ENEMY_CHG_SCALE;   // Ai Orb Scal
 int afn_pbt_on = 0;
 int afn_pbt_aim_req = 0, afn_pbt_throw_req = 0;   // per-frame requests (On Key Held / Released via Aim Ball / Throw Ball)
 int afn_pbt_clip = -1;                   // pitch clip; -1 = prototype default (2)
+int afn_pbt_aim_clip = -1;               // clip HELD while aiming (Aim Ball pin); -1 = keep the current anim
+int afn_pbt_idle_clip = -1;              // clip while the ball is away, standing (Throw Ball pin, name-resolves "idle")
 int afn_pbt_release_pct = 42, afn_pbt_dist_min = 18, afn_pbt_dist_max = 150, afn_pbt_dist_def = 70;
 int afn_pbt_turn_x10 = 24, afn_pbt_drate_x10 = 20, afn_pbt_speed_x10 = 34, afn_pbt_arc_pct = 42;
 int afn_pbt_cooldown = 30, afn_pbt_freeze = 1;
@@ -668,7 +670,8 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
             float d = s_skinned[vi].nx*lmx + s_skinned[vi].ny*lmy + s_skinned[vi].nz*lmz;
             if (twoSided) { if (d < 0.0f) d = -d; }
             else if (d < 0.0f) d = 0.0f;
-            float inten = (8.0f/31.0f) + (28.0f/31.0f)*d;
+            // Ambient floor baked from the rig's Shadow Intensity (8/31 = default).
+            float inten = R->shadowAmb + (28.0f/31.0f)*d;
             if (inten > 1.0f) inten = 1.0f;
             unsigned int c = (unsigned int)(inten * 255.0f + 0.5f);
             s_skinned[vi].color = 0xFF000000u | (c << 16) | (c << 8) | c;
@@ -1088,6 +1091,45 @@ static void lights_setup(const float* view)
 }
 #endif
 
+// Attached-model headlamp: light a sub-model (hand pokeball, aura) with the
+// PLAYER rig's camera light so it shades exactly like the character holding it
+// (same eye-space direction + Shadow Intensity ambient floor). Armed around
+// the attached-instance draws; draw_mesh picks it up when the mesh has
+// exported normals (the exporter always emits them for attached meshes).
+static int s_attachHeadlamp = 0;
+#ifdef AFN_HAS_PLAYER_RIG
+// ambOverride: the instance's Custom Shadow ambient floor (afn_mesh_inst_shamb),
+// -1 = inherit the rig's Shadow Intensity. ldirOverride: the instance's Custom
+// Light eye-space aim (afn_mesh_inst_ldir), all-zero = inherit the rig's.
+static void attach_headlamp_begin(float ambOverride, const float* ldirOverride) {
+    const AfnRig* R = &afn_rigs[AFN_PLAYER_RIG_SLOT];
+    int ownDir = ldirOverride && (ldirOverride[0] != 0.0f || ldirOverride[1] != 0.0f || ldirOverride[2] != 0.0f);
+    if (!R->camlight && !ownDir) return;   // Custom Light lights the model even on a no-camlight rig
+    s_attachHeadlamp = 1;
+    float ambV = ambOverride >= 0.0f ? ambOverride : R->shadowAmb;
+    float dir[4]  = { -R->ldx, -R->ldy, -R->ldz, 0.0f };   // eye-space, toward the light
+    if (ownDir) { dir[0] = -ldirOverride[0]; dir[1] = -ldirOverride[1]; dir[2] = -ldirOverride[2]; }
+    float amb[4]  = { ambV, ambV, ambV, 1.0f };
+    float dif[4]  = { 28.0f/31.0f, 28.0f/31.0f, 28.0f/31.0f, 1.0f };
+    float zero4[4]= { 0.0f, 0.0f, 0.0f, 1.0f };
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix(); glLoadIdentity();                       // eye-space light direction
+    glLightfv(GL_LIGHT0, GL_POSITION, dir);
+    glPopMatrix();
+    glLightfv(GL_LIGHT0, GL_AMBIENT, amb);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, dif);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, zero4);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero4);          // no hidden global ambient
+    glEnable(GL_LIGHT0);
+    for (int li = 1; li < 8; li++) glDisable(GL_LIGHT0 + li);   // scene lights stay out of this draw
+}
+static void attach_headlamp_end(void) {
+    if (!s_attachHeadlamp) return;
+    s_attachHeadlamp = 0;
+    glDisable(GL_LIGHT0);
+}
+#endif
+
 static void draw_mesh(int mi)
 {
     const AfnMesh* m = &afn_meshes[mi];
@@ -1128,6 +1170,14 @@ static void draw_mesh(int mi)
     // stepping on real SGX before (see rig_draw) — if that shows on hardware,
     // the fallback is baking these lights into vertex colors at export.
     int sceneLit = m->lit && m->normals != 0;
+#else
+    int sceneLit = 0;
+#endif
+    // Attached-model headlamp: an attached sub-model (hand pokeball, aura)
+    // lights with the parent rig's camera light — attach_headlamp_begin()
+    // configured GL_LIGHT0 before this call; the exporter emits normals for
+    // every attached-referenced mesh.
+    if (s_attachHeadlamp && m->normals != 0) sceneLit = 1;
     if (sceneLit) {
         glEnable(GL_LIGHTING);
         glEnable(GL_COLOR_MATERIAL);
@@ -1136,7 +1186,6 @@ static void draw_mesh(int mi)
         glEnableClientState(GL_NORMAL_ARRAY);
         glNormalPointer(GL_FLOAT, 0, m->normals);
     }
-#endif
 
     const AfnVertex* v = m->verts;
     glEnableClientState(GL_VERTEX_ARRAY);
@@ -1256,14 +1305,12 @@ static void draw_mesh(int mi)
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
-#ifdef AFN_HAS_LIGHTS
     if (sceneLit) {
         glDisableClientState(GL_NORMAL_ARRAY);
         glDisable(GL_LIGHTING);
         glDisable(GL_COLOR_MATERIAL);
         glDisable(GL_NORMALIZE);
     }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -6202,6 +6249,9 @@ int main(void)
 
                 if (s_pb_state == PB_IDLE && afn_pbt_aim_req) {
                     s_pb_state = PB_AIM; s_pb_yaw = playerYaw; s_pb_dist = (float)afn_pbt_dist_def;
+                    if (afn_pbt_aim_clip >= 0 && afn_pbt_aim_clip < PBR->clips) {   // Aim Clip pin: hold the aim pose
+                        s_playerClipHold = 1; s_playerHoldClip = afn_pbt_aim_clip; s_pframe = 0.0f;
+                    }
                 }
                 if (s_pb_state == PB_AIM) {
                     if (key_is_down(KEY_LSTICK_LEFT))  s_pb_yaw  += afn_pbt_turn_x10 * 0.1f;  // inverted L/R
@@ -6219,6 +6269,7 @@ int main(void)
                     } else if (!afn_pbt_aim_req) {                           // aim dropped with no throw -> cancel
                         s_pb_state = PB_IDLE;
                         afn_player_frozen = 0;
+                        s_playerClipHold = 0;                                // release the aim-pose hold (Aim Clip pin)
                     }
                 }
                 if (s_pb_state == PB_WINDUP) {
@@ -6258,6 +6309,12 @@ int main(void)
                 }
                 if ((s_pb_state == PB_AIM || s_pb_state == PB_WINDUP) && afn_pbt_freeze)
                     afn_player_frozen = 1;                                   // aim lock (Freeze Aim pin); released at throw
+                // Ball away (in flight / cooling): stand in the PLAIN idle instead of
+                // the BP's ball-carry stance — empty-handed carry pose reads wrong.
+                // Only while stationary so the walk/run anims still play (Idle Clip pin).
+                if ((s_pb_state == PB_FLY || s_pb_state == PB_COOL) && !player_moving
+                    && afn_pbt_idle_clip >= 0 && afn_pbt_idle_clip < PBR->clips)
+                    afn_rig_clip = afn_pbt_idle_clip;
             }
             afn_pbt_aim_req = 0; afn_pbt_throw_req = 0;                      // per-frame requests consumed
         }
@@ -7946,7 +8003,16 @@ int main(void)
             glScalef(sp->scale, sp->scale, sp->scale);
             int blended = afn_meshes[mi].blend;   // attached-model soft alpha
             if (blended) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
+            int hlA = 0;   // parent-attached sub-model: shade with the rig's camera light
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
+            hlA = (afn_mesh_inst_parent[si] >= 0);
+            if (hlA) attach_headlamp_begin(afn_mesh_inst_shamb[si], afn_mesh_inst_ldir[si]);
+#endif
             draw_mesh(mi);
+#if defined(AFN_HAS_MESH_INST_ATTACH) && defined(AFN_HAS_PLAYER_RIG)
+            if (hlA) attach_headlamp_end();
+#endif
+            (void)hlA;
             if (blended) { glDepthMask(GL_TRUE); glDisable(GL_BLEND); }
         }
         glPolygonOffset(0.0f, 0.0f);
@@ -7998,7 +8064,9 @@ int main(void)
             glScalef(sp->scale, sp->scale, sp->scale);
             int blended = afn_meshes[mi].blend;
             if (blended) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
+            attach_headlamp_begin(afn_mesh_inst_shamb[si], afn_mesh_inst_ldir[si]);   // bone-riding sub-model: rig's camera light (+ per-model overrides)
             draw_mesh(mi);
+            attach_headlamp_end();
             if (blended) { glDepthMask(GL_TRUE); glDisable(GL_BLEND); }
         }
         glPolygonOffset(0.0f, 0.0f);

@@ -1385,8 +1385,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Thunder Strike",   0xFF8866EE, 1, 1, 0, 0, {}, {}, {} },
     { "Aim Stick",        0xFF44AACC, 1, 1, 0, 0, {}, {}, {} },
     { "Ai Orb Scale",     0xFFAA4422, 1, 1, 2, 0, {"Min Scale% (int)","Max Scale% (int)"}, {}, {} },
-    { "Throw Ball",       0xFF7744CC, 1, 1, 4, 0, {"Pitch Clip (int)","Release % (int)","Speed x10 (int)","Cooldown (int)"}, {}, {} },
-    { "Aim Ball",         0xFF7744CC, 1, 1, 7, 0, {"Dist Min (int)","Dist Max (int)","Dist Default (int)","Turn Rate x10 (int)","Dist Rate x10 (int)","Arc % (int)","Freeze Aim (int)"}, {}, {} },
+    { "Throw Ball",       0xFF7744CC, 1, 1, 5, 0, {"Pitch Clip (int)","Release % (int)","Speed x10 (int)","Cooldown (int)","Idle Clip (int)"}, {}, {} },
+    { "Aim Ball",         0xFF7744CC, 1, 1, 8, 0, {"Dist Min (int)","Dist Max (int)","Dist Default (int)","Turn Rate x10 (int)","Dist Rate x10 (int)","Arc % (int)","Freeze Aim (int)","Aim Clip (int)"}, {}, {} },
     { "Physical Clash",   0xFFCC5533, 1, 1, 10, 0, {"Meet Radius (int)","Push x1000 (int)","Miss x1000 (int)","Ai Push x1000 (int)","Enemy Dmg (int)","Player Dmg (int)","Cooldown (int)","Window (int)","Ai Wait (int)","Knockback (int)"}, {}, {} },
     { "Lock Reticle",     0xFF2090D0, 1, 1, 6, 0, {"Size % (int)","Red (int)","Green (int)","Blue (int)","Spin % (int)","Pulse % (int)"}, {}, {} },
 };
@@ -1474,8 +1474,8 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
     case VsNodeType::DoOnce:        desc = "Only passes execution through once. Subsequent triggers are ignored."; break;
     case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
-    case VsNodeType::ThrowBall:     desc = "Throws the aimed pokeball — drive from On Key RELEASED (same key as the Aim Ball On Key Held). The pitch clip plays, the hand ball detaches at Release % of the clip, flies the aimed arc, and despawns on landing; after Cooldown frames it respawns in the hand. Any aim freeze is released the moment the ball detaches. Pitch Clip unwired = name-resolves 'pitch'. Pair with Aim Ball; needs a bone-attached hand model + player rig."; break;
-    case VsNodeType::AimBall:       desc = "Aims the pokeball throw — drive from On Key HELD. While held: a dotted arc + white floor reticle preview the shot, L-stick X turns the aim, L-stick Y sets the distance (Dist Min..Max, starting at Dist Default). Freeze Aim (default 1) locks player movement while aiming. Release the key into an On Key Released -> Throw Ball to fire; letting go with no Throw Ball wired just cancels the aim. Without these nodes the system is fully dormant."; break;
+    case VsNodeType::ThrowBall:     desc = "Throws the aimed pokeball — drive from On Key RELEASED (same key as the Aim Ball On Key Held). The pitch clip plays, the hand ball detaches at Release % of the clip, flies the aimed arc, and despawns on landing; after Cooldown frames it respawns in the hand. Any aim freeze is released the moment the ball detaches. While the ball is away (flight + cooldown) and the player stands still, Idle Clip plays instead of the BP's ball-carry stance (unwired = name-resolves 'idle'; wire -1 to disable). Pitch Clip unwired = name-resolves 'pitch'. Pair with Aim Ball; needs a bone-attached hand model + player rig."; break;
+    case VsNodeType::AimBall:       desc = "Aims the pokeball throw — drive from On Key HELD. While held: a dotted arc + white floor reticle preview the shot, L-stick X turns the aim, L-stick Y sets the distance (Dist Min..Max, starting at Dist Default). Freeze Aim (default 1) locks player movement while aiming. Aim Clip (unwired = keep the current anim) holds that rig pose for the whole aim. Release the key into an On Key Released -> Throw Ball to fire; letting go with no Throw Ball wired just cancels the aim. Without these nodes the system is fully dormant."; break;
     case VsNodeType::PhysicalClash: desc = "Arms the PHYSICAL clash (wire from On Start): when the player's Quick Attack dash and the enemy's dash meet head-on within Meet Radius, both fighters lock nose-to-nose and a pressure QTE begins — random face-button prompts shove the meter toward the enemy (Push), wrong buttons bleed it back (Miss), and the AI shoves on its own cadence (Ai Push / Ai Wait). Prompts and AI both quicken as the meter nears either edge (base Window frames). Overflow a side to resolve: winner deals Enemy/Player Dmg + launches the loser with Knockback frames of shove. Cooldown frames before it can re-trigger. Without this node the system is fully dormant. x1000 pins: 60 = 0.060 meter shove."; break;
     case VsNodeType::LockReticle:   desc = "Draws the lock-on reticle (wire from On Start): while the camera is locked (Lock On node), a pulsing double-ring — counter-rotating outer + tight inner, additive glow — is drawn at the locked target's feet so the lock stays readable as the target wanders. Size % scales the rings (100 = default), Red/Green/Blue set the color (default gold 255/200/80), Spin % scales the rotation speed and Pulse % the breathing amount (0 = static ring). Without this node no reticle ever draws."; break;
     case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
@@ -8160,6 +8160,7 @@ static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
     bool  smooth = rm.smoothShading, useAlpha = rm.useAlpha, camLight = rm.cameraLight;
     int   cullMode = rm.cullMode;
     float lightX = rm.lightX, lightY = rm.lightY, yawOffset = rm.yawOffset;
+    float shadowInt = rm.shadowIntensity;
     int   colType = rm.collisionType;
     float colC[3] = { rm.colCenter[0], rm.colCenter[1], rm.colCenter[2] };
     float colE[3] = { rm.colExtents[0], rm.colExtents[1], rm.colExtents[2] };
@@ -8198,6 +8199,7 @@ static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
     tmp.name = name;
     tmp.smoothShading = smooth; tmp.useAlpha = useAlpha; tmp.cameraLight = camLight;
     tmp.cullMode = cullMode; tmp.lightX = lightX; tmp.lightY = lightY; tmp.yawOffset = yawOffset;
+    tmp.shadowIntensity = shadowInt;
     tmp.collisionType = colType;
     for (int i = 0; i < 3; i++) { tmp.colCenter[i] = colC[i]; tmp.colExtents[i] = colE[i]; }
     // restore per-clip loop + speed (by name; new clips keep the glTF default)
@@ -8501,9 +8503,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "subModelCount=%d\n", sp.subModelCount);
             for (int mi = 0; mi < sp.subModelCount; mi++) {
                 const auto& sm = sp.subModels[mi];
-                fprintf(f, "subModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n",
+                fprintf(f, "subModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%.2f,%d,%.1f,%.1f\n",
                     sm.meshIdx, sm.offsetX, sm.offsetY, sm.offsetZ, sm.scale, sm.yaw,
-                    sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0);
+                    sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0, sm.shadowIntensity,
+                    sm.customLight ? 1 : 0, sm.lightX, sm.lightY);
             }
         }
         // Grind rail path (per mesh object). One header + one line per point.
@@ -8642,11 +8645,12 @@ static bool SaveProject(const std::string& path)
         int rigFlags = (rmA.smoothShading ? 1 : 0) | (rmA.cameraLight ? 2 : 0)
                      | ((rmA.cullMode & 3) << 2) | (rmA.useAlpha ? 16 : 0);
         // Fields 8-14 = collision: type|cx|cy|cz|ex|ey|ez. Field 15 = model yaw offset (deg).
-        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.1f\n",
+        // Field 16 = shadow intensity (editor rig shading depth, default 1).
+        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.1f|%.2f\n",
                 rmA.name.c_str(), rmA.sourcePath.c_str(),
                 loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY,
                 rmA.collisionType, rmA.colCenter[0], rmA.colCenter[1], rmA.colCenter[2],
-                rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2], rmA.yawOffset);
+                rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2], rmA.yawOffset, rmA.shadowIntensity);
         // Per-clip playback speed (comma list) — clips re-import on load, so like
         // loopBits this user setting is serialized and re-applied by clip name.
         {
@@ -9067,9 +9071,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msSubModelCount=%d\n", sp.subModelCount);
                 for (int mi = 0; mi < sp.subModelCount; mi++) {
                     const auto& sm = sp.subModels[mi];
-                    fprintf(f, "msSubModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n",
+                    fprintf(f, "msSubModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%.2f,%d,%.1f,%.1f\n",
                         sm.meshIdx, sm.offsetX, sm.offsetY, sm.offsetZ, sm.scale, sm.yaw,
-                        sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0);
+                        sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0, sm.shadowIntensity,
+                        sm.customLight ? 1 : 0, sm.lightX, sm.lightY);
                 }
             }
             // Grind rail path (per mesh object) — 3D/Map scenes round-trip here.
@@ -9224,9 +9229,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "m7SubModelCount=%d\n", sp.subModelCount);
                 for (int mi = 0; mi < sp.subModelCount; mi++) {
                     const auto& sm = sp.subModels[mi];
-                    fprintf(f, "m7SubModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d\n",
+                    fprintf(f, "m7SubModel=%d,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%.2f,%d,%.1f,%.1f\n",
                         sm.meshIdx, sm.offsetX, sm.offsetY, sm.offsetZ, sm.scale, sm.yaw,
-                        sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0);
+                        sm.grounded ? 1 : 0, sm.hidden ? 1 : 0, sm.boneIdx, sm.editorHide ? 1 : 0, sm.shadowIntensity,
+                        sm.customLight ? 1 : 0, sm.lightX, sm.lightY);
                 }
             }
             // Grind rail path (per mesh object) — M7 scenes round-trip here.
@@ -9901,15 +9907,19 @@ static bool LoadProject(const std::string& path)
                     if (sp2.subModels[mi].meshIdx != -2) loaded++;   // -2 = pending slot
                 if (loaded < sp2.subModelCount) {
                     auto& sm = sp2.subModels[loaded];
-                    int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0; float yaw = 0.0f, scl = 1.0f;
-                    int m = sscanf(line + 9, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d",
-                        &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide);
+                    int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0, fCLight = 0; float yaw = 0.0f, scl = 1.0f, fShadow = -1.0f, fLX = 50.0f, fLY = 180.0f;
+                    int m = sscanf(line + 9, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%f,%d,%f,%f",
+                        &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide, &fShadow, &fCLight, &fLX, &fLY);
                     sm.scale      = (m >= 5) ? scl : 1.0f;
                     sm.yaw        = (m >= 6) ? yaw : 0.0f;
                     sm.grounded   = (m >= 7) ? (fGround != 0) : false;
                     sm.hidden     = (m >= 8) ? (fHidden != 0) : false;
                     sm.boneIdx    = (m >= 9) ? fBone : -1;
                     sm.editorHide = (m >= 10) ? (fEdHide != 0) : false;
+                    sm.shadowIntensity = (m >= 11) ? fShadow : -1.0f;
+                    sm.customLight = (m >= 12) ? (fCLight != 0) : false;
+                    sm.lightX = (m >= 13) ? fLX : 50.0f;
+                    sm.lightY = (m >= 14) ? fLY : 180.0f;
                     if (sm.meshIdx == -2) sm.meshIdx = -1;
                 }
             }
@@ -10322,12 +10332,12 @@ static bool LoadProject(const std::string& path)
             char rname[256] = {}, rpath[512] = {}, rloop[64] = {}, rtex[512] = {};
             int rflags = 0; float rlx = 0.0f, rly = 0.0f;
             int rcolType = 0; float rcc[3] = {0,0,0}, rce[3] = {0,0,0};
-            float ryaw = 0.0f;
-            // Format: name|path|loopbits|texpath|flags|lightX|lightY|colType|cx|cy|cz|ex|ey|ez|yawOffset.
+            float ryaw = 0.0f, rshadow = 1.0f;
+            // Format: name|path|loopbits|texpath|flags|lightX|lightY|colType|cx|cy|cz|ex|ey|ez|yawOffset|shadowIntensity.
             // Older forms (7 fields) still parse; collision then keeps the AABB seed.
-            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f|%d|%f|%f|%f|%f|%f|%f|%f",
+            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f|%d|%f|%f|%f|%f|%f|%f|%f|%f",
                             rname, rpath, rloop, rtex, &rflags, &rlx, &rly,
-                            &rcolType, &rcc[0], &rcc[1], &rcc[2], &rce[0], &rce[1], &rce[2], &ryaw);
+                            &rcolType, &rcc[0], &rcc[1], &rcc[2], &rce[0], &rce[1], &rce[2], &ryaw, &rshadow);
             if (nf >= 2)
             {
                 RiggedMeshAsset rm;
@@ -10350,6 +10360,7 @@ static bool LoadProject(const std::string& path)
                     rm.colExtents[0] = rce[0]; rm.colExtents[1] = rce[1]; rm.colExtents[2] = rce[2];
                 }
                 if (nf >= 15) rm.yawOffset = ryaw;
+                if (nf >= 16) rm.shadowIntensity = rshadow;
                 UploadRigGLTexture(rm);
                 sRiggedMeshAssets.push_back(std::move(rm));
             }
@@ -11381,15 +11392,19 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subModels[mi].meshIdx != -2) loaded++;
                     if (loaded < sp2.subModelCount) {
                         auto& sm = sp2.subModels[loaded];
-                        int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0; float yaw = 0.0f, scl = 1.0f;
-                        int m = sscanf(line + 11, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d",
-                            &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide);
+                        int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0, fCLight = 0; float yaw = 0.0f, scl = 1.0f, fShadow = -1.0f, fLX = 50.0f, fLY = 180.0f;
+                        int m = sscanf(line + 11, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%f,%d,%f,%f",
+                            &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide, &fShadow, &fCLight, &fLX, &fLY);
                         sm.scale = (m >= 5) ? scl : 1.0f;
                         sm.yaw = (m >= 6) ? yaw : 0.0f;
                         sm.grounded = (m >= 7) ? (fGround != 0) : false;
                         sm.hidden = (m >= 8) ? (fHidden != 0) : false;
                         sm.boneIdx = (m >= 9) ? fBone : -1;
                         sm.editorHide = (m >= 10) ? (fEdHide != 0) : false;
+                    sm.shadowIntensity = (m >= 11) ? fShadow : -1.0f;
+                    sm.customLight = (m >= 12) ? (fCLight != 0) : false;
+                    sm.lightX = (m >= 13) ? fLX : 50.0f;
+                    sm.lightY = (m >= 14) ? fLY : 180.0f;
                         if (sm.meshIdx == -2) sm.meshIdx = -1;
                     }
                 }
@@ -11892,15 +11907,19 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subModels[mi].meshIdx != -2) loaded++;
                     if (loaded < sp2.subModelCount) {
                         auto& sm = sp2.subModels[loaded];
-                        int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0; float yaw = 0.0f, scl = 1.0f;
-                        int m = sscanf(line + 11, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d",
-                            &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide);
+                        int fGround = 0, fHidden = 0, fBone = -1, fEdHide = 0, fCLight = 0; float yaw = 0.0f, scl = 1.0f, fShadow = -1.0f, fLX = 50.0f, fLY = 180.0f;
+                        int m = sscanf(line + 11, "%d,%f,%f,%f,%f,%f,%d,%d,%d,%d,%f,%d,%f,%f",
+                            &sm.meshIdx, &sm.offsetX, &sm.offsetY, &sm.offsetZ, &scl, &yaw, &fGround, &fHidden, &fBone, &fEdHide, &fShadow, &fCLight, &fLX, &fLY);
                         sm.scale = (m >= 5) ? scl : 1.0f;
                         sm.yaw = (m >= 6) ? yaw : 0.0f;
                         sm.grounded = (m >= 7) ? (fGround != 0) : false;
                         sm.hidden = (m >= 8) ? (fHidden != 0) : false;
                         sm.boneIdx = (m >= 9) ? fBone : -1;
                         sm.editorHide = (m >= 10) ? (fEdHide != 0) : false;
+                    sm.shadowIntensity = (m >= 11) ? fShadow : -1.0f;
+                    sm.customLight = (m >= 12) ? (fCLight != 0) : false;
+                    sm.lightX = (m >= 13) ? fLX : 50.0f;
+                    sm.lightY = (m >= 14) ? fLY : 180.0f;
                         if (sm.meshIdx == -2) sm.meshIdx = -1;
                     }
                 }
@@ -17981,6 +18000,27 @@ static void DrawAttachedChunk(FloorSprite& sp)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible IN-GAME; a Cast Effect node reveals it (for a charge aura, etc.)");
             ImGui::Checkbox("Hide in editor##sm", &sm.editorHide);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hide this model in the EDITOR preview only (declutter while authoring). Still shows in-game.");
+            {
+                bool smOv = sm.shadowIntensity >= 0.0f;
+                if (ImGui::Checkbox("Custom Shadow##smshadow", &smOv))
+                    sm.shadowIntensity = smOv ? 1.0f : -1.0f;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Override the shading depth for THIS model.\nUnchecked = inherit the parent rig's Shadow Intensity.");
+                if (smOv) {
+                    ImGui::SameLine();
+                    ImGui::PushItemWidth(Scaled(100));
+                    ImGui::SliderFloat("##smshadowv", &sm.shadowIntensity, 0.0f, 2.0f, "%.2f");
+                    ImGui::PopItemWidth();
+                }
+                ImGui::Checkbox("Custom Light##smlight", &sm.customLight);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Give THIS model its own camera-light aim.\nUnchecked = follow the parent rig's Camera light direction.");
+                if (sm.customLight) {
+                    ImGui::PushItemWidth(Scaled(90));
+                    ImGui::DragFloat("Light X##smlx", &sm.lightX, 1.0f, -180.0f, 180.0f, "%.0f deg");
+                    ImGui::SameLine();
+                    ImGui::DragFloat("Light Y##smly", &sm.lightY, 1.0f, -180.0f, 180.0f, "%.0f deg");
+                    ImGui::PopItemWidth();
+                }
+            }
             // Bone attach (player rig): ride a rig joint; X/Y/Z become bone-relative.
             if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
                 && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
@@ -18491,6 +18531,10 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                     ImGui::PopItemWidth();
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tilt the camera light: X = pitch (up/down), Y = yaw (left/right), in degrees off straight-from-camera.");
                 }
+                ImGui::PushItemWidth(Scaled(120));
+                if (ImGui::SliderFloat("Shadow Intensity##rigshadow", &rm.shadowIntensity, 0.0f, 2.0f, "%.2f")) sProjectDirty = true;
+                ImGui::PopItemWidth();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How dark the unlit side shades in the editor preview.\n0 = flat (no shading), 1 = default, 2 = black shadow side.\nUse to match the runtime's darker look.");
                 if (ImGui::Checkbox("Play##rigplay", &sp.rigAnimPlay)) sProjectDirty = true;
                 if (rm.clips.empty()) {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(no animation clips)");
@@ -20462,9 +20506,10 @@ void FrameTick(float dt)
         // runtime is a fork of the PSV one consuming the same psv_*.h headers.
         if (sBuildTarget != BuildTarget::PSV && sBuildTarget != BuildTarget::Switch)
             sBuildTarget = BuildTarget::PSV;
-        if (ImGui::MenuItem("Target: PSV (vpk)", nullptr, sBuildTarget == BuildTarget::PSV))
+        ImGui::TextUnformatted("Target:");
+        if (ImGui::RadioButton("Vita##tgt", sBuildTarget == BuildTarget::PSV))
             sBuildTarget = BuildTarget::PSV;
-        if (ImGui::MenuItem("Target: Switch (nro)", nullptr, sBuildTarget == BuildTarget::Switch))
+        if (ImGui::RadioButton("Switch##tgt", sBuildTarget == BuildTarget::Switch))
             sBuildTarget = BuildTarget::Switch;
         bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
@@ -20657,6 +20702,9 @@ void FrameTick(float dt)
                             mse.offsetY = sm.offsetY;
                             mse.offsetZ = sm.offsetZ;
                             mse.boneIdx = sm.boneIdx;
+                            mse.attachShadow = sm.shadowIntensity;   // -1 = inherit the parent rig's
+                            mse.attachCustomLight = sm.customLight;  // own camera-light aim
+                            mse.attachLightX = sm.lightX; mse.attachLightY = sm.lightY;
                             deferredAttachedModels.push_back(mse);   // appended after the loop (see decl)
                         }
                     }
@@ -22217,6 +22265,7 @@ void FrameTick(float dt)
                     pr.useAlpha = rm.useAlpha;
                     pr.cameraLight = rm.cameraLight;
                     pr.lightX = rm.lightX; pr.lightY = rm.lightY;
+                    pr.shadowIntensity = rm.shadowIntensity;
                     pr.yawOffset = rm.yawOffset;
                     pr.collisionType = rm.collisionType;
                     for (int k = 0; k < 3; k++) { pr.colCenter[k] = rm.colCenter[k]; pr.colExtents[k] = rm.colExtents[k]; }
@@ -27742,11 +27791,13 @@ void FrameTick(float dt)
                         "    afn_pbt_throw_req = 1;                           // throw THIS frame (On Key Released)\n"
                         "    afn_pbt_clip = <Pitch Clip (int)>;               // unwired = name-resolved \"pitch\"\n"
                         "    afn_pbt_release_pct = <Release % (int)>; afn_pbt_speed_x10 = <Speed x10 (int)>; afn_pbt_cooldown = <Cooldown (int)>;\n"
+                        "    afn_pbt_idle_clip = <Idle Clip (int)>;           // unwired = name-resolved \"idle\"\n"
                         "    // --- Runtime (psv main.c) ---\n"
                         "    // PB_AIM + throw_req -> WINDUP: pitch clip held; at Release%% the hand ball\n"
                         "    //   hides, arc flight starts, clip hold clears AND afn_player_frozen = 0.\n"
-                        "    // FLY->COOL: ball rides afn_pb_arc, despawns on the floor; after Cooldown\n"
-                        "    //   frames it respawns in the (idle-posed) hand. Both req flags clear each frame.");
+                        "    // FLY/COOL + !player_moving: afn_rig_clip = afn_pbt_idle_clip — the empty\n"
+                        "    //   hand stands in the PLAIN idle (not the BP's ball-carry stance) until\n"
+                        "    //   the ball respawns after Cooldown frames. Walk/run still play while moving.");
                     break;
                 }
                 case VsNodeType::PhysicalClash: {
@@ -27788,10 +27839,13 @@ void FrameTick(float dt)
                         "    afn_pbt_dist_min = <Dist Min (int)>; afn_pbt_dist_max = <Dist Max (int)>; afn_pbt_dist_def = <Dist Default (int)>;\n"
                         "    afn_pbt_turn_x10 = <Turn Rate x10 (int)>; afn_pbt_drate_x10 = <Dist Rate x10 (int)>;\n"
                         "    afn_pbt_arc_pct = <Arc % (int)>; afn_pbt_freeze = <Freeze Aim (int)>;\n"
+                        "    afn_pbt_aim_clip = <Aim Clip (int)>;             // -1 (unwired) = keep the current anim\n"
                         "    // --- Runtime (psv main.c) ---\n"
                         "    // PB_IDLE + aim_req -> PB_AIM: playerYaw follows the aim; dotted arc + white\n"
                         "    //   reticle at the landing spot; L-stick X turns, Y sets distance; freeze if\n"
-                        "    //   afn_pbt_freeze. aim_req dropped with no throw_req -> aim cancels to IDLE.");
+                        "    //   afn_pbt_freeze. Aim Clip >= 0 -> s_playerClipHold holds that pose for the\n"
+                        "    //   whole aim (throw swaps the hold to the pitch clip; cancel releases it).\n"
+                        "    //   aim_req dropped with no throw_req -> aim cancels to IDLE.");
                     break;
                 }
                 case VsNodeType::AiChargeStep: {
@@ -39948,7 +40002,21 @@ void RenderScenePreviewGL()
             // EYE space via the identity-modelview trick; else a fixed sky direction.
             glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
             {
-                float lAmb[]={0.5f,0.5f,0.5f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
+                // RUNTIME PARITY: rig_draw bakes inten = 8/31 + 28/31 * max(N.L,0)
+                // (clamped) — so at Shadow Intensity 1 the editor uses exactly that
+                // ambient/diffuse. The slider remaps the ambient floor:
+                // 0 -> 1.0 (flat), 1 -> 8/31 (runtime), 2 -> 0 (black shadow side).
+                const float ambR = 8.0f/31.0f, difR = 28.0f/31.0f;
+                float S = rm.shadowIntensity;
+                float sAmbV = (S <= 1.0f) ? (1.0f + S * (ambR - 1.0f)) : (ambR * (2.0f - S));
+                if (sAmbV < 0.0f) sAmbV = 0.0f; if (sAmbV > 1.0f) sAmbV = 1.0f;
+                float lAmb[]={sAmbV,sAmbV,sAmbV,1.0f}, lDif[]={difR,difR,difR,1.0f};
+                // GL's GLOBAL model ambient defaults to 0.2 and ADDS on top — zero it
+                // or the shadow floor sits at ~0.46 instead of the runtime's 8/31.
+                float zeroMA[]={0.0f,0.0f,0.0f,1.0f};
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zeroMA);
+                // Two-sided rigs light |N.L| at runtime — light GL back faces too.
+                glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, rm.cullMode == 2 ? 1 : 0);
                 glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
                 if (rm.cameraLight) {
                     float ax = rm.lightX * 3.14159265f/180.0f, ay = rm.lightY * 3.14159265f/180.0f;
@@ -40017,6 +40085,8 @@ void RenderScenePreviewGL()
             glEnableClientState(GL_VERTEX_ARRAY);
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
             glDisable(GL_LIGHTING); glDisable(GL_NORMALIZE);
+            { float defMA[]={0.2f,0.2f,0.2f,1.0f}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT, defMA); }   // restore GL default
+            glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0);
             glDisable(GL_ALPHA_TEST);
             glDisable(GL_CULL_FACE);
             glPopMatrix();
@@ -40087,6 +40157,39 @@ void RenderScenePreviewGL()
                 glTexCoordPointer(2, GL_FLOAT, sizeof(MeshVertex), &av0->u);
                 if (amVcol) { glEnableClientState(GL_COLOR_ARRAY); glColorPointer(3, GL_FLOAT, sizeof(MeshVertex), &av0->r); }
                 else glColor3f(1, 1, 1);
+                // Parent rig's smooth/camera lighting (runtime parity: attached
+                // models shade with the rig's headlamp + Shadow Intensity).
+                const RiggedMeshAsset* prig = (fs.riggedMeshIdx >= 0 && fs.riggedMeshIdx < (int)sRiggedMeshAssets.size())
+                                              ? &sRiggedMeshAssets[fs.riggedMeshIdx] : nullptr;
+                if (prig) {
+                    glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
+                    glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+                    const float ambR = 8.0f/31.0f, difR = 28.0f/31.0f;
+                    float S = sm.shadowIntensity >= 0.0f ? sm.shadowIntensity   // Custom Shadow override
+                                                         : prig->shadowIntensity;
+                    float sAmbV = (S <= 1.0f) ? (1.0f + S * (ambR - 1.0f)) : (ambR * (2.0f - S));
+                    if (sAmbV < 0.0f) sAmbV = 0.0f; if (sAmbV > 1.0f) sAmbV = 1.0f;
+                    float lAmb[]={sAmbV,sAmbV,sAmbV,1.0f}, lDif[]={difR,difR,difR,1.0f}, zeroMA[]={0,0,0,1};
+                    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zeroMA);
+                    glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
+                    if (sm.customLight || prig->cameraLight) {
+                        // Custom Light = this model's own aim; else the rig's headlamp.
+                        float lxDeg = sm.customLight ? sm.lightX : prig->lightX;
+                        float lyDeg = sm.customLight ? sm.lightY : prig->lightY;
+                        float ax = lxDeg * 3.14159265f/180.0f, ay = lyDeg * 3.14159265f/180.0f;
+                        float lcx=cosf(ax), lsx=sinf(ax), lcy=cosf(ay), lsy=sinf(ay);
+                        float head[]={ lcx*lsy, -lsx, lcx*lcy, 0.0f };
+                        glPushMatrix(); glLoadIdentity();
+                        glLightfv(GL_LIGHT0,GL_POSITION,head);
+                        glPopMatrix();
+                    } else {
+                        float lDir[]={0.3f,1.0f,0.5f,0.0f};
+                        glLightfv(GL_LIGHT0,GL_POSITION,lDir);
+                    }
+                    glShadeModel(prig->smoothShading ? GL_SMOOTH : GL_FLAT);
+                    glEnableClientState(GL_NORMAL_ARRAY);
+                    glNormalPointer(GL_FLOAT, sizeof(MeshVertex), &av0->nx);
+                }
                 glMatrixMode(GL_TEXTURE); glLoadIdentity();
                 glScalef(1.0f, -1.0f, 1.0f); glTranslatef(0.0f, -1.0f, 0.0f);
                 glMatrixMode(GL_MODELVIEW);
@@ -40095,6 +40198,12 @@ void RenderScenePreviewGL()
                 if (!am.quadIndices.empty())
                     glDrawElements(GL_QUADS, (GLsizei)am.quadIndices.size(), GL_UNSIGNED_INT, am.quadIndices.data());
                 glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+                if (prig) {
+                    glDisableClientState(GL_NORMAL_ARRAY);
+                    glDisable(GL_LIGHTING); glDisable(GL_NORMALIZE); glDisable(GL_COLOR_MATERIAL);
+                    glShadeModel(GL_SMOOTH);
+                    float defMA[]={0.2f,0.2f,0.2f,1.0f}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT, defMA);
+                }
                 if (amVcol) glDisableClientState(GL_COLOR_ARRAY);
                 glDisable(GL_ALPHA_TEST); glDisable(GL_BLEND); glDepthMask(GL_TRUE);
                 glPopMatrix();
@@ -40956,7 +41065,20 @@ void Render3DViewport()
                 glRotatef(fs.rotationZ, 0,0,1);
                 glScalef(fs.scale, fs.scale, fs.scale);
                 glEnable(GL_LIGHTING); glEnable(GL_LIGHT0);
-                float lAmb[]={0.5f,0.5f,0.5f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
+                // RUNTIME PARITY: ambient 8/31 + diffuse 28/31 (rig_draw's camlight
+                // bake) at Shadow Intensity 1; slider remaps the ambient floor
+                // (0 = flat, 2 = black shadow side).
+                const float ambR = 8.0f/31.0f, difR = 28.0f/31.0f;
+                float S = rm.shadowIntensity;
+                float sAmbV = (S <= 1.0f) ? (1.0f + S * (ambR - 1.0f)) : (ambR * (2.0f - S));
+                if (sAmbV < 0.0f) sAmbV = 0.0f; if (sAmbV > 1.0f) sAmbV = 1.0f;
+                float lAmb[]={sAmbV,sAmbV,sAmbV,1.0f}, lDif[]={difR,difR,difR,1.0f};
+                // GL's GLOBAL model ambient defaults to 0.2 and ADDS on top — zero it
+                // or the shadow floor sits at ~0.46 instead of the runtime's 8/31.
+                float zeroMA[]={0.0f,0.0f,0.0f,1.0f};
+                glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zeroMA);
+                // Two-sided rigs light |N.L| at runtime — light GL back faces too.
+                glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, rm.cullMode == 2 ? 1 : 0);
                 glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
                 if (rm.cameraLight) {
                     // Headlamp from the viewer, tilted by Light X (pitch) / Y (yaw).
@@ -41028,6 +41150,8 @@ void Render3DViewport()
                 }
                 if (rm.useAlpha) glDisable(GL_ALPHA_TEST);
                 glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
+                { float defMA[]={0.2f,0.2f,0.2f,1.0f}; glLightModelfv(GL_LIGHT_MODEL_AMBIENT, defMA); }   // restore GL default
+                glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0);
                 if (fs.selected) {
                     glColor3f(1,1,1); glLineWidth(2.0f);
                     float x0=rm.boundsMin[0],y0=rm.boundsMin[1],z0=rm.boundsMin[2];

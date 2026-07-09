@@ -16,6 +16,7 @@
 #include <sstream>
 #include <cmath>
 #include <cstdio>
+#include <set>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -89,9 +90,18 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
     // is per-vertex Gouraud either way. Set this true again to re-test true
     // GL_LIGHTING (runtime support in main.c lights_setup/draw_mesh is kept).
     bool sceneHasLights = false;
+    // Attached-model meshes (parent/bone-riding sub-models like the hand
+    // pokeball) get normals regardless: the runtime lights them with the
+    // parent rig's camera headlamp (smooth/camera-light parity with the rig).
+    std::set<int> attachedMeshIdx;
+    for (const auto& s : sprites)
+        if (s.meshIdx >= 0 && (s.parentIdx >= 0 || s.boneIdx >= 0))
+            attachedMeshIdx.insert(s.meshIdx);
     auto meshEmitsNormals = [&](const AfnMeshExport& m) {
-        return isPsv && sceneHasLights && m.lit && !m.softAlpha &&
-               m.normals.size() == m.positions.size() && !m.positions.empty();
+        int mi2 = (int)(&m - meshes.data());
+        bool haveN = m.normals.size() == m.positions.size() && !m.positions.empty();
+        bool scene = sceneHasLights && m.lit && !m.softAlpha;
+        return isPsv && haveN && (scene || attachedMeshIdx.count(mi2) != 0);
     };
 
     // ---- meshes ----
@@ -532,6 +542,33 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             for (size_t k = 0; k < inst.size(); k++) {
                 const auto& s = sprites[inst[k]];
                 f << "{" << Flt(WL(s.offsetX)) << "," << Flt(WL(s.offsetY)) << "," << Flt(WL(s.offsetZ)) << "},";
+            }
+            f << "};\n";
+            // Per-instance headlamp ambient override (Custom Shadow on the attached
+            // model): mapped to the ambient floor at export; -1 = inherit the rig's.
+            f << "static const float afn_mesh_inst_shamb[" << inst.size() << "] = {";
+            for (size_t k = 0; k < inst.size(); k++) {
+                float Sv = sprites[inst[k]].attachShadow, v = -1.0f;
+                if (Sv >= 0.0f) {
+                    const float ambR = 8.0f/31.0f;
+                    v = (Sv <= 1.0f) ? (1.0f + Sv * (ambR - 1.0f)) : (ambR * (2.0f - Sv));
+                    if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+                }
+                f << Flt(v) << ",";
+            }
+            f << "};\n";
+            // Per-instance headlamp DIRECTION override (Custom Light): baked
+            // eye-space aim like the rig's ldx/ldy/ldz; {0,0,0} = inherit.
+            f << "static const float afn_mesh_inst_ldir[" << inst.size() << "][3] = {";
+            for (size_t k = 0; k < inst.size(); k++) {
+                const auto& s = sprites[inst[k]];
+                float lx = 0, ly = 0, lz = 0;
+                if (s.attachCustomLight) {
+                    float ax = s.attachLightX*3.14159265f/180.0f, ay = s.attachLightY*3.14159265f/180.0f;
+                    float cx=cosf(ax), sx=sinf(ax), cy=cosf(ay), sy=sinf(ay);
+                    lx=-cx*sy; ly=sx; lz=-cx*cy;
+                }
+                f << "{" << Flt(lx) << "," << Flt(ly) << "," << Flt(lz) << "},";
             }
             f << "};\n";
         }
