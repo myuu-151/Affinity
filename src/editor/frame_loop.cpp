@@ -22384,9 +22384,14 @@ void FrameTick(float dt)
             if (ImGui::IsKeyDown(ImGuiKey_E))
                 sCamera.height = std::min(9999.0f, sCamera.height + 40.0f * dt);
 
-            // Cancel grab if sprite deselected
+            // Cancel grab/scale if sprite deselected. Scale was missing this and
+            // LATCHED FOREVER when Escape deselected the sprite before the scale
+            // block's own Escape-cancel could run (its update needs a selection) —
+            // sScaleMode stuck true silently killed WASD until another S press.
             if (sGrabMode && (sSelectedSprite < 0 || sSelectedSprite >= sSpriteCount))
                 sGrabMode = false;
+            if (sScaleMode && (sSelectedSprite < 0 || sSelectedSprite >= sSpriteCount))
+                sScaleMode = false;
 
             bool wantKeys = !ImGui::GetIO().WantCaptureKeyboard || sGrabMode;
 
@@ -39938,36 +39943,80 @@ void RenderScenePreviewGL()
             if (rm.cullMode == 2) glDisable(GL_CULL_FACE);
             else { glEnable(GL_CULL_FACE); glCullFace(rm.cullMode == 1 ? GL_FRONT : GL_BACK); }
             if (rm.useAlpha) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
+            // Lighting (Meshes-tab parity): LIGHT0 ambient+diffuse. Camera light =
+            // headlamp from the viewer tilted by Light X (pitch) / Y (yaw) — set in
+            // EYE space via the identity-modelview trick; else a fixed sky direction.
+            glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
+            {
+                float lAmb[]={0.5f,0.5f,0.5f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
+                glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
+                if (rm.cameraLight) {
+                    float ax = rm.lightX * 3.14159265f/180.0f, ay = rm.lightY * 3.14159265f/180.0f;
+                    float lcx=cosf(ax), lsx=sinf(ax), lcy=cosf(ay), lsy=sinf(ay);
+                    float head[]={ lcx*lsy, -lsx, lcx*lcy, 0.0f };
+                    glPushMatrix(); glLoadIdentity();
+                    glLightfv(GL_LIGHT0,GL_POSITION,head);
+                    glPopMatrix();
+                } else {
+                    float lDir[]={0.3f,1.0f,0.5f,0.0f};
+                    glLightfv(GL_LIGHT0,GL_POSITION,lDir);
+                }
+            }
+            bool rigSmooth = rm.smoothShading;
             glDisableClientState(GL_VERTEX_ARRAY);
             glDisableClientState(GL_TEXTURE_COORD_ARRAY);
             for (int ms = 0; ms < rm.matCount(); ms++) {
                 bool slotTex = (rm.matTextured(ms) && rm.matGlTexID(ms) != 0);
                 if (slotTex) {
-                    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.matGlTexID(ms)); glColor3f(1,1,1);
+                    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.matGlTexID(ms));
                     // Per-slot UV addressing (Meshes-tab parity): Clip/Extend/Mirror.
                     GLint rigWrap = (rm.matWrap(ms) == 1) ? GL_REPEAT
                                   : (rm.matWrap(ms) == 2) ? GL_MIRRORED_REPEAT : GL_CLAMP;
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, rigWrap);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, rigWrap);
+                    float white[]={1,1,1,1};
+                    glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,white); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,white);
                 }
-                else { glDisable(GL_TEXTURE_2D); glColor3f(0.8f, 0.8f, 0.82f); }
+                else {
+                    glDisable(GL_TEXTURE_2D);
+                    float matCol[]={0.8f,0.8f,0.82f,1.0f};
+                    glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
+                }
                 glBegin(GL_TRIANGLES);
                 for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
                     size_t tri = ti / 3;
                     int triSlot = (tri < rm.triMaterial.size()) ? rm.triMaterial[tri] : 0;
                     if (triSlot != ms) continue;
+                    float wp[3][3], wn[3][3], uv[3][2];
                     for (int k = 0; k < 3; k++) {
-                        const MeshVertex& bv = rm.baseVerts[rm.indices[ti + k]];
-                        const BonePose& P = pose[rm.vertBone[rm.indices[ti + k]]];
+                        uint32_t vi = rm.indices[ti + k];
+                        const MeshVertex& bv = rm.baseVerts[vi];
+                        const BonePose& P = pose[rm.vertBone[vi]];
                         float px, py, pz; rotq(P, bv.px, bv.py, bv.pz, px, py, pz);
-                        if (slotTex) glTexCoord2f(bv.u, bv.v);   // glTF UVs are stored GL-ready (no flip — Meshes-tab parity)
-                        glVertex3f(px + P.px, py + P.py, pz + P.pz);
+                        wp[k][0]=px+P.px; wp[k][1]=py+P.py; wp[k][2]=pz+P.pz;
+                        float nx, ny, nz; rotq(P, bv.nx, bv.ny, bv.nz, nx, ny, nz);
+                        wn[k][0]=nx; wn[k][1]=ny; wn[k][2]=nz;
+                        uv[k][0]=bv.u; uv[k][1]=bv.v;   // glTF UVs are stored GL-ready (no flip)
+                    }
+                    float fnx=0, fny=0, fnz=0;
+                    if (!rigSmooth) {   // flat shading: one face normal per tri
+                        float ax=wp[1][0]-wp[0][0], ay=wp[1][1]-wp[0][1], az=wp[1][2]-wp[0][2];
+                        float bx=wp[2][0]-wp[0][0], by=wp[2][1]-wp[0][1], bz=wp[2][2]-wp[0][2];
+                        fnx=ay*bz-az*by; fny=az*bx-ax*bz; fnz=ax*by-ay*bx;
+                        float l=sqrtf(fnx*fnx+fny*fny+fnz*fnz); if(l>0){fnx/=l;fny/=l;fnz/=l;}
+                    }
+                    for (int k = 0; k < 3; k++) {
+                        if (slotTex) glTexCoord2f(uv[k][0], uv[k][1]);
+                        if (rigSmooth) glNormal3f(wn[k][0], wn[k][1], wn[k][2]);
+                        else           glNormal3f(fnx, fny, fnz);
+                        glVertex3f(wp[k][0], wp[k][1], wp[k][2]);
                     }
                 }
                 glEnd();
             }
             glEnableClientState(GL_VERTEX_ARRAY);
             glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+            glDisable(GL_LIGHTING); glDisable(GL_NORMALIZE);
             glDisable(GL_ALPHA_TEST);
             glDisable(GL_CULL_FACE);
             glPopMatrix();
