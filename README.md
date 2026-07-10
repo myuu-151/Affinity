@@ -14,6 +14,16 @@
 
 ---
 
+## Features
+
+- **Desktop editor** (ImGui/OpenGL) — scene, meshes, skybox, elements/HUD, effects, and node tabs; hardware-rendered 3D viewport with **console-parity shading** (the per-rig *Shadow Intensity* slider drives the editor preview *and* bakes into the export, so what you see is what the console renders).
+- **Visual scripting** — 370 nodes ([full reference](docs/NODE_REFERENCE.md)) compiled to plain C at export; every gameplay system (movement, camera, combat, throws, lock-on, HUD, sound, effects) is node-driven with tunable pins.
+- **Skeletal animation** — glTF rigs with per-clip speed, bone-attached models/sprites, camera-light + smooth/flat shading, analog-scaled walk playback.
+- **Navmesh AI** — Recast/Detour baked at export; wander/follow NPC navigation with per-NPC tunables.
+- **Two console targets** from one editor: PS Vita (`.vpk`, vitaGL) and Nintendo Switch (`.nro`, libnx + GLES1.1) — pick in the menu bar, hit Export.
+
+---
+
 ## Getting Started
 
 ### Prerequisites
@@ -262,8 +272,8 @@ To confirm offload is working, load a model with **GPU 100%** set and watch dedi
 
 ```
 src/
-  editor/          — ImGui editor (main loop, frame tick)
-  viewport/        — Software 3D rasterizer and Mode 7 preview
+  editor/          — ImGui editor (main loop, frame tick, GL scene viewport)
+  viewport/        — Software rasterizer (authentic Mode 7 floor preview)
   map/             — Mesh, sprite, and tilemap data types
   math/            — Fixed-point types, camera struct
   platform/psv/    — PS Vita VPK packaging (invokes VitaSDK)
