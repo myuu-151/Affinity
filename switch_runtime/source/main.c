@@ -566,10 +566,11 @@ static void rig_init(void) {
     }
 }
 // Advance an animation frame for rig R's clip.
-static float rig_advance(const AfnRig* R, int clip, float frame) {
-    // Per-clip speed multiplier (editor slider, 0..2): scales the base advance.
+static float rig_advance(const AfnRig* R, int clip, float frame, float rate) {
+    // Per-clip speed multiplier (editor slider, 0..5): scales the base advance.
+    // rate = per-instance playback scale (analog walk: slight stick = slower anim).
     float spd = R->clipspeed ? R->clipspeed[clip] : 1.0f;
-    frame += 0.4f * spd;
+    frame += 0.4f * spd * rate;
     int nf = R->clipframes[clip];
     if (nf > 1) {
         if (R->cliploop[clip]) { while (frame >= (float)nf) frame -= (float)nf; }
@@ -719,6 +720,8 @@ static int   s_eaHead = -1, s_eaFilled = 0;
 extern int afn_qa_active;                // defined later in this TU; forward-declared for the afterimage gate
 extern int afn_paused;                   // defined later; forward-declared so rigs_render can hold the animation while paused
 extern int afn_player_frozen;            // defined later; forward-declared so rigs_render can drop the QA trail while frozen
+extern int player_moving;                // defined later; analog walk anim rate reads it
+extern int afn_stick_mag[8];             // defined later; stick deflection 0..256 per direction
 // Quick Attack afterimage tunables — NODE-DRIVEN (Quick Attack / Ai Quick Attack nodes).
 // Trail Alpha scales the per-ghost alpha ramp (default 96 = the original peak); Trail
 // Length = how many of the 6 trail samples to draw (nearest N). Defaults = original look.
@@ -802,7 +805,18 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         float last = (float)(PR->clipframes[s_pclip] - 1);
         s_pframe += 0.4f; if (s_pframe > last) s_pframe = last;
     } else {
-        s_pframe = rig_advance(PR, s_pclip, s_pframe);
+        // Analog walk: a slight stick push plays the clip slower, matching the
+        // scaled movement speed (dpad or a full push = normal rate).
+        float animRate = 1.0f;
+        if (player_moving) {
+            int mm = afn_stick_mag[0];
+            if (afn_stick_mag[1] > mm) mm = afn_stick_mag[1];
+            if (afn_stick_mag[2] > mm) mm = afn_stick_mag[2];
+            if (afn_stick_mag[3] > mm) mm = afn_stick_mag[3];
+            if (mm > 0 && mm < 256)
+                animRate = 0.35f + 0.65f * ((float)mm / 256.0f);
+        }
+        s_pframe = rig_advance(PR, s_pclip, s_pframe, animRate);
     }
     build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
     s_drawingPlayer = 1;   // HARDCODED: snapshot ONLY the player's bones (enemy shares the rig)
@@ -871,7 +885,7 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
             if (!afn_paused) { s_npcFrame[i] += 0.4f; if (s_npcFrame[i] > last) s_npcFrame[i] = last; }
         } else
 #endif
-            if (!afn_paused) s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
+            if (!afn_paused) s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i], 1.0f);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
         // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop),
         // tilted to the smoothed floor normal like the player (slope snap).

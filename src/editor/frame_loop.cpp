@@ -18568,7 +18568,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                         // applied at runtime so each clip plays faster/slower/frozen.
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(spdW);
-                        if (ImGui::SliderFloat("##rigspeed", &rm.clips[ci].speed, 0.0f, 2.0f, "x%.2f"))
+                        if (ImGui::SliderFloat("##rigspeed", &rm.clips[ci].speed, 0.0f, 5.0f, "x%.2f"))
                             sProjectDirty = true;
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Playback speed for this clip (0 = frozen, 1 = normal, 2 = double). Drives the runtime.");

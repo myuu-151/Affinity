@@ -93,7 +93,7 @@ static inline int sceCtrlPeekBufferPositiveExt2(int port, SceCtrlData* pad, int 
     pad->lx = switch_axis_to_vita(ls.x, 0);
     pad->ly = switch_axis_to_vita(ls.y, 1);   // Vita Y is down-positive
     pad->rx = switch_axis_to_vita(rs.x, 0);
-    pad->ry = switch_axis_to_vita(rs.y, 1);
+    pad->ry = switch_axis_to_vita(rs.y, 0);   // NOT inverted: orbit up/down felt flipped vs Vita with the mathematical mapping
     return 1;
 }
 
