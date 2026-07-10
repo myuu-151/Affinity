@@ -952,6 +952,7 @@ static void look_at(float m[16],
 
 static GLuint s_meshLmTex[256];   // lightmap texture per mesh (0 = none)
 static GLuint s_meshAoTex[256];   // AO-map texture per mesh (0 = none)
+static GLuint s_meshOvTex[256];   // bitmask-overlay texture per mesh (0 = none)
 #define AFN_MESH_MAX_LMG 8
 static GLuint s_meshLmgLmTex[256][AFN_MESH_MAX_LMG];  // map-group lightmaps
 static GLuint s_meshLmgAoTex[256][AFN_MESH_MAX_LMG];  // map-group AO (strength-folded)
@@ -1008,6 +1009,19 @@ static void upload_textures(void)
         s_meshAoTex[mi] = 0;
         if (m->aoTex && m->aoW > 0 && m->aoH > 0)
             s_meshAoTex[mi] = ao_upload(m->aoTex, m->aoW, m->aoH, m->aoStrength);
+        // Bitmask overlay (Paint2Blend): tiles like the diffuse (REPEAT),
+        // filter follows the mesh's Filtered checkbox.
+        s_meshOvTex[mi] = 0;
+        if (m->ovVerts && m->ovTex && m->ovTexW > 0 && m->ovTexH > 0) {
+            glGenTextures(1, &s_meshOvTex[mi]);
+            glBindTexture(GL_TEXTURE_2D, s_meshOvTex[mi]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, m->texFiltered ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, m->texFiltered ? GL_LINEAR : GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->ovTexW, m->ovTexH, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, m->ovTex);
+        }
         // MAP GROUPS: one lightmap + one (strength-folded) AO per group.
         for (int g = 0; g < AFN_MESH_MAX_LMG; g++) { s_meshLmgLmTex[mi][g] = 0; s_meshLmgAoTex[mi][g] = 0; }
         for (int g = 0; g < m->lmgCount && g < AFN_MESH_MAX_LMG; g++) {
@@ -1226,6 +1240,31 @@ static void draw_mesh(int mi)
             glDisable(GL_TEXTURE_2D);
         }
         glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+    }
+
+    // Bitmask overlay pass (Paint2Blend): a second full vertex stream whose
+    // color carries the painted mask in alpha — the overlay texture (tiling
+    // through the stream's own UVs) alpha-blends over the base pass. Same
+    // half-step polygon-offset trick as the post passes below (depth EQUAL
+    // shimmers per-pixel on SGX).
+    if (m->ovVerts && s_meshOvTex[mi] && !m->blend) {
+        const AfnVertex* ov = m->ovVerts;
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, s_meshOvTex[mi]);
+        glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &ov->u);
+        glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &ov->color);
+        glVertexPointer (3, GL_FLOAT,        sizeof(AfnVertex), &ov->x);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        glPolygonOffset(0.0f, s_meshLmBias - 64.0f);
+        glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+        glPolygonOffset(0.0f, s_meshLmBias);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &v->u);
+        glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+        glVertexPointer (3, GL_FLOAT,        sizeof(AfnVertex), &v->x);
     }
 
     // Post passes. All share the half-step depth bias (instances sit 128
@@ -2281,6 +2320,12 @@ int afn_lock_zoom_in = 0;   // 0 = zoom OUT (pull back), 1 = zoom IN (pull close
 // Same-key lock release (Lock On node pin + auto-captured key, like afn_pause_key):
 // pressing the key that locked again releases the lock. Pin default 1 = on.
 int afn_lock_release_same = 1;
+// Lock On acquire gate (node pins): the target must be within Max Range AND
+// inside the facing cone to lock. 0 disables that check.
+int afn_lock_max_range = 70;   // world px (0 = unlimited)
+int afn_lock_cone = 60;        // facing half-cone, degrees (0 = any direction)
+float afn_player_yaw_deg = 0.0f;   // rig facing mirror (for the cone test; 1-frame lag is fine)
+int afn_lock_try(int idx);     // fwd — defined after the NPC state it reads
 unsigned afn_lock_key = 0;  // key bitmask captured from the press that fired Lock On
 int afn_lock_height = 8;    // raises the locked pitch aim (world px): camera rides
                             // higher and looks down a bit instead of dead level
@@ -4432,6 +4477,35 @@ static void afn_lockon_reticle_render(const float* view) {
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
     glDepthMask(GL_TRUE); glDisable(GL_BLEND); glEnable(GL_TEXTURE_2D);
 }
+#endif
+
+// Lock On acquire gate: candidate must be within afn_lock_max_range AND inside
+// the facing cone (both Lock On node pins; 0 disables a check). A failed
+// acquire KEEPS the current lock, so a press that fails to re-target never
+// silently drops an existing target (same-key release handles letting go).
+#if defined(AFN_HAS_PLAYER_RIG)
+int afn_lock_try(int idx) {
+    if (idx < 0) return idx;
+    int slot = -1;
+    for (int i = 0; i < AFN_NPC_COUNT; i++)
+        if ((int)afn_npc_inst[i][7] == idx) { slot = i; break; }
+    if (slot < 0) return idx;                    // not an NPC: no spatial gate
+    float dx = s_npcX[slot] - (float)player_x;
+    float dz = s_npcZ[slot] - (float)player_z;
+    float dist = sqrtf(dx*dx + dz*dz);
+    if (afn_lock_max_range > 0 && dist > (float)afn_lock_max_range) return afn_cam_lock_target;
+    if (afn_lock_cone > 0) {
+        float ang = atan2f(dx, dz) * (180.0f/3.14159265f);   // +sin/+cos forward convention
+        float dyaw = ang - afn_player_yaw_deg;
+        while (dyaw > 180.0f)  dyaw -= 360.0f;
+        while (dyaw < -180.0f) dyaw += 360.0f;
+        if (dyaw < 0.0f) dyaw = -dyaw;
+        if (dyaw > (float)afn_lock_cone) return afn_cam_lock_target;
+    }
+    return idx;
+}
+#else
+int afn_lock_try(int idx) { return idx; }        // no rig/NPC state: no spatial gate
 #endif
 
 // ============================================================================
@@ -8035,6 +8109,7 @@ int main(void)
 #ifdef AFN_HAS_PLAYER_RIG
         // Player rig + every NPC: each skinned from its own rig at its own
         // transform/clip (player follows the camera; NPCs at their world spots).
+        afn_player_yaw_deg = playerYaw;   // facing mirror for the Lock On cone gate
         rigs_render(view, playerX, playerY, playerZ, playerYaw, s_floorN);
 #endif
 

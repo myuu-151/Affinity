@@ -272,6 +272,23 @@ struct MeshAsset
                                          // Folded into the texture at upload (FFP color caps at 1).
                                          // Applies to every map group too.
 
+    // Bitmask overlay (Paint2Blend / OBJ 2.0 "#overlay" + "#bitmask"): a
+    // second TILING texture blended OVER the base by a painted mask. UV pair
+    // 2 = overlay tiling ("UV2"), UV pair 3 = mask UV ("Bitmask"); the mask
+    // PNG is sampled PER-VERTEX at import into maskW, so previews and the
+    // runtime just draw a second alpha-blended pass — no extra texture unit.
+    // Mutually exclusive with lightmap/AO on the same mesh (shared UV pairs).
+    bool hasOverlay = false;
+    bool ovManual = false;                   // user assigned/removed in-editor (persisted)
+    int ovUVSrc = 1, maskUVSrc = 2;          // UV pair each samples: 0=UV1 1=UV2 2=UV3
+    std::string overlayPath, bitmaskPath;    // as loaded (for panel warnings)
+    std::vector<uint32_t> overlayRGBA;       // 0xAABBGGRR (ovW * ovH)
+    int ovW = 0, ovH = 0;
+    unsigned int ovGlTex = 0;                // editor preview texture (LINEAR + REPEAT)
+    std::vector<uint8_t> bmPixels;           // bitmask grayscale (bmW*bmH) — kept so the
+    int bmW = 0, bmH = 0;                    // mask UV can be re-picked without the PNG
+    std::vector<float> maskW;                // per-vertex blend weight 0..1 (parallel to vertices)
+
     // MAP GROUPS (OBJ 2.0 v1.5): one OBJ can carry SEVERAL lightmap/AO pairs —
     // each "#lightmap"/"#aomap" after faces have been emitted starts a new
     // group, and the faces that follow belong to it. Used when the model was

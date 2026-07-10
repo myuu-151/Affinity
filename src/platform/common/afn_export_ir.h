@@ -237,6 +237,15 @@ struct AfnMeshExport
     std::vector<uint8_t> aoPixels;  // grayscale bytes (aoW * aoH)
     int aoW = 0, aoH = 0;
     float aoStrength = 1.0f;
+    // Bitmask overlay (Paint2Blend / Texture Blending panel) — PSV only: a
+    // second TILING texture blended over the base by a painted mask, sampled
+    // per-vertex in the editor (maskW). Emitted as a full second AfnVertex
+    // stream (uv = ovUVs, color alpha = mask weight). ovUVs carries whichever
+    // imported UV pair the editor's Overlay UV pick selected.
+    std::vector<uint32_t> overlayRGBA;  // 0xAABBGGRR (ovW * ovH); empty = no overlay
+    int ovW = 0, ovH = 0;
+    std::vector<float> ovUVs;           // u, v per vertex (flat); overlay tiling UV
+    std::vector<float> maskW;           // per-vertex blend weight 0..1
     // MAP GROUPS (OBJ 2.0 v1.5) — PSV only: 2+ lightmap/AO pairs in one mesh,
     // applied per face. Empty = single-slot fields above.
     struct MapGroupExp {

@@ -1657,10 +1657,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int lkSide = a->paramInt[1] > 0 ? a->paramInt[1] : 32;
                 int lkHeight = a->paramInt[3] > 0 ? a->paramInt[3] : 32;   // editor units (->/4 world px)
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                // Acquire gate pins: target must be close AND roughly faced to lock.
+                auto* rgD = findDataIn(a->id, 2); auto* cnD = findDataIn(a->id, 3);
+                f << "    afn_lock_max_range = " << (rgD?resolveInt(rgD):70)
+                  << "; afn_lock_cone = " << (cnD?resolveInt(cnD):60) << ";\n";
                 if (tgt && tgt->type != AfnScriptNodeType::AttachedSprite)
-                    f << "    afn_cam_lock_target = " << resolveInt(tgt) << ";\n";
+                    f << "    afn_cam_lock_target = afn_lock_try(" << resolveInt(tgt) << ");\n";
                 else if (curScript != &script || (tgt && tgt->type == AfnScriptNodeType::AttachedSprite))
-                    f << "    if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;\n";
+                    f << "    if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_lock_try(afn_bp_cur_spr_idx);\n";
                 else
                     f << "    afn_cam_lock_target = -1;\n";   // scene script, no target wired
                 f << "    afn_lock_zoom = " << lkZoom << ";\n";

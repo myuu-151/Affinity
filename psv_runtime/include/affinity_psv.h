@@ -109,6 +109,14 @@ typedef struct {
     // Editor "Filtered" checkbox: 1 = sample the diffuse with GL_LINEAR
     // (smooth), 0 = GL_NEAREST (crisp pixels). Applied at upload_textures().
     int                          texFiltered;
+    // Bitmask overlay (Paint2Blend, OBJ 2.0 #overlay/#bitmask): a second
+    // TILING texture blended over the base by a painted mask. ovVerts is a
+    // full second vertex stream (uv = overlay tiling UV, color = white with
+    // the per-vertex mask weight in alpha), drawn alpha-blended at depth
+    // EQUAL right after the base pass. 0 = no overlay.
+    const AfnVertex*             ovVerts;     // [vertCount]
+    const unsigned int*          ovTex;       // RGBA8888 (0xAABBGGRR)
+    int                          ovTexW, ovTexH;
 } AfnMesh;
 
 // A static scene light (OBJ 2.0 "#light"/"#sun" lines, exporter-placed in world

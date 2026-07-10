@@ -1283,7 +1283,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Turn Player",     0xFF6644AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
     { "Cast Effect",     0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
     { "Attached Sprite", 0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
-    { "Lock On",         0xFF3355AA, 1, 1, 2, 0, {"Target (obj)","Same-Key Release (int)"}, {}, {} },
+    { "Lock On",         0xFF3355AA, 1, 1, 4, 0, {"Target (obj)","Same-Key Release (int)","Max Range (int)","Cone Deg (int)"}, {}, {} },
     { "Release Lock On", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Lock Strafe",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Is Locked On",    0xFF885533, 1, 1, 0, 0, {}, {}, {} },
@@ -1647,7 +1647,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
     case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
     case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
-    case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On — or, with Same-Key Release (default 1), until the key that locked is pressed again (the key is auto-captured from the On Key Pressed driving this node; 0 = only Release Lock On unlocks). Node-body settings: Zoom % = P0; Side Offset and Height are their own ints; P2 is a bitfield (bit0 = Zoom In/Out direction, bit1 = No Look-Down) — use bpVsSetBit to flip one without disturbing the other."; break;
+    case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. ACQUIRE GATE: the target must be within Max Range (world px, default 70; 0 = unlimited) AND inside the facing Cone Deg half-angle (default 60; 0 = any direction) or the press does nothing (an existing lock is kept). Stays locked until Release Lock On — or, with Same-Key Release (default 1), until the key that locked is pressed again (the key is auto-captured from the On Key Pressed driving this node; 0 = only Release Lock On unlocks). Node-body settings: Zoom % = P0; Side Offset and Height are their own ints; P2 is a bitfield (bit0 = Zoom In/Out direction, bit1 = No Look-Down) — use bpVsSetBit to flip one without disturbing the other."; break;
     case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
     case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
     case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
@@ -7288,6 +7288,79 @@ static unsigned int UploadLinearTex(unsigned int oldTex, const uint8_t* rgba, in
     return tex;
 }
 
+// ---- Texture Blending (bitmask overlay, Paint2Blend) ----------------------
+// Resample the per-vertex overlay blend weights from the kept bitmask pixels
+// through the selected UV pair (0=UV1 1=UV2 2=UV3), with the same top-origin
+// V flip the draw passes use. hasOverlay = both halves assigned.
+static void SampleMeshOverlayMask(MeshAsset& out)
+{
+    out.maskW.clear();
+    if (!out.bmPixels.empty() && out.bmW > 0 && out.bmH > 0) {
+        out.maskW.resize(out.vertices.size(), 0.0f);
+        for (size_t vi = 0; vi < out.vertices.size(); vi++) {
+            const MeshVertex& mv = out.vertices[vi];
+            float u  = out.maskUVSrc == 0 ? mv.u : out.maskUVSrc == 1 ? mv.u2 : mv.u3;
+            float vv = out.maskUVSrc == 0 ? mv.v : out.maskUVSrc == 1 ? mv.v2 : mv.v3;
+            u -= floorf(u); vv -= floorf(vv);
+            int px = (int)(u * (out.bmW - 1) + 0.5f);
+            int py = (int)((1.0f - vv) * (out.bmH - 1) + 0.5f);
+            if (px < 0) px = 0; if (px >= out.bmW) px = out.bmW - 1;
+            if (py < 0) py = 0; if (py >= out.bmH) py = out.bmH - 1;
+            out.maskW[vi] = out.bmPixels[(size_t)py * out.bmW + px] / 255.0f;
+        }
+    }
+    out.hasOverlay = out.ovGlTex != 0 && !out.overlayRGBA.empty() && !out.maskW.empty();
+}
+
+// Overlay texture PNG (tiles through the selected UV pair — REPEAT wrap).
+static bool LoadMeshOverlayTex(MeshAsset& out, const std::string& path)
+{
+    int w = 0, h = 0, ch = 0;
+    unsigned char* img = nullptr;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty())
+        img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
+    else
+        img = stbi_load(ResolveAssetPath(path).c_str(), &w, &h, &ch, 4);
+    if (!img) return false;
+    out.overlayRGBA.assign((uint32_t*)img, (uint32_t*)img + (size_t)w * h);
+    out.ovW = w; out.ovH = h;
+    out.overlayPath = path;
+    if (out.ovGlTex) glDeleteTextures(1, &out.ovGlTex);
+    glGenTextures(1, &out.ovGlTex);
+    glBindTexture(GL_TEXTURE_2D, out.ovGlTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    stbi_image_free(img);
+    SampleMeshOverlayMask(out);
+    return true;
+}
+
+// Bitmask PNG (red channel; white = overlay). Pixels are kept on the asset so
+// switching the mask UV pair resamples without re-reading the file.
+static bool LoadMeshBitmask(MeshAsset& out, const std::string& path)
+{
+    int w = 0, h = 0, ch = 0;
+    unsigned char* img = nullptr;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty())
+        img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
+    else
+        img = stbi_load(ResolveAssetPath(path).c_str(), &w, &h, &ch, 4);
+    if (!img) return false;
+    out.bmPixels.resize((size_t)w * h);
+    for (size_t i = 0; i < (size_t)w * h; i++) out.bmPixels[i] = img[i * 4];
+    out.bmW = w; out.bmH = h;
+    out.bitmaskPath = path;
+    stbi_image_free(img);
+    SampleMeshOverlayMask(out);
+    return true;
+}
+
 // Grayscale AO -> aoStrength-folded RGBA GL texture: effective =
 // clamp(1 - k + k*ao). k=1 leaves the bake as-is, <1 fades toward off, >1
 // multiplies DARKER. Folded here because fixed-function color clamps at 1,
@@ -7445,6 +7518,9 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     std::vector<MeshAsset::MeshLight> objLights;
     float objAmbient[3] = { 0.05f, 0.05f, 0.05f };
     bool hasAmbient = false;
+    // Bitmask overlay (Paint2Blend): "#overlay <png>" tiling texture (UV pair
+    // 2) blended over the base by the "#bitmask <png>" mask (UV pair 3).
+    std::string overlayRel, bitmaskRel;
 
     char line[512];
     while (fgets(line, sizeof(line), f))
@@ -7472,6 +7548,14 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                     if (mgroups.empty() || grpHasFaces) { mgroups.push_back(MGrp()); grpHasFaces = false; }
                     mgroups.back().ao = ap;
                 }
+            }
+            else if (strncmp(line, "#overlay", 8) == 0) {
+                char op[512] = {};
+                if (sscanf(line + 8, " %511[^\r\n]", op) == 1) overlayRel = op;
+            }
+            else if (strncmp(line, "#bitmask", 8) == 0) {
+                char bp[512] = {};
+                if (sscanf(line + 8, " %511[^\r\n]", bp) == 1) bitmaskRel = bp;
             }
             continue;
         }
@@ -7672,6 +7756,29 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         std::string aoPath = resolveRel(aoMapRel);
         if (!LoadMeshAOMap(out, aoPath) && !LoadMeshAOMap(out, aoMapRel))
             out.aoMapPath = aoPath;      // keep for the "PNG missing" panel warning
+    }
+
+    // Bitmask overlay (Paint2Blend, "#overlay" + "#bitmask"): overlay texture
+    // tiles through UV pair 2, mask samples PER-VERTEX through pair 3 (the
+    // OBJ convention) — both re-assignable afterwards in the Texture Blending
+    // panel, which persists via meshOv= like the manual lightmap path.
+    out.hasOverlay = false;
+    out.overlayPath.clear(); out.bitmaskPath.clear();
+    out.overlayRGBA.clear(); out.ovW = out.ovH = 0;
+    out.bmPixels.clear(); out.bmW = out.bmH = 0;
+    out.maskW.clear();
+    // When the OBJ also carries a #lightmap, pair 2 IS the lightmap UV (only
+    // 3 pairs fit the format) and the overlay tiles through UV1 instead.
+    out.ovUVSrc = lightmapRel.empty() ? 1 : 0;
+    out.maskUVSrc = 2;
+    if (out.ovGlTex) { glDeleteTextures(1, &out.ovGlTex); out.ovGlTex = 0; }
+    if (!overlayRel.empty() && !bitmaskRel.empty() && anyUV2 && anyUV3) {
+        std::string ovPath = resolveRel(overlayRel);
+        if (!LoadMeshOverlayTex(out, ovPath) && !LoadMeshOverlayTex(out, overlayRel))
+            out.overlayPath = ovPath;    // keep for the "PNG missing" panel warning
+        std::string bmPath = resolveRel(bitmaskRel);
+        if (!LoadMeshBitmask(out, bmPath) && !LoadMeshBitmask(out, bitmaskRel))
+            out.bitmaskPath = bmPath;
     }
 
     // MAP GROUPS (2+): per-face lightmap/AO pairs from one OBJ.
@@ -8605,6 +8712,13 @@ static bool SaveProject(const std::string& path)
                                              ? ma.aoMapPath.c_str() : "(none)");
         if (ma.aoStrength != 1.0f)
             fprintf(f, "meshAoStrength=%.3f\n", ma.aoStrength);
+        // Texture Blending (bitmask overlay): manual assigns + UV pair picks
+        // (overrides the OBJ's #overlay/#bitmask on load, like meshLmTex=).
+        if (ma.ovManual || ma.ovUVSrc != 1 || ma.maskUVSrc != 2)
+            fprintf(f, "meshOv=%s|%s|%d|%d\n",
+                    (!ma.overlayRGBA.empty() && !ma.overlayPath.empty()) ? ma.overlayPath.c_str() : "(none)",
+                    (!ma.bmPixels.empty() && !ma.bitmaskPath.empty()) ? ma.bitmaskPath.c_str() : "(none)",
+                    ma.ovUVSrc, ma.maskUVSrc);
         // User deleted imported lights in-editor: persist the SURVIVORS and
         // replace the re-parsed OBJ rig with them on load.
         if (ma.lightsEdited) {
@@ -10121,6 +10235,32 @@ static bool LoadProject(const std::string& path)
                     RebuildMeshAOTex(sMeshAssets.back());   // texture was built at strength 1
                     continue;
                 } }
+              // Texture Blending (bitmask overlay): manual assigns/removes +
+              // UV pair picks — overrides the OBJ's #overlay/#bitmask.
+              if (strncmp(line, "meshOv=", 7) == 0 && !sMeshAssets.empty()) {
+                  MeshAsset& ovm = sMeshAssets.back();
+                  char op[512] = {}, bp[512] = {}; int ou = 1, mu = 2;
+                  if (sscanf(line + 7, "%511[^|]|%511[^|]|%d|%d", op, bp, &ou, &mu) == 4) {
+                      ovm.ovManual = true;
+                      ovm.ovUVSrc   = ou < 0 ? 0 : ou > 2 ? 2 : ou;
+                      ovm.maskUVSrc = mu < 0 ? 0 : mu > 2 ? 2 : mu;
+                      if (strcmp(op, "(none)") == 0 || !op[0]) {
+                          ovm.overlayRGBA.clear(); ovm.ovW = ovm.ovH = 0;
+                          ovm.overlayPath.clear();
+                          if (ovm.ovGlTex) { glDeleteTextures(1, &ovm.ovGlTex); ovm.ovGlTex = 0; }
+                      } else {
+                          LoadMeshOverlayTex(ovm, std::string(op));
+                      }
+                      if (strcmp(bp, "(none)") == 0 || !bp[0]) {
+                          ovm.bmPixels.clear(); ovm.bmW = ovm.bmH = 0;
+                          ovm.bitmaskPath.clear();
+                      } else {
+                          LoadMeshBitmask(ovm, std::string(bp));
+                      }
+                      SampleMeshOverlayMask(ovm);   // UV picks may differ from load-time defaults
+                  }
+                  continue;
+              }
               // Manual lightmap assign/remove — overrides the OBJ's #lightmap.
               if (strncmp(line, "meshLmTex=", 10) == 0 && !sMeshAssets.empty()) {
                   MeshAsset& lmm = sMeshAssets.back();
@@ -14792,6 +14932,100 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                         "below fades it out, above darkens it further.\n"
                         "Live in the viewport and identical on PSV.");
                 }
+            }
+        }
+        // Texture Blending (Paint2Blend bitmask overlay): a second TILING
+        // texture modulated over the base by a painted bitmask, each half
+        // sampled through a selectable imported UV pair. Auto-loads from the
+        // OBJ's #overlay/#bitmask lines; assignable/replaceable here.
+        {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Texture Blending");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Blend a second tiling texture over the base through a painted\n"
+                "bitmask (white = overlay, black = base). Paint the mask with the\n"
+                "Paint2Blend Blender addon or assign any grayscale PNG. The mask\n"
+                "is sampled per-vertex, so denser meshes blend smoother.");
+            if (!ma.overlayRGBA.empty())
+                ImGui::Text("Overlay: %dx%d (%s)", ma.ovW, ma.ovH, ma.overlayPath.c_str());
+            else if (!ma.overlayPath.empty())
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Overlay PNG missing: %s", ma.overlayPath.c_str());
+            else
+                ImGui::TextDisabled("Overlay: none");
+            if (ImGui::Button("Import Overlay##meshOvBtn"))
+            {
+                std::string op = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                if (!op.empty() && LoadMeshOverlayTex(ma, op)) {
+                    ma.ovManual = true;
+                    sProjectDirty = true; s3DRenderNeeded = true;
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "The texture blended IN where the bitmask is white (e.g. dirt\n"
+                "over grass). Tiles through the UV pair picked below.");
+            if (!ma.overlayRGBA.empty())
+            {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Remove##meshOvRm"))
+                {
+                    ma.overlayRGBA.clear(); ma.ovW = ma.ovH = 0;
+                    ma.overlayPath.clear();
+                    if (ma.ovGlTex) { glDeleteTextures(1, &ma.ovGlTex); ma.ovGlTex = 0; }
+                    SampleMeshOverlayMask(ma);
+                    ma.ovManual = true;   // persists: OBJ's #overlay stays off after reload
+                    sProjectDirty = true; s3DRenderNeeded = true;
+                }
+            }
+            if (!ma.bmPixels.empty())
+                ImGui::Text("Bitmask: %dx%d (%s)", ma.bmW, ma.bmH, ma.bitmaskPath.c_str());
+            else if (!ma.bitmaskPath.empty())
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Bitmask PNG missing: %s", ma.bitmaskPath.c_str());
+            else
+                ImGui::TextDisabled("Bitmask: none");
+            if (ImGui::Button("Import Bitmask##meshBmBtn"))
+            {
+                std::string bp = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                if (!bp.empty() && LoadMeshBitmask(ma, bp)) {
+                    ma.ovManual = true;
+                    sProjectDirty = true; s3DRenderNeeded = true;
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Grayscale blend mask (red channel): white = overlay shows,\n"
+                "black = base shows. Sampled per-vertex through the UV pair\n"
+                "picked below.");
+            if (!ma.bmPixels.empty())
+            {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Remove##meshBmRm"))
+                {
+                    ma.bmPixels.clear(); ma.bmW = ma.bmH = 0;
+                    ma.bitmaskPath.clear();
+                    SampleMeshOverlayMask(ma);
+                    ma.ovManual = true;
+                    sProjectDirty = true; s3DRenderNeeded = true;
+                }
+            }
+            if (!ma.overlayRGBA.empty() || !ma.bmPixels.empty())
+            {
+                ImGui::SetNextItemWidth(Scaled(110));
+                if (ImGui::Combo("Overlay UV##meshOvUV", &ma.ovUVSrc, "UV1\0UV2\0UV3\0"))
+                    { ma.ovManual = true; sProjectDirty = true; s3DRenderNeeded = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Which imported UV pair the overlay texture tiles through.\n"
+                    "OBJ 2.0 bitmask exports author it on pair 2 (UV2).");
+                ImGui::SetNextItemWidth(Scaled(110));
+                if (ImGui::Combo("Bitmask UV##meshBmUV", &ma.maskUVSrc, "UV1\0UV2\0UV3\0"))
+                    { SampleMeshOverlayMask(ma); ma.ovManual = true; sProjectDirty = true; s3DRenderNeeded = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "Which imported UV pair the bitmask samples through.\n"
+                    "OBJ 2.0 bitmask exports author it on pair 3 (Bitmask layer).");
+                if ((ma.ovUVSrc == 1 || ma.maskUVSrc == 1) && !ma.hasUV2)
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "(this OBJ carries no UV2 — those coords are 0)");
+                if ((ma.ovUVSrc == 2 || ma.maskUVSrc == 2) && !ma.hasUV3)
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "(this OBJ carries no UV3 — those coords are 0)");
+                if (!ma.hasOverlay)
+                    ImGui::TextDisabled("(assign BOTH an overlay and a bitmask to blend)");
             }
         }
         // Multi-material slots (from the OBJ's usemtl groups). Each slot binds its
@@ -20920,6 +21154,17 @@ void FrameTick(float dt)
                         me.aoW = ma.aoW; me.aoH = ma.aoH;
                     }
                     me.aoStrength = ma.aoStrength;
+                    // Bitmask overlay (Texture Blending): overlay texture +
+                    // the per-vertex mask weights; ovUVs picks up whichever
+                    // UV pair the panel's Overlay UV combo selected (pushed
+                    // in the vertex loop below).
+                    bool hasOverlay = ma.hasOverlay && !ma.overlayRGBA.empty()
+                                   && ma.maskW.size() == ma.vertices.size();
+                    if (hasOverlay) {
+                        me.overlayRGBA = ma.overlayRGBA;
+                        me.ovW = ma.ovW; me.ovH = ma.ovH;
+                        me.maskW = ma.maskW;
+                    }
                     if (multiMaps) {
                         for (const auto& g : ma.mapGroups) {
                             AfnMeshExport::MapGroupExp ge;
@@ -20942,6 +21187,10 @@ void FrameTick(float dt)
                         me.uvs.push_back(v.u);
                         me.uvs.push_back(v.v);
                         if (ma.hasLightmap || multiMaps) { me.uvs2.push_back(v.u2); me.uvs2.push_back(v.v2); }
+                        if (hasOverlay) {
+                            me.ovUVs.push_back(ma.ovUVSrc == 0 ? v.u : ma.ovUVSrc == 1 ? v.u2 : v.u3);
+                            me.ovUVs.push_back(ma.ovUVSrc == 0 ? v.v : ma.ovUVSrc == 1 ? v.v2 : v.v3);
+                        }
                         if (ma.hasAOMap || (multiMaps && ma.hasUV3)) { me.uvs3.push_back(v.u3); me.uvs3.push_back(v.v3); }
                         if (addLights) {
                             float lr, lg, lb;
@@ -25941,7 +26190,7 @@ void FrameTick(float dt)
                 case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
-                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On — or press the locking key again (Same-Key Release pin, default on)."; break;
+                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Acquire gate: target must be within Max Range and inside the facing Cone Deg (defaults 70 / 60; 0 disables a check). Stays locked until Release Lock On — or press the locking key again (Same-Key Release pin, default on)."; break;
                 case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
                 case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
                 case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
@@ -27220,7 +27469,8 @@ void FrameTick(float dt)
                     int lkHeight = infoNode.paramInt[3] > 0 ? infoNode.paramInt[3] : 32;
                     snprintf(lcBuf, sizeof(lcBuf),
                         "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
-                        "    afn_cam_lock_target = %s;\n"
+                        "    afn_lock_max_range = %s; afn_lock_cone = %s;   // acquire gate: close + faced\n"
+                        "    afn_cam_lock_target = afn_lock_try(%s);       // fails -> keeps the current lock\n"
                         "    afn_lock_zoom = %d; afn_lock_side = %d; afn_lock_zoom_in = %d;\n"
                         "    afn_lock_height = %d; afn_lock_no_lookdown = %d;\n"
                         "    afn_lock_release_same = %s;\n"
@@ -27237,6 +27487,8 @@ void FrameTick(float dt)
                         "    // Gate with Is In View. Until Release Lock On — or, with Same-Key\n"
                         "    // Release, pressing afn_lock_key again (s_lockPrev latch skips the\n"
                         "    // very press that locked).",
+                        fmtInt(infoNode.id, 2, "70"),
+                        fmtInt(infoNode.id, 3, "60"),
                         fmtInt(infoNode.id, 0, "<target>"),
                         lkZoom, lkSide / 4, infoNode.paramInt[2] & 1, lkHeight / 4,
                         (infoNode.paramInt[2] >> 1) & 1,
@@ -39868,6 +40120,53 @@ void RenderScenePreviewGL()
             if (!ma.quadIndices.empty())
                 glDrawElements(GL_QUADS, (GLsizei)ma.quadIndices.size(), GL_UNSIGNED_INT, ma.quadIndices.data());
 
+            // Bitmask overlay pass (Paint2Blend): overlay tiles through UV2,
+            // alpha-blended over the base by the per-vertex mask weight. The
+            // texture matrix V-flip is still active, so raw u2/v2 land right.
+            if (ma.hasOverlay && ma.ovGlTex && ma.maskW.size() == ma.vertices.size())
+            {
+                if (vcol) glDisableClientState(GL_COLOR_ARRAY);
+                glDisable(GL_ALPHA_TEST);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, ma.ovGlTex);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthFunc(GL_EQUAL);
+                glDepthMask(GL_FALSE);
+                auto ovUV = [&](const MeshVertex& mv) {   // selectable pair; texture matrix flips V
+                    if (ma.ovUVSrc == 0)      glTexCoord2f(mv.u,  mv.v);
+                    else if (ma.ovUVSrc == 1) glTexCoord2f(mv.u2, mv.v2);
+                    else                      glTexCoord2f(mv.u3, mv.v3);
+                };
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti < ma.indices.size(); ti++) {
+                    uint32_t ix = ma.indices[ti];
+                    const MeshVertex& v = ma.vertices[ix];
+                    glColor4f(1.0f, 1.0f, 1.0f, ma.maskW[ix]);
+                    ovUV(v);
+                    glVertex3f(v.px, v.py, v.pz);
+                }
+                for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4) {
+                    const uint32_t qx[6] = {
+                        ma.quadIndices[qi],   ma.quadIndices[qi+1], ma.quadIndices[qi+2],
+                        ma.quadIndices[qi],   ma.quadIndices[qi+2], ma.quadIndices[qi+3] };
+                    for (int k = 0; k < 6; k++) {
+                        const MeshVertex& v = ma.vertices[qx[k]];
+                        glColor4f(1.0f, 1.0f, 1.0f, ma.maskW[qx[k]]);
+                        ovUV(v);
+                        glVertex3f(v.px, v.py, v.pz);
+                    }
+                }
+                glEnd();
+                glColor4f(1, 1, 1, 1);
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LEQUAL);
+                glDisable(GL_BLEND);
+                if (vcol) glEnableClientState(GL_COLOR_ARRAY);
+                if (tex) glBindTexture(GL_TEXTURE_2D, ma.glTexID);
+                else glDisable(GL_TEXTURE_2D);
+            }
+
             // Lightmap / AO multiply passes — the same DST_COLOR×ZERO passes the
             // Meshes tab and the PSV runtime draw (depth EQUAL over the base pass,
             // so alpha-cutout texels auto-skip). The texture matrix V-flip is still
@@ -40766,6 +41065,53 @@ void Render3DViewport()
                 glEnd();
             }
             }   // end single-material draw branch
+
+            // Bitmask overlay pass (Paint2Blend): the overlay texture tiles
+            // through UV2 and is alpha-blended over the base by the painted
+            // mask, sampled per-vertex at import (maskW). Depth EQUAL over
+            // the base pass — the exact pass the PSV runtime draws.
+            if (ma.hasOverlay && ma.ovGlTex && !wf
+                && ma.maskW.size() == ma.vertices.size())
+            {
+                glDisable(GL_LIGHTING);
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, ma.ovGlTex);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthFunc(GL_EQUAL);
+                glDepthMask(GL_FALSE);
+                auto ovUV = [&](const MeshVertex& mv) {   // selectable overlay UV pair
+                    if (ma.ovUVSrc == 0)      glTexCoord2f(mv.u,  1.0f - mv.v);
+                    else if (ma.ovUVSrc == 1) glTexCoord2f(mv.u2, 1.0f - mv.v2);
+                    else                      glTexCoord2f(mv.u3, 1.0f - mv.v3);
+                };
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti < ma.indices.size(); ti++) {
+                    uint32_t ix = ma.indices[ti];
+                    const MeshVertex& v = ma.vertices[ix];
+                    glColor4f(1.0f, 1.0f, 1.0f, ma.maskW[ix]);
+                    ovUV(v);
+                    glVertex3f(v.px, v.py, v.pz);
+                }
+                for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4) {
+                    const uint32_t qx[6] = {
+                        ma.quadIndices[qi],   ma.quadIndices[qi+1], ma.quadIndices[qi+2],
+                        ma.quadIndices[qi],   ma.quadIndices[qi+2], ma.quadIndices[qi+3] };
+                    for (int k = 0; k < 6; k++) {
+                        const MeshVertex& v = ma.vertices[qx[k]];
+                        glColor4f(1.0f, 1.0f, 1.0f, ma.maskW[qx[k]]);
+                        ovUV(v);
+                        glVertex3f(v.px, v.py, v.pz);
+                    }
+                }
+                glEnd();
+                glColor4f(1, 1, 1, 1);
+                glDepthMask(GL_TRUE);
+                glDepthFunc(GL_LESS);
+                glDisable(GL_BLEND);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDisable(GL_TEXTURE_2D);
+            }
 
             // Lightmap second pass: multiply the framebuffer by the lightmap
             // sampled through UV2 — the same DST_COLOR×ZERO pass the PSV

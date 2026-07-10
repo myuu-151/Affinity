@@ -317,6 +317,33 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             }
             f << "\n};\n";
         }
+        // Bitmask overlay (Texture Blending panel / OBJ 2.0 #overlay+#bitmask)
+        // — PSV only: overlay texture + a full second AfnVertex stream. uv =
+        // overlay tiling UV (ovUVs, V-flipped like the base), color = white
+        // with the per-vertex mask weight in alpha — the runtime alpha-blends
+        // this stream over the base pass.
+        bool hasOv = isPsv && !m.overlayRGBA.empty() && m.ovW > 0 && m.ovH > 0
+                  && (int)m.maskW.size() == vc && (int)m.ovUVs.size() == vc * 2;
+        if (hasOv) {
+            int n = m.ovW * m.ovH;
+            f << "static const unsigned int __attribute__((aligned(16))) afn_mesh" << mi << "_ovtex[" << n << "] = {";
+            for (int p = 0; p < n; p++) {
+                if (p % 8 == 0) f << "\n  ";
+                f << "0x" << std::hex << m.overlayRGBA[p] << std::dec << "u,";
+            }
+            f << "\n};\n";
+            f << "static const AfnVertex afn_mesh" << mi << "_ovv[" << vc << "] = {\n";
+            for (int v = 0; v < vc; v++) {
+                float w = m.maskW[v];
+                if (w < 0.0f) w = 0.0f; if (w > 1.0f) w = 1.0f;
+                unsigned int col = ((unsigned int)(w * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+                f << "  {" << Flt(m.ovUVs[v*2+0]) << "," << Flt(1.0f - m.ovUVs[v*2+1])
+                  << ",0x" << std::hex << col << std::dec << "u,"
+                  << Flt(WL(m.positions[v*3+0])) << "," << Flt(WL(m.positions[v*3+1])) << "," << Flt(WL(m.positions[v*3+2])) << "},\n";
+            }
+            f << "};\n";
+        }
+
         // Multi-material (PSV): per-slot index buffers + per-slot textures + parallel
         // tables, drawn group-by-group like the rigged path.
         int mats = isPsv ? (int)m.materials.size() : 0;
@@ -430,10 +457,17 @@ static bool GenerateSharedMapData(const std::string& runtimeDir,
             }
             f << ", " << (m.collision ? 1 : 0);   // per-mesh collision toggle (PSV only)
             f << ", " << (m.texFiltered ? 1 : 0);  // Filtered checkbox -> GL_LINEAR sampling (PSV/Switch only)
+            // Bitmask overlay (Texture Blending): second vertex stream + texture.
+            bool hasOv2 = !m.overlayRGBA.empty() && m.ovW > 0 && m.ovH > 0
+                       && (int)m.maskW.size() == vc && (int)m.ovUVs.size() == vc * 2;
+            if (hasOv2)
+                f << ", afn_mesh" << mi << "_ovv, afn_mesh" << mi << "_ovtex, " << m.ovW << ", " << m.ovH;
+            else
+                f << ", 0, 0, 0, 0";
         }
         f << " },\n";
     }
-    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0" : "") << " },\n";
+    if (meshes.empty()) f << "  { 0,0,0,0,0,0,0,0,0,2,0,0,0" << (isPsv ? ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0" : "") << " },\n";
     f << "};\n\n";
 
     // ---- mesh instances (sprites that carry a mesh) ----
