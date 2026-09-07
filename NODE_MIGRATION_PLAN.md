@@ -83,6 +83,14 @@ Reuse existing for the rest: `OnDeath`, `ShowHUD`/`HideHUD`, `CursorUp`/`CursorD
 - ✅ **Enemy KO cinematic — PORTED + verified on hardware.** New nodes OrbitCameraOnObject + HoldSkelClip; implemented the previously-stubbed PSV nodes **Is HP Zero** and **Do Once** (codegen + gate registration); wired the graph into the `enemy` BP directly in the .afnproj; stripped the hardcoded `s_koActive` camera. Enemy HP seeded at boot (BP runs in all scenes, so Is HP Zero would fire in menus otherwise).
 - ✅ KO re-fires every battle: swapped `Do Once` → `On Rise` (re-arms when HP refills).
 - ✅ **Player death cinematic — PORTED + verified.** New gate `Is Health Zero` (afn_health<=0); extended Hold Skel Clip to the player rig (`s_playerClipHold`, AFN_PLAYER_SPRITE_IDX path); wired into ch_controller (On Update→Is Health Zero→On Rise→Hold Skel Clip(self,die)+Orbit Cam On Obj(self)); stripped hardcoded `s_pkoActive` camera.
+- ✅ **Water foam — node-driven (hardcode kept as default).** New config nodes
+  **Water Surface** (mesh pick via Object pin [-1 = off, unwired = auto-detect],
+  RGBA surface tint, Foam/Ripples/Glints toggles → `afn_wf_obj/r/g/b/a/foam/ripples/glints`)
+  and **Water Splash** (Splash toggle, Drops, Power %, Ring Life, Swim Foam,
+  Swim Period → `afn_wf_splash/drops/drop_pow/ring_life/swim/swim_period`).
+  Per user request the `// HARDCODED water foam` auto-detect + defaults were NOT
+  stripped — the nodes layer on top (no node = exact old behavior). Changing
+  `afn_wf_obj` re-runs `wf_init` next frame.
 - ⬜ Results menu (win/lose → fade-in menu → cursor → restart/title) + FadeInHudElement node; strip hardcoded results_tick.
 - ⬜ M2 beam clash · ⬜ M3 enemy AI · ⬜ M4 projectile/HUD
 

@@ -663,6 +663,8 @@ enum class AfnScriptNodeType : int {
     AimBall,         // action (On Key Held): aim the pokeball throw
     PhysicalClash,   // action (config): arm the dash-vs-dash QTE struggle
     LockReticle,     // action (config): draw the lock-on ring under the locked target
+    WaterSurface,    // action (config): the water surface material (mesh pick + tint + foam/ripples/glints)
+    WaterSplash,     // action (config): water surface-cross splash detection (rings + droplets + swim foam)
     COUNT
 };
 

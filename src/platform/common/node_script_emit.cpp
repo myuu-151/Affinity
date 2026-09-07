@@ -1242,6 +1242,30 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_lret_spin = " << (d4?resolveInt(d4):100) << "; afn_lret_pulse = " << (d5?resolveInt(d5):100) << ";\n";
                 break;
             }
+            case AfnScriptNodeType::WaterSurface: {
+                // Water surface material config (layers over the hardcoded water foam) —
+                // defaults = the auto-detected light-blue pond. Object unwired = -2 keeps
+                // the boot auto-detect; wiring -1 turns the surface render off.
+                auto* d0=findDataIn(a->id,0);  auto* d1=findDataIn(a->id,1);  auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3);  auto* d4=findDataIn(a->id,4);  auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6);  auto* d7=findDataIn(a->id,7);
+                f << "    afn_wf_obj = " << (d0?resolveInt(d0):-2) << ";   // -2 = auto-detect, -1 = off\n";
+                f << "    afn_wf_r = " << (d1?resolveInt(d1):115) << "; afn_wf_g = " << (d2?resolveInt(d2):190)
+                  << "; afn_wf_b = " << (d3?resolveInt(d3):230) << "; afn_wf_a = " << (d4?resolveInt(d4):140) << ";\n";
+                f << "    afn_wf_foam = " << (d5?resolveInt(d5):1) << "; afn_wf_ripples = " << (d6?resolveInt(d6):1)
+                  << "; afn_wf_glints = " << (d7?resolveInt(d7):1) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::WaterSplash: {
+                // Water splash detection config — defaults = the hardcoded splash feel.
+                auto* d0=findDataIn(a->id,0);  auto* d1=findDataIn(a->id,1);  auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3);  auto* d4=findDataIn(a->id,4);  auto* d5=findDataIn(a->id,5);
+                f << "    afn_wf_splash = " << (d0?resolveInt(d0):1) << "; afn_wf_drops = " << (d1?resolveInt(d1):10)
+                  << "; afn_wf_drop_pow = " << (d2?resolveInt(d2):100) << ";\n";
+                f << "    afn_wf_ring_life = " << (d3?resolveInt(d3):34) << "; afn_wf_swim = " << (d4?resolveInt(d4):1)
+                  << "; afn_wf_swim_period = " << (d5?resolveInt(d5):26) << ";\n";
+                break;
+            }
             case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
             case AfnScriptNodeType::AiFireBeam: {
                 auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1);   // Charged / Tap SFX (5 / 6)

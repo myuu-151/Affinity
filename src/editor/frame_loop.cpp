@@ -962,6 +962,8 @@ enum class VsNodeType : int {
     AimBall,         // action (drive from On Key HELD): aim the pokeball throw (arc + reticle; L-stick steers)
     PhysicalClash,   // action (config, wire On Start): arm the dash-vs-dash QTE struggle (prompts + pressure meter)
     LockReticle,     // action (config, wire On Start): draw the pulsing lock-on ring under the locked target
+    WaterSurface,    // action (config, wire On Start): the water surface material (mesh pick + tint + foam/ripples/glints)
+    WaterSplash,     // action (config, wire On Start): water surface-cross splash detection (rings + droplet bursts + swim foam)
     COUNT
 };
 
@@ -1389,6 +1391,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Aim Ball",         0xFF7744CC, 1, 1, 8, 0, {"Dist Min (int)","Dist Max (int)","Dist Default (int)","Turn Rate x10 (int)","Dist Rate x10 (int)","Arc % (int)","Freeze Aim (int)","Aim Clip (int)"}, {}, {} },
     { "Physical Clash",   0xFFCC5533, 1, 1, 10, 0, {"Meet Radius (int)","Push x1000 (int)","Miss x1000 (int)","Ai Push x1000 (int)","Enemy Dmg (int)","Player Dmg (int)","Cooldown (int)","Window (int)","Ai Wait (int)","Knockback (int)"}, {}, {} },
     { "Lock Reticle",     0xFF2090D0, 1, 1, 6, 0, {"Size % (int)","Red (int)","Green (int)","Blue (int)","Spin % (int)","Pulse % (int)"}, {}, {} },
+    { "Water Surface",    0xFF44AACC, 1, 1, 8, 0, {"Object (unwired = auto)","Red (int)","Green (int)","Blue (int)","Alpha (int)","Foam (0/1)","Ripples (0/1)","Glints (0/1)"}, {}, {} },
+    { "Water Splash",     0xFF44AACC, 1, 1, 6, 0, {"Splash (0/1)","Drops (int)","Power % (int)","Ring Life (frames)","Swim Foam (0/1)","Swim Period (frames)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1478,6 +1482,8 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::AimBall:       desc = "Aims the pokeball throw — drive from On Key HELD. While held: a dotted arc + white floor reticle preview the shot, L-stick X turns the aim, L-stick Y sets the distance (Dist Min..Max, starting at Dist Default). Freeze Aim (default 1) locks player movement while aiming. Aim Clip (unwired = keep the current anim) holds that rig pose for the whole aim. Release the key into an On Key Released -> Throw Ball to fire; letting go with no Throw Ball wired just cancels the aim. Without these nodes the system is fully dormant."; break;
     case VsNodeType::PhysicalClash: desc = "Arms the PHYSICAL clash (wire from On Start): when the player's Quick Attack dash and the enemy's dash meet head-on within Meet Radius, both fighters lock nose-to-nose and a pressure QTE begins — random face-button prompts shove the meter toward the enemy (Push), wrong buttons bleed it back (Miss), and the AI shoves on its own cadence (Ai Push / Ai Wait). Prompts and AI both quicken as the meter nears either edge (base Window frames). Overflow a side to resolve: winner deals Enemy/Player Dmg + launches the loser with Knockback frames of shove. Cooldown frames before it can re-trigger. Without this node the system is fully dormant. x1000 pins: 60 = 0.060 meter shove."; break;
     case VsNodeType::LockReticle:   desc = "Draws the lock-on reticle (wire from On Start): while the camera is locked (Lock On node), a pulsing double-ring — counter-rotating outer + tight inner, additive glow — is drawn at the locked target's feet so the lock stays readable as the target wanders. Size % scales the rings (100 = default), Red/Green/Blue set the color (default gold 255/200/80), Spin % scales the rotation speed and Pulse % the breathing amount (0 = static ring). Without this node no reticle ever draws."; break;
+    case VsNodeType::WaterSurface:  desc = "Configures the WATER SURFACE material (wire from On Start). The runtime redraws the water mesh semi-transparent after the rigs (so anything underwater shows through tinted), plus a breathing rim foam band, a travelling ripple + calm-pond wave shimmer, and pulsing sun glints. Object picks WHICH placed mesh is the water (wire an Object node); unwired = auto-detect (first perfectly-flat, untextured, vertex-colored mesh — the pre-node behavior); wire a constant -1 to turn the water surface off entirely. Red/Green/Blue/Alpha set the surface tint (defaults 115/190/230/140 = the light-blue pond). Foam / Ripples / Glints (0/1) toggle each surface layer. Without this node the hardcoded auto-detect + default look still runs — the node just overrides it."; break;
+    case VsNodeType::WaterSplash:   desc = "Configures the water SPLASH DETECTION (wire from On Start). The runtime tracks every NPC + the player against the water surface: crossing it (leap out / dive in) spawns a splash — two expanding foam rings + a burst of camera-facing droplets that fall back and 'plip' — and anything swimming just below the surface sheds steady bob-foam rings. Splash (0/1) toggles the surface-cross bursts; Drops = droplets per burst (default 10, pool 48); Power % scales the burst velocity (default 100); Ring Life = the main splash ring's lifetime in frames (default 34; the tight inner ring scales with it); Swim Foam (0/1) toggles the bob-foam; Swim Period = frames between bob-foam rings (default 26). Detection itself always runs off the Water Surface mesh — without this node the default splash feel applies."; break;
     case VsNodeType::TogglePause:   desc = "Flips the global scene pause (drive from On Key Pressed(Start)). 'On Paused' fires the frame it pauses, 'On Unpaused' the frame it resumes — wire Show/Hide HUD + a Play Sound to each. While paused the runtime freezes the WHOLE scene (player, enemy AI, projectiles, animations) and only the key-pressed graph runs, so this node can still resume it. Self-gated: won't toggle during a cutscene (afn_cam_cut_active) or once a fighter is dead (afn_health <= 0)."; break;
     case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
     case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
@@ -28081,6 +28087,36 @@ void FrameTick(float dt)
                         "    //   finds the locked NPC's slot and draws the pulsing counter-rotating double\n"
                         "    //   ring (additive, depth-read) at its feet using the pins above.\n"
                         "    // afn_lret_on = 0 (no node) -> the render is fully dormant.");
+                    break;
+                }
+                case VsNodeType::WaterSurface: {
+                    editorCode = "// Water surface material config (wire from On Start) — overrides the auto-detect + default look";
+                    setActionFunc(infoNode, "_water_surface",
+                        "    afn_wf_obj = <Object (unwired = auto)>;          // sprite instance carrying the water; -2 = auto-detect, -1 = off\n"
+                        "    afn_wf_r = <Red (int)>; afn_wf_g = <Green (int)>; afn_wf_b = <Blue (int)>; afn_wf_a = <Alpha (int)>;\n"
+                        "    afn_wf_foam = <Foam (0/1)>; afn_wf_ripples = <Ripples (0/1)>; afn_wf_glints = <Glints (0/1)>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // wf_init: afn_wf_obj >= 0 -> that instance IS the water (else auto-detect: first\n"
+                        "    //   flat untextured vertex-colored mesh); welds the rim + walks the shoreline loop.\n"
+                        "    // draw_mesh SKIPS the water mesh; wf_render redraws it AFTER rigs as a translucent\n"
+                        "    //   fan tinted (r,g,b,a), then foam band / ripple+waves / glints per the 0/1 toggles.\n"
+                        "    // Changing afn_wf_obj re-runs wf_init next frame (the pond can move per scene).");
+                    break;
+                }
+                case VsNodeType::WaterSplash: {
+                    editorCode = "// Water splash detection config (wire from On Start) — surface-cross bursts + swim foam";
+                    setActionFunc(infoNode, "_water_splash",
+                        "    afn_wf_splash = <Splash (0/1)>;                  // surface-cross splash bursts on/off\n"
+                        "    afn_wf_drops = <Drops (int)>;                    // droplets per burst (pool 48)\n"
+                        "    afn_wf_drop_pow = <Power % (int)>;               // burst velocity % (100 = default)\n"
+                        "    afn_wf_ring_life = <Ring Life (frames)>;         // main splash ring life (inner ring scales)\n"
+                        "    afn_wf_swim = <Swim Foam (0/1)>; afn_wf_swim_period = <Swim Period (frames)>;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // wf_touch (every NPC + player, per frame): inside the loop + crossing s_wfY flips\n"
+                        "    //   was-above -> if (afn_wf_splash) two wf_ring_spawn (life = ring_life, ring_life*0.76)\n"
+                        "    //   + wf_drop_burst(drops, pow * drop_pow/100). Droplets fall (gravity), die at the\n"
+                        "    //   surface with a 'plip' ring. Swimming below s_wfY sheds a bob-foam ring every\n"
+                        "    //   afn_wf_swim_period frames while afn_wf_swim.");
                     break;
                 }
                 case VsNodeType::AimBall: {
